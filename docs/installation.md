@@ -30,7 +30,7 @@ Add to your `.opencode/package.json`:
 ```json
 {
   "dependencies": {
-    "opencode-working-memory": "github:yourusername/opencode-working-memory"
+    "opencode-working-memory": "github:sdwolf4103/opencode-working-memory"
   },
   "plugins": [
     "opencode-working-memory"
@@ -50,7 +50,7 @@ npm install
 Clone the repository:
 
 ```bash
-git clone https://github.com/yourusername/opencode-working-memory.git
+git clone https://github.com/sdwolf4103/opencode-working-memory.git
 cd opencode-working-memory
 npm install
 ```

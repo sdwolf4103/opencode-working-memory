@@ -12,16 +12,16 @@
     "ai-agent",
     "llm"
   ],
-  "author": "Your Name <your.email@example.com>",
+  "author": "sdwolf4103",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/yourusername/opencode-working-memory.git"
+    "url": "git+https://github.com/sdwolf4103/opencode-working-memory.git"
   },
   "bugs": {
-    "url": "https://github.com/yourusername/opencode-working-memory/issues"
+    "url": "https://github.com/sdwolf4103/opencode-working-memory/issues"
   },
-  "homepage": "https://github.com/yourusername/opencode-working-memory#readme",
+  "homepage": "https://github.com/sdwolf4103/opencode-working-memory#readme",
   "peerDependencies": {
     "@opencode-ai/plugin": "^1.2.0"
   },

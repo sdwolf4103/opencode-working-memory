@@ -26,7 +26,7 @@ Paste this into Claude Code, Cursor, or any AI agent:
 
 ```
 Install opencode-working-memory plugin by following:
-https://raw.githubusercontent.com/yourusername/opencode-working-memory/main/docs/installation.md
+https://raw.githubusercontent.com/sdwolf4103/opencode-working-memory/main/docs/installation.md
 ```
 
 **Option B: Manual setup**
@@ -230,8 +230,8 @@ Contributions welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md) first.
 ## Support
 
 - 📖 [Documentation](docs/)
-- 🐛 [Report Issues](https://github.com/yourusername/opencode-working-memory/issues)
-- 💬 [Discussions](https://github.com/yourusername/opencode-working-memory/discussions)
+- 🐛 [Report Issues](https://github.com/sdwolf4103/opencode-working-memory/issues)
+- 💬 [Discussions](https://github.com/sdwolf4103/opencode-working-memory/discussions)
 
 ## Credits
 

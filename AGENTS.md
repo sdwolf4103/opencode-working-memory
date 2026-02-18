@@ -14,7 +14,7 @@ Written in **TypeScript** for the OpenCode agent environment.
 
 ```bash
 # For development
-git clone https://github.com/yourusername/opencode-working-memory.git
+git clone https://github.com/sdwolf4103/opencode-working-memory.git
 cd opencode-working-memory
 npm install
 
