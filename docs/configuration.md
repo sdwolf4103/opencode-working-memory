@@ -68,9 +68,8 @@ const POOL_MAX_ITEMS = 50;  // Hard limit on pool size
 
 ```typescript
 const PRESSURE_THRESHOLDS = {
-  moderate: 70,  // Warning appears in system prompt
-  high: 85,      // Aggressive pruning activates
-  critical: 95,  // Intervention sent to agent
+  moderate: 75,  // Warning appears in system prompt
+  high: 90,      // Aggressive pruning activates + intervention sent
 };
 ```
 

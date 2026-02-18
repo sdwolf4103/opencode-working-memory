@@ -178,28 +178,7 @@ The plugin exposes these tools to your OpenCode agent:
 
 ## Configuration (Optional)
 
-The plugin works great with zero configuration. But if you want to customize:
-
-Create `~/.config/opencode/working-memory.json`:
-
-```json
-{
-  "storage_governance": {
-    "tool_output_max_files": 300,
-    "tool_output_max_age_ms": 604800000,
-    "sweep_interval": 20
-  },
-  "memory_pressure": {
-    "thresholds": {
-      "moderate": 0.75,
-      "high": 0.90,
-      "critical": 0.95
-    }
-  }
-}
-```
-
-See [Configuration Guide](docs/configuration.md) for all options.
+The plugin works great with zero configuration. To customize behavior, modify the constants at the top of `index.ts`. See the [Configuration Guide](docs/configuration.md) for all tunable options.
 
 ## Requirements
 
@@ -211,19 +190,16 @@ See [Configuration Guide](docs/configuration.md) for all options.
 
 MIT License - see [LICENSE](LICENSE) file for details.
 
-## Contributing
-
-Contributions welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md) first.
-
 ## Support
 
 - 📖 [Documentation](docs/)
 - 🐛 [Report Issues](https://github.com/sdwolf4103/opencode-working-memory/issues)
-- 💬 [Discussions](https://github.com/sdwolf4103/opencode-working-memory/discussions)
 
 ## Credits
 
 Inspired by the needs of real-world OpenCode usage and built to solve actual pain points in AI-assisted development.
+
+> This project is not affiliated with or endorsed by the OpenCode team.
 
 ---
 

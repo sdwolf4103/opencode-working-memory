@@ -1,16 +1,11 @@
 /**
  * Working Memory Plugin for OpenCode
- * 
- * Provides a three-tier memory system to delay/avoid compaction:
+ *
+ * Four-tier memory architecture:
  * 1. Core Memory - Persistent goal/progress/context blocks (always in-context)
  * 2. Working Memory - Auto-managed session-relevant information
  * 3. Smart Pruning - Content-aware tool output compression
  * 4. Memory Pressure Monitoring - Context usage tracking with adaptive warnings
- * 
- * Phase 1: Core Memory Foundation (MVP) - ✅ COMPLETED
- * Phase 2: Smart Pruning System - ✅ COMPLETED
- * Phase 3: Working Memory Auto-Management - ✅ COMPLETED
- * Phase 4: Memory Pressure Monitoring - ✅ COMPLETED
  */
 
 import type { Plugin } from "@opencode-ai/plugin";
@@ -46,7 +41,7 @@ const CORE_MEMORY_LIMITS = {
 };
 
 // ============================================================================
-// Phase 2: Smart Pruning Types
+// Smart Pruning Types
 // ============================================================================
 
 type PruningStrategy =
@@ -72,7 +67,7 @@ type CachedToolOutput = {
 };
 
 // ============================================================================
-// Phase 3: Working Memory Types (Slot-based Architecture)
+// Working Memory Types (Slot-based Architecture)
 // ============================================================================
 
 type WorkingMemory = {
@@ -128,7 +123,7 @@ const WORKING_MEMORY_LIMITS = {
 };
 
 // ============================================================================
-// Storage Governance (Layer 1 + Layer 2)
+// Storage Governance
 // ============================================================================
 
 const STORAGE_GOVERNANCE = {
@@ -138,7 +133,7 @@ const STORAGE_GOVERNANCE = {
 };
 
 // ============================================================================
-// Phase 4: Memory Pressure Monitoring
+// Memory Pressure Monitoring
 // ============================================================================
 
 type PressureLevel = "safe" | "moderate" | "high";
@@ -169,7 +164,6 @@ type ModelPressureInfo = {
   updatedAt: string;
 };
 
-// Compaction tracking (preserved from Phase 4 initial work)
 type CompactionLog = {
   sessionID: string;
   compactionCount: number;
@@ -501,12 +495,11 @@ async function updateCoreMemoryBlock(
 }
 
 // ============================================================================
-// Storage Governance Functions (Layer 1 + Layer 2)
+// Storage Governance Functions
 // ============================================================================
 
 /**
- * Layer 1: Clean up all artifacts for a deleted session
- * Called when session.deleted event is received
+ * Clean up all artifacts for a deleted session.
  */
 async function cleanupSessionArtifacts(
   directory: string,
@@ -532,9 +525,9 @@ async function cleanupSessionArtifacts(
 }
 
 /**
- * Layer 2: Sweep tool-output cache for a session
- * Remove files older than TTL and enforce max file count
- * Returns number of files deleted
+ * Sweep tool-output cache for a session.
+ * Removes files older than TTL and enforces max file count.
+ * Returns number of files deleted.
  */
 async function sweepToolOutputCache(
   directory: string,
@@ -606,7 +599,7 @@ async function sweepToolOutputCache(
 }
 
 // ============================================================================
-// Phase 2: Smart Pruning System
+// Smart Pruning System
 // ============================================================================
 
 /**
@@ -775,7 +768,7 @@ async function getCachedToolOutput(
 }
 
 // ============================================================================
-// Phase 3: Working Memory Auto-Management
+// Working Memory Auto-Management
 // ============================================================================
 
 /**
@@ -1057,9 +1050,7 @@ function getTopItemsForPrompt(
 }
 
 /**
- * Compress file paths to save space in system prompt
- * /Users/sd_wo/opencode/packages/opencode/src/foo.ts → ~/opencode/pkg/opencode/src/foo.ts
- * /Users/sd_wo/work/opencode-plugins/.opencode/plugins/foo.ts → ~/work/oc-plugins/.opencode/plugins/foo.ts
+ * Compress file paths to save space in system prompt.
  */
 function compressPath(content: string): string {
   const homeDir = process.env.HOME || '/Users/' + (process.env.USER || 'user');
@@ -1145,7 +1136,7 @@ function getWorkingMemoryItemCount(memory: WorkingMemory): number {
 }
 
 // ============================================================================
-// Phase 4: Compaction Tracking and State Preservation
+// Compaction Tracking
 // ============================================================================
 
 /**
@@ -1207,14 +1198,13 @@ async function recordCompaction(
 // ============================================================================
 
 /**
- * Calculate usable tokens using OpenCode's exact compaction formula
- * Reference: packages/opencode/src/session/compaction.ts:32-48
+ * Calculate usable tokens using OpenCode's compaction formula.
  */
 function calculateUsableTokens(model: {
   limit: { context: number; input?: number; output: number };
 }): number {
-  const OUTPUT_TOKEN_MAX = 32_000; // From transform.ts:21
-  const COMPACTION_BUFFER = 20_000; // From compaction.ts:33
+  const OUTPUT_TOKEN_MAX = 32_000;
+  const COMPACTION_BUFFER = 20_000;
 
   const maxOutputTokens = Math.min(
     model.limit.output || OUTPUT_TOKEN_MAX,
@@ -1222,7 +1212,6 @@ function calculateUsableTokens(model: {
   );
   const reserved = Math.min(COMPACTION_BUFFER, maxOutputTokens);
 
-  // Match compaction.ts:42-47
   const usable = model.limit.input
     ? model.limit.input - reserved
     : model.limit.context - maxOutputTokens;
@@ -1231,11 +1220,7 @@ function calculateUsableTokens(model: {
 }
 
 /**
- * Calculate pressure level based on current tokens and usable limit
- * 
- * Thresholds:
- * - 0.75 (75%): moderate - show reminder in prompt
- * - 0.9 (90%): high - send intervention message
+ * Calculate pressure level based on current tokens and usable limit.
  */
 function calculatePressureLevel(
   currentTokens: number,
@@ -1334,18 +1319,14 @@ async function loadModelPressureInfo(
 }
 
 /**
- * Calculate total tokens by querying OpenCode's session database
- * This is more reliable than relying on hook-provided messages
- * 
- * Note: Only looks at last 10 messages to avoid stale data from before compaction
+ * Calculate total tokens by querying OpenCode's session database.
  */
 async function calculateTotalTokensFromDB(sessionID: string): Promise<number> {
   try {
     const { execSync } = await import("child_process");
     const dbPath = join(process.env.HOME || "~", ".local/share/opencode/opencode.db");
     
-    // Get tokens.total from most recent assistant message (last 10 to be safe)
-    // Use MAX to handle edge cases, but limit to recent messages to avoid stale pre-compaction data
+    // Get tokens.total from most recent assistant message
     const query = `
       SELECT json_extract(data, '$.tokens.total') as total
       FROM message 
@@ -1365,11 +1346,7 @@ async function calculateTotalTokensFromDB(sessionID: string): Promise<number> {
 }
 
 /**
- * Generate pressure warning text for system prompt injection
- * 
- * Design principles:
- * - MODERATE (75%): gentle nudge, no interruption
- * - HIGH (90%): actionable commands, pause and persist state
+ * Generate pressure warning text for system prompt injection.
  */
 function generatePressureWarning(info: ModelPressureInfo): string {
   const { current, calculated } = info;
@@ -1387,13 +1364,8 @@ function generatePressureWarning(info: ModelPressureInfo): string {
 }
 
 /**
- * Send proactive intervention message when HIGH pressure detected (90%)
- * 
- * This sends an independent system message to the session immediately, so the agent
- * receives the task in the queue without interrupting current work. The agent will
- * process it automatically when available.
- * 
- * Design: Use promptAsync() which returns 204 immediately, non-blocking.
+ * Send a proactive intervention message when HIGH pressure (90%) is detected.
+ * Uses promptAsync() which returns immediately (non-blocking).
  */
 async function sendPressureInterventionMessage(
   client: any,
@@ -1421,17 +1393,14 @@ REQUIRED ACTIONS:
 After completing these actions, you may resume your current task.`;
   
   try {
-    // Use promptAsync to send message without waiting for response
     await client.session.promptAsync({
       path: { id: sessionID },
       body: {
         parts: [{
           type: "text",
-          // Send actionable content directly (not log-style placeholder)
           text: systemPrompt,
         }],
-        // Keep system unset so the intervention is visible as a normal prompt
-        noReply: false, // We want agent to respond with actions
+        noReply: false,
       },
     });
   } catch (error) {
@@ -1440,36 +1409,32 @@ After completing these actions, you may resume your current task.`;
 }
 
 /**
- * Get pressure-aware pruning config based on current memory pressure
- * HYPER-AGGRESSIVE MODE: pressure >= 0.90 enforces strict limits
+ * Get pressure-aware pruning config based on current memory pressure.
  */
 function getPressureAwarePruningConfig(pressure: number): {
   maxLines: number;
   maxChars: number;
   aggressiveTruncation: boolean;
 } {
-  // HIGH (>= 90%): Hyper-Aggressive Mode
   if (pressure >= 0.90) {
     return {
-      maxLines: 2000, // Hard limit: 2000 lines max
-      maxChars: 100_000, // ~25k tokens max per tool output
-      aggressiveTruncation: true, // Force truncation, no exceptions
-    };
-  }
-
-  // MODERATE (>= 75%): Aggressive Mode
-  if (pressure >= 0.75) {
-    return {
-      maxLines: 5000,
-      maxChars: 200_000, // ~50k tokens max
+      maxLines: 2000,
+      maxChars: 100_000,
       aggressiveTruncation: true,
     };
   }
 
-  // SAFE (< 75%): Normal Mode
+  if (pressure >= 0.75) {
+    return {
+      maxLines: 5000,
+      maxChars: 200_000,
+      aggressiveTruncation: true,
+    };
+  }
+
   return {
     maxLines: 10_000,
-    maxChars: 400_000, // ~100k tokens max
+    maxChars: 400_000,
     aggressiveTruncation: false,
   };
 }
@@ -1524,34 +1489,14 @@ export default async function WorkingMemoryPlugin(
   const { directory, client } = input;
 
   return {
-    // ========================================================================
-    // Phase 1: Inject Core Memory and Working Memory into System Prompt
-    // Phase 4: Inject Memory Pressure Warnings & Calculate Tokens from DB
-    // Phase 4.5: Proactive Pressure Intervention (NEW)
-    // Phase 5: Core Memory Usage Guidelines (AGENTS.md Enhancement)
-    // 
-    // Dual-System Approach:
-    // 1. PASSIVE WARNING (existing): Injected into next turn's system prompt
-    //    - Always present as reminder in system context
-    //    - 1-turn delay but persistent
-    // 
-    // 2. PROACTIVE INTERVENTION (new): Immediate async message sent to queue
-    //    - No delay, sent immediately when HIGH (90%) detected
-    //    - Agent processes when available (non-blocking)
-    //    - Only sent when pressure level increases (avoids spam)
-    // 
-    // 3. USAGE GUIDELINES (new): Injected after AGENTS.md, before core_memory
-    //    - Teaches agent how to use core_memory blocks correctly
-    //    - Prevents storing API docs/type definitions in memory
-    //    - Ensures goal/progress/context stay focused on current task
-    // ========================================================================
+    // Inject core memory usage guidelines, pressure warnings, core memory,
+    // and working memory into the system prompt each turn.
     "experimental.chat.system.transform": async (hookInput, output) => {
       const { sessionID, model } = hookInput;
       if (!sessionID) return;
 
-      // Phase 5: Inject Core Memory Usage Guidelines
-      // This enhances AGENTS.md (if exists) with plugin-specific instructions
-      // Inserted early so it's read before agent sees <core_memory> block
+      // Inject core memory usage guidelines.
+      // Inserted before <core_memory> so the agent reads guidance first.
       const coreMemoryGuidelines = `
 # Core Memory Usage Guidelines
 
@@ -1613,8 +1558,8 @@ The Working Memory Plugin provides persistent core_memory blocks. **USE THEM COR
 
       output.system.push(coreMemoryGuidelines);
 
-      // Phase 4: Check for memory pressure and inject warning
-      // Skip warning if model just changed (avoids false alarms with different limits)
+      // Check for memory pressure and inject warning into system prompt.
+      // Skip if model just changed (avoids false alarms with different limits).
       const prevPressure = await loadModelPressureInfo(directory, sessionID);
       const modelChanged = model && prevPressure && prevPressure.modelID !== model.id;
       
@@ -1625,7 +1570,7 @@ The Working Memory Plugin provides persistent core_memory blocks. **USE THEM COR
         }
       }
 
-      // Phase 4: Calculate current token usage from DB and update pressure
+      // Calculate current token usage from DB and update pressure info.
       if (model) {
         const totalTokens = await calculateTotalTokensFromDB(sessionID);
         
@@ -1640,14 +1585,12 @@ The Working Memory Plugin provides persistent core_memory blocks. **USE THEM COR
           totalTokens
         );
         
-        // Save for next turn's warning injection
+        // Save for next turn's warning injection.
         await saveModelPressureInfo(directory, updatedPressure);
         
-        // Phase 4.5: Proactive Intervention - Send immediate message if HIGH (90%)
-        // This is better than waiting for next turn's passive warning
-        // The message goes into the queue and agent processes it when available
+        // Send proactive intervention if pressure just crossed into HIGH.
         if (updatedPressure.current.level === "high") {
-          // Only send if pressure increased from previous level (avoid spam)
+          // Only send if pressure just escalated (avoid repeated spam).
           const shouldSend = !prevPressure || 
             prevPressure.current.level === "safe" || 
             prevPressure.current.level === "moderate";
@@ -1658,7 +1601,7 @@ The Working Memory Plugin provides persistent core_memory blocks. **USE THEM COR
         }
       }
 
-      // Phase 1: Core memory
+      // Core memory
       const coreMemory = await loadCoreMemory(directory, sessionID);
       if (coreMemory) {
         const hasContent =
@@ -1672,7 +1615,7 @@ The Working Memory Plugin provides persistent core_memory blocks. **USE THEM COR
         }
       }
 
-      // Phase 1: Working memory
+      // Working memory
       const workingMemory = await loadWorkingMemory(directory, sessionID);
       if (workingMemory && getWorkingMemoryItemCount(workingMemory) > 0) {
         const workingPrompt = renderWorkingMemoryPrompt(workingMemory);
@@ -1682,15 +1625,11 @@ The Working Memory Plugin provides persistent core_memory blocks. **USE THEM COR
       }
     },
 
-    // ========================================================================
-    // Phase 2 & 3: Cache Tool Outputs and Auto-Extract to Working Memory
-    // Storage Governance Layer 2: Tool Output Cache Sweep Trigger
-    // ========================================================================
+    // Cache tool outputs, auto-extract to working memory, and sweep cache periodically.
     "tool.execute.after": async (hookInput, hookOutput) => {
       const { sessionID, callID, tool: toolName, args } = hookInput;
       const { output: toolOutput } = hookOutput;
 
-      // Phase 2: Cache the full output for later smart pruning
       await cacheToolOutput(directory, {
         callID,
         sessionID,
@@ -1699,22 +1638,19 @@ The Working Memory Plugin provides persistent core_memory blocks. **USE THEM COR
         timestamp: Date.now(),
       });
 
-      // Phase 3: Auto-extract to working memory
       const extractedItems = extractFromToolOutput(toolName, toolOutput);
       for (const item of extractedItems) {
         await addToWorkingMemory(directory, sessionID, item);
       }
 
-      // Storage Governance Layer 2: Sweep tool-output cache every N calls
+      // Sweep tool-output cache every N tool calls.
       const memory = await loadWorkingMemory(directory, sessionID);
       if (memory && memory.eventCounter % STORAGE_GOVERNANCE.sweepInterval === 0) {
         await sweepToolOutputCache(directory, sessionID);
       }
     },
 
-    // ========================================================================
-    // Phase 2: Apply Smart Pruning to Messages (Pressure-Aware)
-    // ========================================================================
+    // Apply smart pruning to compacted tool outputs (pressure-aware).
     "experimental.chat.messages.transform": async (hookInput, output) => {
       const sessionID = output.messages[0]?.info?.sessionID || "";
       
@@ -1754,11 +1690,8 @@ The Working Memory Plugin provides persistent core_memory blocks. **USE THEM COR
       }
     },
 
-    // ========================================================================
-    // Storage Governance Layer 1: Session Deletion Event Handler
-    // ========================================================================
+    // Clean up all session artifacts on session deletion.
     event: async ({ event }) => {
-      // Listen for session.deleted events and cleanup all artifacts
       if (event.type === "session.deleted") {
         const sessionID = event.properties?.info?.id;
         if (sessionID) {
@@ -1767,9 +1700,7 @@ The Working Memory Plugin provides persistent core_memory blocks. **USE THEM COR
       }
     },
 
-    // ========================================================================
-    // Phase 4: Preserve State Before Compaction
-    // ========================================================================
+    // Preserve working memory state before compaction.
     "experimental.session.compacting": async (hookInput, output) => {
       const { sessionID } = hookInput;
 
@@ -1808,7 +1739,7 @@ The Working Memory Plugin provides persistent core_memory blocks. **USE THEM COR
         }
       }
 
-      // SSOT Bridge: Inject OpenCode native Todos from DB into compaction context
+      // Inject pending OpenCode todos into compaction context.
       try {
         const { execSync } = await import("child_process");
         const dbPath = join(process.env.HOME || "~", ".local/share/opencode/opencode.db");
@@ -1849,9 +1780,7 @@ The Working Memory Plugin provides persistent core_memory blocks. **USE THEM COR
       }
     },
 
-    // ========================================================================
     // Tools
-    // ========================================================================
     tool: {
       core_memory_update: tool({
         description: `Update persistent core memory blocks that survive compaction.
