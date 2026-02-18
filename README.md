@@ -178,10 +178,16 @@ The plugin exposes these tools to your OpenCode agent:
 
 ## Does working-memory system increase token usage? It depends.
 
-- **If you use the DCP plugin and regularly start new sessions:** this plugin can add some overhead, because each new session starts fresh and the memory system setup may not pay off before the session ends.
-- **If you stay in one long-running session and often hit token limits/auto-compaction:** this plugin is a strong fit, because repeated compaction can make the agent forget goals, active folders, and where critical files are.
+It depends on your workflow.
 
-The plugin solves this by preserving high-value memory (goal/progress/context + working memory signals) so your agent can inherit context from its "previous self" with minimal token cost, reducing repeated mistakes and the extra tokens those mistakes consume.
+- 🧹 **Clean Slate user** (for example, using DCP and frequently restarting sessions)
+  - ⚠️ Yes, it might add slight overhead.
+  - Because you keep starting fresh, automated memory persistence does not get enough time to pay off.
+
+- 🚀 **Long Haul user** (staying in one session until token limits/compaction hit)
+  - ✅ This plugin is a token saver.
+  - Without it, compaction can cause the agent to lose the goal, forget active files, or make wrong assumptions, which creates correction loops.
+  - By preserving high-value context (Goals, Progress, Active Files), the agent inherits its previous state quickly. The small memory-prompt cost avoids the larger cost of the agent getting lost.
 
 ## Configuration (Optional)
 
