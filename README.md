@@ -20,9 +20,9 @@ Stop losing context across compactions. Stop watching your agent repeat the same
 
 ### For Humans
 
-**Option A: Let an LLM do it**
+**Option A: Let an AI agent do it**
 
-Paste this into Claude Code, Cursor, or any AI agent:
+Paste this into any AI agent:
 
 ```
 Install opencode-working-memory plugin by following:
@@ -58,30 +58,17 @@ That's it! The plugin is now active.
 
 ## Quick Start
 
-The plugin works automatically once installed. No configuration needed.
+Once installed, ask your agent:
 
-**Use the tools:**
-
-```bash
-# Update persistent memory
-opencode run "use core_memory_update to set my goal"
-
-# Read current memory state  
-opencode run "use core_memory_read to show me what you remember"
-
-# Add important items to working memory
-opencode run "use working_memory_add to remember this file path"
+```
+What tools do you have available for memory management?
 ```
 
-**The agent will automatically:**
-- Track memory pressure and warn when approaching compaction
-- Preserve important context during compaction
-- Clean up old tool-output cache files every 20 tool calls
-- Remove artifacts when sessions are deleted
+The agent will discover `core_memory_update`, `core_memory_read`, `working_memory_add`, and other tools automatically. No further setup needed.
 
 ## Features
 
-### 🧠 Core Memory (Phase 1)
+### 🧠 Core Memory
 
 Persistent blocks that survive conversation resets:
 
@@ -89,7 +76,7 @@ Persistent blocks that survive conversation resets:
 - **progress** (2000 chars) - What's done, in-progress, next steps
 - **context** (1500 chars) - Key file paths, conventions, patterns
 
-### 💡 Working Memory (Phase 3)
+### 💡 Working Memory
 
 Auto-extracts and ranks important information:
 
@@ -98,7 +85,7 @@ Auto-extracts and ranks important information:
 - Exponential decay keeps memory fresh
 - FIFO limits prevent bloat
 
-### 🎯 Memory Pressure Monitoring (Phase 4)
+### 🎯 Memory Pressure Monitoring
 
 Real-time token tracking from session database:
 
@@ -106,16 +93,15 @@ Real-time token tracking from session database:
 - Proactive intervention messages when pressure is high
 - Pressure-aware smart pruning (adapts compression based on pressure)
 
-### 🧹 Storage Governance (Phase 5)
+### 🧹 Storage Governance
 
 Prevents unbounded disk growth:
 
-- **Layer 1**: Auto-cleanup on session deletion (all artifacts removed)
-- **Layer 2**: Active cache management (max 300 files/session, 7-day TTL)
-- Triggers every 20 tool calls
+- Auto-cleanup on session deletion (all artifacts removed)
+- Active cache management (max 300 files/session, 7-day TTL)
 - Silent background operation
 
-### 📊 Smart Pruning (Phase 2)
+### 📊 Smart Pruning
 
 Intelligent tool output compression:
 
