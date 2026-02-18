@@ -137,38 +137,38 @@ The plugin exposes these tools to your OpenCode agent:
 ## How It Works
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│  Core Memory (Always Visible)                          │
-│  ┌─────────┬──────────┬──────────┐                    │
-│  │  Goal   │ Progress │ Context  │                    │
-│  └─────────┴──────────┴──────────┘                    │
-└─────────────────────────────────────────────────────────┘
-                          ↓
-┌─────────────────────────────────────────────────────────┐
-│  Working Memory (Auto-Extracted)                        │
-│  ┌──────────────────┬──────────────────┐              │
-│  │  Slots (FIFO)    │  Pool (Ranked)   │              │
-│  │  • errors        │  • file-paths    │              │
-│  │  • decisions     │  • recent        │              │
-│  │  • todos         │  • mentions      │              │
-│  │  • dependencies  │  • decay score   │              │
-│  └──────────────────┴──────────────────┘              │
-└─────────────────────────────────────────────────────────┘
-                          ↓
-┌─────────────────────────────────────────────────────────┐
-│  Memory Pressure Monitor                                │
-│  • Tracks tokens from session DB                       │
-│  • Warns at 75% / 90% / 95%                           │
-│  • Sends proactive interventions                       │
-│  • Adjusts pruning aggressiveness                      │
-└─────────────────────────────────────────────────────────┘
-                          ↓
-┌─────────────────────────────────────────────────────────┐
-│  Storage Governance                                     │
-│  • Session deletion → cleanup all artifacts            │
-│  • Every 20 calls → sweep old cache (300 max, 7d TTL) │
-│  • Silent background operation                         │
-└─────────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────┐
+│  Core Memory (Always Visible)                            │
+│  ┌─────────┬──────────┬──────────┐                      │
+│  │  Goal   │ Progress │ Context  │                      │
+│  └─────────┴──────────┴──────────┘                      │
+└───────────────────────────────────────────────────────────┘
+                            ↓
+┌───────────────────────────────────────────────────────────┐
+│  Working Memory (Auto-Extracted)                          │
+│  ┌──────────────────┬──────────────────┐                │
+│  │  Slots (FIFO)    │  Pool (Ranked)   │                │
+│  │  • errors        │  • file-paths    │                │
+│  │  • decisions     │  • recent        │                │
+│  │  • todos         │  • mentions      │                │
+│  │  • dependencies  │  • decay score   │                │
+│  └──────────────────┴──────────────────┘                │
+└───────────────────────────────────────────────────────────┘
+                            ↓
+┌───────────────────────────────────────────────────────────┐
+│  Memory Pressure Monitor                                  │
+│  • Tracks tokens from session DB                         │
+│  • Warns at 75% / 90% / 95%                              │
+│  • Sends proactive interventions                         │
+│  • Adjusts pruning aggressiveness                        │
+└───────────────────────────────────────────────────────────┘
+                            ↓
+┌───────────────────────────────────────────────────────────┐
+│  Storage Governance                                       │
+│  • Session deletion → cleanup all artifacts              │
+│  • Every 20 calls → sweep old cache (300 max, 7d TTL)   │
+│  • Silent background operation                           │
+└───────────────────────────────────────────────────────────┘
 ```
 
 ## Why This Plugin?
