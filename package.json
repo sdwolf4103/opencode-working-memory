@@ -4,6 +4,10 @@
   "description": "Advanced four-tier memory architecture for OpenCode with intelligent pressure monitoring and auto-storage governance",
   "type": "module",
   "main": "index.ts",
+  "scripts": {
+    "build": "node -e \"console.log('No build step required: OpenCode loads index.ts directly')\"",
+    "typecheck": "tsc --noEmit"
+  },
   "keywords": [
     "opencode",
     "plugin",
@@ -24,6 +28,11 @@
   "homepage": "https://github.com/sdwolf4103/opencode-working-memory#readme",
   "peerDependencies": {
     "@opencode-ai/plugin": "^1.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "bun-types": "^1.2.21",
+    "typescript": "^5.9.2"
   },
   "engines": {
     "node": ">=18.0.0"

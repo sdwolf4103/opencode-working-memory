@@ -14,7 +14,7 @@
  */
 
 import type { Plugin } from "@opencode-ai/plugin";
-import { tool } from "@opencode-ai/plugin";
+import { tool } from "@opencode-ai/plugin/tool";
 import { existsSync } from "fs";
 import { mkdir, readFile, writeFile, readdir, stat, unlink, rm } from "fs/promises";
 import { join } from "path";
@@ -1253,7 +1253,7 @@ function calculatePressureLevel(
  */
 function calculateModelPressure(
   sessionID: string,
-  model: { id: string; provider: string; limit: { context: number; input?: number; output: number } },
+  model: { id: string; providerID: string; limit: { context: number; input?: number; output: number } },
   totalTokens: number
 ): ModelPressureInfo {
   const OUTPUT_TOKEN_MAX = 32_000;
@@ -1272,7 +1272,7 @@ function calculateModelPressure(
   return {
     sessionID,
     modelID: model.id,
-    providerID: model.provider,
+    providerID: model.providerID,
     limits: {
       context: model.limit.context,
       input: model.limit.input,
@@ -1634,7 +1634,7 @@ The Working Memory Plugin provides persistent core_memory blocks. **USE THEM COR
           sessionID,
           {
             id: model.id,
-            provider: model.provider,
+            providerID: model.providerID,
             limit: model.limit,
           },
           totalTokens
@@ -1868,14 +1868,12 @@ Operations:
 These blocks are ALWAYS visible to you in every message, even after compaction.
 Update them regularly to maintain continuity across long conversations.`,
         args: {
-          block: tool.schema.enum(["goal", "progress", "context"], {
-            description:
-              "Which memory block to update (goal/progress/context)",
-          }),
-          operation: tool.schema.enum(["replace", "append"], {
-            description:
-              "Whether to replace the entire block or append to it",
-          }),
+          block: tool.schema.enum(["goal", "progress", "context"]).describe(
+              "Which memory block to update (goal/progress/context)"
+            ),
+          operation: tool.schema.enum(["replace", "append"]).describe(
+              "Whether to replace the entire block or append to it"
+            ),
           content: tool.schema
             .string()
             .max(5000)
