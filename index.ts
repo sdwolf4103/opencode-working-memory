@@ -1122,7 +1122,7 @@ Recent session context (auto-managed, sorted by relevance):
 
 ${sections.join("\n\n")}
 
-(${totalItems} items shown, updated: ${new Date(memory.updatedAt).toLocaleTimeString()})
+(${totalItems} items shown)
 </working_memory>
 `.trim();
 }
@@ -1463,18 +1463,9 @@ ${context.value || "[No project context set - add relevant file paths, conventio
 </context>
 
 IMPORTANT: These blocks persist across conversation resets and compaction.
-Update them regularly using core_memory_update tool when:
-- Goals change or new objectives are identified
-- Significant progress is made or tasks are completed
-- Important project context is discovered (file structures, patterns, conventions)
+Update them regularly using core_memory_update tool. When blocks approach their character limits, compress or rephrase content.
 
-When memory blocks approach their character limits, compress or rephrase content.
-
-**Usage Discipline** (see Core Memory Usage Guidelines above for details):
-- goal: ONE specific task, not project-wide goals
-- progress: Checklist format, NO line numbers/commit hashes/API signatures
-- context: ONLY files you're currently working on, NO type definitions/function signatures
-- NEVER store: API docs, library types, function signatures (read source instead)
+To mark decisions for automatic capture into working memory, write inline: [Decision: chose X over Y because Z]
 </core_memory>
 `.trim();
 }
@@ -1488,75 +1479,35 @@ export default async function WorkingMemoryPlugin(
 ): Promise<ReturnType<Plugin>> {
   const { directory, client } = input;
 
+  // Cache for sub-agent detection — avoids repeated API calls per session.
+  // Maps sessionID → parentID (string) or null (root session).
+  const sessionParentCache = new Map<string, string | null>();
+
+  async function isSubAgent(sessionID: string): Promise<boolean> {
+    if (sessionParentCache.has(sessionID)) {
+      return sessionParentCache.get(sessionID) !== null;
+    }
+    try {
+      const result = await client.session.get({ path: { id: sessionID } });
+      const parentID = result.data?.parentID ?? null;
+      sessionParentCache.set(sessionID, parentID);
+      return parentID !== null;
+    } catch {
+      // If we can't determine, assume it's NOT a sub-agent (safe default).
+      sessionParentCache.set(sessionID, null);
+      return false;
+    }
+  }
+
   return {
-    // Inject core memory usage guidelines, pressure warnings, core memory,
-    // and working memory into the system prompt each turn.
+    // Inject pressure warnings, core memory, and working memory into the system prompt each turn.
+    // Core memory usage guidelines are in the core_memory_update tool description instead.
     "experimental.chat.system.transform": async (hookInput, output) => {
       const { sessionID, model } = hookInput;
       if (!sessionID) return;
 
-      // Inject core memory usage guidelines.
-      // Inserted before <core_memory> so the agent reads guidance first.
-      const coreMemoryGuidelines = `
-# Core Memory Usage Guidelines
-
-The Working Memory Plugin provides persistent core_memory blocks. **USE THEM CORRECTLY**:
-
-## goal block (1000 chars)
-**Purpose**: ONE specific task you're working on RIGHT NOW
-
-✅ **GOOD Examples**:
-- "Fix pruning bug where items with relevanceScore <0.01 are incorrectly excluded"
-- "Add new tool: working_memory_search to query pool items by keyword"
-- "Investigate why pressure warnings not showing in system prompt"
-
-❌ **BAD Examples**:
-- "Complete Phase 1-4 development and testing" (too broad, likely already done)
-- "Build a working memory system for OpenCode" (project-level goal, not task-level)
-
-## progress block (2000 chars)
-**Purpose**: Checklist of done/in-progress/blocked items + key decisions
-
-✅ **GOOD Examples**:
-- "✅ Found bug in applyDecay() line 856\\n⏳ Testing fix with gamma=0.85\\n❓ Need to verify edge case: score=0"
-- "✅ Phase 1-3 complete\\n⏳ Phase 4 intervention testing\\n⚠️ BLOCKED: Need promptAsync docs"
-
-❌ **BAD Examples**:
-- "Function sendPressureInterventionMessage() @ working-memory.ts:L1286-1354" (line numbers useless after edits)
-- "Commit 2f42f1b implemented promptAsync integration" (commit hash irrelevant)
-- "API: client.session.promptAsync({ path: {id}, body: {...} })" (API signature, not progress)
-
-## context block (1500 chars)
-**Purpose**: Files you're CURRENTLY editing + key patterns/conventions
-
-✅ **GOOD Examples**:
-- "Editing: .opencode/plugins/working-memory.ts (main plugin, 1706 lines)\\nRelated: WORKING_MEMORY.md, TEST_PHASE4.md"
-- "Key paths: .opencode/memory-core/ (persistent blocks), memory-working/ (session data)"
-- "Pattern: All async file ops use mkdir({recursive:true}) before writeFile"
-
-❌ **BAD Examples**:
-- "OpenCode SDK types: TextPartInput = { type: 'text', text: string, synthetic?: boolean }" (type definition)
-- "Function signature: async function loadCoreMemory(directory: string, sessionID: string): Promise<CoreMemory | null>" (function signature)
-- "Method client.session.promptAsync() returns 204 No Content" (API behavior, read docs instead)
-
-## ⚠️ NEVER Store in Core Memory
-- API documentation (read source/docs when needed)
-- Type definitions from libraries (import them)
-- Function signatures (read source code)
-- Implementation details (belong in code comments)
-- Completed goals (clear them immediately)
-
-## ✅ Update Core Memory Immediately When
-- **Starting new task**: Clear old goal, set new specific goal
-- **Making progress**: Update progress checklist (keep concise)
-- **Switching files**: Update context with current working files
-- **Task completed**: Clear goal/progress, set next task
-- **Approaching char limit**: Compress or remove outdated info
-
-**Remember**: Core Memory is your **working scratchpad**, not a reference manual.
-`.trim();
-
-      output.system.push(coreMemoryGuidelines);
+      // Sub-agents are short-lived — skip entire memory system.
+      if (await isSubAgent(sessionID)) return;
 
       // Check for memory pressure and inject warning into system prompt.
       // Skip if model just changed (avoids false alarms with different limits).
@@ -1630,6 +1581,9 @@ The Working Memory Plugin provides persistent core_memory blocks. **USE THEM COR
       const { sessionID, callID, tool: toolName, args } = hookInput;
       const { output: toolOutput } = hookOutput;
 
+      // Sub-agents don't need working memory tracking.
+      if (await isSubAgent(sessionID)) return;
+
       await cacheToolOutput(directory, {
         callID,
         sessionID,
@@ -1654,6 +1608,9 @@ The Working Memory Plugin provides persistent core_memory blocks. **USE THEM COR
     "experimental.chat.messages.transform": async (hookInput, output) => {
       const sessionID = output.messages[0]?.info?.sessionID || "";
       
+      // Sub-agents don't need smart pruning.
+      if (sessionID && await isSubAgent(sessionID)) return;
+
       // Load current pressure info to get pressure-aware pruning config
       const currentPressure = await loadModelPressureInfo(directory, sessionID);
       const pressureLevel = currentPressure?.current?.pressure || 0;
@@ -1690,6 +1647,30 @@ The Working Memory Plugin provides persistent core_memory blocks. **USE THEM COR
       }
     },
 
+    // Auto-capture [Decision: ...] markers from agent responses.
+    "experimental.text.complete": async (hookInput, output) => {
+      const { sessionID } = hookInput;
+      if (!sessionID) return;
+
+      // Sub-agents are short-lived — skip decision tracking.
+      if (await isSubAgent(sessionID)) return;
+
+      // Extract all [Decision: ...] markers from the completed text.
+      const matches = output.text.matchAll(/\[Decision:\s*([^\]]+)\]/gi);
+      for (const match of matches) {
+        const description = match[1].trim();
+        if (!description) continue;
+
+        await addToWorkingMemory(directory, sessionID, {
+          type: "decision",
+          content: description,
+          source: "auto:text",
+          timestamp: Date.now(),
+          mentions: 1,
+        });
+      }
+    },
+
     // Clean up all session artifacts on session deletion.
     event: async ({ event }) => {
       if (event.type === "session.deleted") {
@@ -1703,6 +1684,9 @@ The Working Memory Plugin provides persistent core_memory blocks. **USE THEM COR
     // Preserve working memory state before compaction.
     "experimental.session.compacting": async (hookInput, output) => {
       const { sessionID } = hookInput;
+
+      // Sub-agents don't need compaction support.
+      if (await isSubAgent(sessionID)) return;
 
       // Preserve only the most relevant working memory items
       const preservedItems = await preserveRelevantItems(directory, sessionID, 0.5);
@@ -1795,7 +1779,48 @@ Operations:
 - append: Add content to the end of the block (automatically adds newline)
 
 These blocks are ALWAYS visible to you in every message, even after compaction.
-Update them regularly to maintain continuity across long conversations.`,
+Update them regularly to maintain continuity across long conversations.
+
+---
+
+## Usage Guidelines
+
+### goal block (1000 chars)
+**Purpose**: ONE specific task you're working on RIGHT NOW
+
+✅ GOOD: "Fix pruning bug where items with relevanceScore <0.01 are incorrectly excluded"
+✅ GOOD: "Add new tool: working_memory_search to query pool items by keyword"
+❌ BAD: "Complete Phase 1-4 development and testing" (too broad, likely already done)
+❌ BAD: "Build a working memory system for OpenCode" (project-level goal, not task-level)
+
+### progress block (2000 chars)
+**Purpose**: Checklist of done/in-progress/blocked items + key decisions
+
+✅ GOOD: "✅ Found bug in applyDecay()\\n⏳ Testing fix with gamma=0.85\\n❓ Need to verify edge case"
+✅ GOOD: "✅ Phase 1-3 complete\\n⏳ Phase 4 intervention testing\\n⚠️ BLOCKED: Need promptAsync docs"
+❌ BAD: "Function foo() @ file.ts:L1286-1354" (line numbers useless after edits)
+❌ BAD: "Commit 2f42f1b implemented X" (commit hash irrelevant)
+❌ BAD: "API: client.session.promptAsync({ ... })" (API signatures belong in source)
+
+### context block (1500 chars)
+**Purpose**: Files you're CURRENTLY editing + key patterns/conventions
+
+✅ GOOD: "Editing: src/plugin.ts\\nKey paths: .opencode/memory-core/ (persistent blocks)"
+✅ GOOD: "Pattern: All async file ops use mkdir({recursive:true}) before writeFile"
+❌ BAD: Type definitions, function signatures, API docs (read source/docs instead)
+
+### NEVER store in core memory
+- API documentation (read source/docs when needed)
+- Type definitions from libraries (import them)
+- Function signatures (read source code)
+- Completed goals (clear them immediately)
+
+### Update core memory immediately when
+- Starting new task: clear old goal, set new specific goal
+- Making progress: update progress checklist (keep concise)
+- Switching files: update context with current working files
+- Task completed: clear goal/progress, set next task
+- Approaching char limit: compress or remove outdated info`,
         args: {
           block: tool.schema.enum(["goal", "progress", "context"]).describe(
               "Which memory block to update (goal/progress/context)"
