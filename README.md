@@ -138,36 +138,36 @@ The plugin exposes these tools to your OpenCode agent:
 
 ```
 ┌───────────────────────────────────────────────────────────┐
-│  Core Memory (Always Visible)                            │
-│  ┌─────────┬──────────┬──────────┐                      │
-│  │  Goal   │ Progress │ Context  │                      │
-│  └─────────┴──────────┴──────────┘                      │
+│  Core Memory (Always Visible)                             │
+│  ┌─────────┬──────────┬──────────┐                        │
+│  │  Goal   │ Progress │ Context  │                        │
+│  └─────────┴──────────┴──────────┘                        │
 └───────────────────────────────────────────────────────────┘
                             ↓
 ┌───────────────────────────────────────────────────────────┐
 │  Working Memory (Auto-Extracted)                          │
-│  ┌──────────────────┬──────────────────┐                │
-│  │  Slots (FIFO)    │  Pool (Ranked)   │                │
-│  │  • errors        │  • file-paths    │                │
-│  │  • decisions     │  • recent        │                │
-│  │  • todos         │  • mentions      │                │
-│  │  • dependencies  │  • decay score   │                │
-│  └──────────────────┴──────────────────┘                │
+│  ┌──────────────────┬──────────────────┐                  │
+│  │  Slots (FIFO)    │  Pool (Ranked)   │                  │
+│  │  • errors        │  • file-paths    │                  │
+│  │  • decisions     │  • recent        │                  │
+│  │  • todos         │  • mentions      │                  │
+│  │  • dependencies  │  • decay score   │                  │
+│  └──────────────────┴──────────────────┘                  │
 └───────────────────────────────────────────────────────────┘
                             ↓
 ┌───────────────────────────────────────────────────────────┐
 │  Memory Pressure Monitor                                  │
-│  • Tracks tokens from session DB                         │
-│  • Warns at 75% (moderate) / 90% (high)                  │
-│  • Sends proactive interventions                         │
-│  • Adjusts pruning aggressiveness                        │
+│  • Tracks tokens from session DB                          │
+│  • Warns at 75% (moderate) / 90% (high)                   │
+│  • Sends proactive interventions                          │
+│  • Adjusts pruning aggressiveness                         │
 └───────────────────────────────────────────────────────────┘
                             ↓
 ┌───────────────────────────────────────────────────────────┐
 │  Storage Governance                                       │
-│  • Session deletion → cleanup all artifacts              │
-│  • Every 20 calls → sweep old cache (300 max, 7d TTL)   │
-│  • Silent background operation                           │
+│  • Session deletion → cleanup all artifacts               │
+│  • Every 20 calls → sweep old cache (300 max, 7d TTL)     │
+│  • Silent background operation                            │
 └───────────────────────────────────────────────────────────┘
 ```
 
