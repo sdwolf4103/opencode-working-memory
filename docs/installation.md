@@ -1,19 +1,8 @@
 # Installation Guide
 
-## Prerequisites
-
-- **OpenCode** 1.0.0 or higher
-- **Node.js** 18+ with npm
-
 ## Quick Install
 
-### Option 1: Install from npm (Recommended)
-
-```bash
-npm install -g opencode-working-memory
-```
-
-Then add to your `~/.config/opencode/opencode.json`:
+Add to your `~/.config/opencode/opencode.json`:
 
 ```json
 {
@@ -21,54 +10,25 @@ Then add to your `~/.config/opencode/opencode.json`:
 }
 ```
 
-Restart OpenCode. Done.
+Restart OpenCode. The plugin is downloaded and installed automatically — no `npm install` needed.
 
-### Option 2: Install from GitHub
+> **Note**: The correct key is `plugin` (singular), not `plugins`.
 
-```bash
-npm install -g github:sdwolf4103/opencode-working-memory
-```
+## For LLM Agents
 
-Then add to `~/.config/opencode/opencode.json`:
-
-```json
-{
-  "plugin": ["opencode-working-memory"]
-}
-```
-
-### Option 3: Local Development Install
-
-Clone the repository:
-
-```bash
-git clone https://github.com/sdwolf4103/opencode-working-memory.git
-cd opencode-working-memory
-npm install
-npm link
-```
-
-Then reference it in `~/.config/opencode/opencode.json`:
-
-```json
-{
-  "plugin": ["opencode-working-memory"]
-}
-```
+1. Edit `~/.config/opencode/opencode.json`
+2. Add `"opencode-working-memory"` to the `plugin` array
+3. Verify the config file was saved correctly
 
 ## Verification
 
-After installation, start an OpenCode session and run:
+After restarting OpenCode, ask your agent:
 
 ```
-core_memory_update goal "Test installation"
+Use core_memory_read to show me what you remember
 ```
 
-You should see a success message. Check `.opencode/memory-core/` in your project directory for the session file.
-
-## Configuration
-
-The plugin works out-of-the-box with sensible defaults. For advanced configuration, see [configuration.md](./configuration.md).
+If the tool responds, the plugin is active.
 
 ## Troubleshooting
 
@@ -76,10 +36,10 @@ The plugin works out-of-the-box with sensible defaults. For advanced configurati
 
 **Symptom**: No `core_memory_update` tool available
 
-**Solution**: 
-1. Check `~/.config/opencode/opencode.json` includes `"opencode-working-memory"` in `"plugin": []` array
-2. Verify `npm install -g opencode-working-memory` completed successfully
-3. Restart OpenCode session
+**Solution**:
+1. Check `~/.config/opencode/opencode.json` uses `"plugin"` (not `"plugins"`)
+2. Restart OpenCode to trigger automatic installation
+3. Check OpenCode logs for any download errors
 
 ### Memory Files Not Created
 
@@ -87,25 +47,22 @@ The plugin works out-of-the-box with sensible defaults. For advanced configurati
 
 **Solution**:
 1. Ensure OpenCode has write permissions in project directory
-2. Check plugin hooks are registered (look for "Working Memory Plugin" in session logs)
-3. Trigger memory operations (e.g., use `core_memory_update` tool)
+2. Trigger memory operations (e.g., use `core_memory_update` tool)
 
 ### Type Errors During Development
 
-**Symptom**: TypeScript errors when modifying plugin
+**Symptom**: TypeScript errors when modifying the plugin source
 
 **Solution**:
-1. Ensure `@opencode-ai/plugin` is installed: `npm install @opencode-ai/plugin`
-2. Run type checking: `npm run typecheck`
+1. Run `npm install` to install dev dependencies
+2. Run `npm run typecheck` to check for errors
 3. See [AGENTS.md](../AGENTS.md) for code style guidelines
 
 ## Uninstallation
 
-```bash
-npm uninstall -g opencode-working-memory
-```
+Remove `"opencode-working-memory"` from the `plugin` array in `~/.config/opencode/opencode.json`.
 
-Remove `"opencode-working-memory"` from `~/.config/opencode/opencode.json`. Memory files in `.opencode/memory-*` will persist unless manually deleted.
+Memory files in `.opencode/memory-*` will persist unless manually deleted.
 
 ## Next Steps
 

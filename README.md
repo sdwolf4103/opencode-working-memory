@@ -18,8 +18,6 @@ Stop losing context across compactions. Stop watching your agent repeat the same
 
 ## Installation
 
-### For Humans
-
 **Option A: Let an AI agent do it**
 
 Paste this into any AI agent:
@@ -31,13 +29,7 @@ https://raw.githubusercontent.com/sdwolf4103/opencode-working-memory/main/docs/i
 
 **Option B: Manual setup**
 
-1. Install the package:
-
-```bash
-npm install -g opencode-working-memory
-```
-
-2. Add to your `~/.config/opencode/opencode.json`:
+Add to your `~/.config/opencode/opencode.json`:
 
 ```json
 {
@@ -45,16 +37,13 @@ npm install -g opencode-working-memory
 }
 ```
 
-3. Restart OpenCode
-
-That's it! The plugin is now active.
+Restart OpenCode. The plugin is downloaded and installed automatically.
 
 ### For LLM Agents
 
-1. Run `npm install -g opencode-working-memory`
-2. Read the OpenCode configuration file at `~/.config/opencode/opencode.json`
-3. Add `"opencode-working-memory"` to the `plugin` array
-4. Verify installation by checking the config file
+1. Edit `~/.config/opencode/opencode.json`
+2. Add `"opencode-working-memory"` to the `plugin` array
+3. Verify the config file was saved correctly
 
 ## Quick Start
 
