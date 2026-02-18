@@ -1,5 +1,5 @@
 {
-  "name": "oh-my-memory",
+  "name": "opencode-working-memory",
   "version": "1.0.0",
   "description": "Advanced four-tier memory architecture for OpenCode with intelligent pressure monitoring and auto-storage governance",
   "type": "module",
@@ -10,19 +10,18 @@
     "memory",
     "context-management",
     "ai-agent",
-    "llm",
-    "oh-my-opencode"
+    "llm"
   ],
   "author": "Your Name <your.email@example.com>",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/yourusername/oh-my-memory.git"
+    "url": "git+https://github.com/yourusername/opencode-working-memory.git"
   },
   "bugs": {
-    "url": "https://github.com/yourusername/oh-my-memory/issues"
+    "url": "https://github.com/yourusername/opencode-working-memory/issues"
   },
-  "homepage": "https://github.com/yourusername/oh-my-memory#readme",
+  "homepage": "https://github.com/yourusername/opencode-working-memory#readme",
   "peerDependencies": {
     "@opencode-ai/plugin": "^1.2.0"
   },

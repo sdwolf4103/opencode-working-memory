@@ -1,8 +1,8 @@
-# AGENTS.md - Oh My Memory Development Guide
+# AGENTS.md - OpenCode Working Memory Plugin Development Guide
 
 ## Project Overview
 
-**Oh My Memory** provides a four-tier memory architecture for AI agents:
+The **OpenCode Working Memory Plugin** provides a four-tier memory architecture for AI agents:
 - **Core Memory** - Persistent blocks (goal/progress/context) that survive compaction
 - **Working Memory** - Session-scoped context with slots (error/decision/todo/dependency) and memory pool
 - **Smart Pruning** - Automatic filtering of tool outputs before adding to context
@@ -14,8 +14,8 @@ Written in **TypeScript** for the OpenCode agent environment.
 
 ```bash
 # For development
-git clone https://github.com/yourusername/oh-my-memory.git
-cd oh-my-memory
+git clone https://github.com/yourusername/opencode-working-memory.git
+cd opencode-working-memory
 npm install
 
 # For usage (see README.md)
@@ -40,7 +40,7 @@ Tests are manually verified through OpenCode sessions:
 
 ### File Structure
 ```
-oh-my-memory/
+opencode-working-memory/
 ├── index.ts               # Main plugin (1700+ lines)
 ├── package.json           # Plugin manifest
 ├── tsconfig.json          # TypeScript config
