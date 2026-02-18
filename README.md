@@ -58,13 +58,20 @@ That's it! The plugin is now active.
 
 ## Quick Start
 
-Once installed, ask your agent:
+The plugin works automatically once installed. No configuration needed.
 
-```
-What tools do you have available for memory management?
-```
+**Try these commands:**
 
-The agent will discover `core_memory_update`, `core_memory_read`, `working_memory_add`, and other tools automatically. No further setup needed.
+```bash
+# Update persistent memory
+opencode run "use core_memory_update to set my goal"
+
+# Read current memory state
+opencode run "use core_memory_read to show me what you remember"
+
+# Add important items to working memory
+opencode run "use working_memory_add to remember this file path"
+```
 
 ## Features
 
