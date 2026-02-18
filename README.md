@@ -1,6 +1,6 @@
-# OpenCode Working Memory Plugin
+# Oh My Memory
 
-[![npm version](https://img.shields.io/npm/v/opencode-working-memory.svg)](https://www.npmjs.com/package/opencode-working-memory)
+[![npm version](https://img.shields.io/npm/v/oh-my-memory.svg)](https://www.npmjs.com/package/oh-my-memory)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 **Advanced four-tier memory architecture that keeps your AI agent sharp, focused, and never forgets what matters.**
@@ -25,8 +25,8 @@ Stop losing context across compactions. Stop watching your agent repeat the same
 Paste this into Claude Code, Cursor, or any AI agent:
 
 ```
-Install opencode-working-memory plugin by following:
-https://raw.githubusercontent.com/yourusername/opencode-working-memory/main/docs/installation.md
+Install oh-my-memory plugin by following:
+https://raw.githubusercontent.com/yourusername/oh-my-memory/main/docs/installation.md
 ```
 
 **Option B: Manual setup**
@@ -35,7 +35,7 @@ https://raw.githubusercontent.com/yourusername/opencode-working-memory/main/docs
 
 ```json
 {
-  "plugin": ["opencode-working-memory"]
+  "plugin": ["oh-my-memory"]
 }
 ```
 
@@ -46,7 +46,7 @@ That's it! The plugin is now active.
 ### For LLM Agents
 
 1. Read the OpenCode configuration file at `~/.config/opencode/opencode.json`
-2. Add `"opencode-working-memory"` to the `plugin` array
+2. Add `"oh-my-memory"` to the `plugin` array
 3. Verify installation by checking the config file
 
 ## Quick Start

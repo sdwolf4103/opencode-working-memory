@@ -10,7 +10,7 @@
 ### Option 1: Install from npm (Recommended)
 
 ```bash
-npm install opencode-working-memory
+npm install oh-my-memory
 ```
 
 Then add to your `.opencode/package.json`:
@@ -18,7 +18,7 @@ Then add to your `.opencode/package.json`:
 ```json
 {
   "plugins": [
-    "opencode-working-memory"
+    "oh-my-memory"
   ]
 }
 ```
@@ -30,10 +30,10 @@ Add to your `.opencode/package.json`:
 ```json
 {
   "dependencies": {
-    "opencode-working-memory": "github:yourusername/opencode-working-memory"
+    "oh-my-memory": "github:yourusername/oh-my-memory"
   },
   "plugins": [
-    "opencode-working-memory"
+    "oh-my-memory"
   ]
 }
 ```
@@ -50,8 +50,8 @@ npm install
 Clone the repository:
 
 ```bash
-git clone https://github.com/yourusername/opencode-working-memory.git
-cd opencode-working-memory
+git clone https://github.com/yourusername/oh-my-memory.git
+cd oh-my-memory
 npm install
 ```
 
@@ -59,7 +59,7 @@ Link to your OpenCode project:
 
 ```bash
 cd /path/to/your/project/.opencode
-npm link /path/to/opencode-working-memory
+npm link /path/to/oh-my-memory
 ```
 
 Add to `.opencode/package.json`:
@@ -67,7 +67,7 @@ Add to `.opencode/package.json`:
 ```json
 {
   "plugins": [
-    "opencode-working-memory"
+    "oh-my-memory"
   ]
 }
 ```
@@ -119,7 +119,7 @@ The plugin works out-of-the-box with sensible defaults. For advanced configurati
 
 ```bash
 cd .opencode
-npm uninstall opencode-working-memory
+npm uninstall oh-my-memory
 ```
 
 Remove from `.opencode/package.json` plugins array. Memory files in `.opencode/memory-*` will persist unless manually deleted.
