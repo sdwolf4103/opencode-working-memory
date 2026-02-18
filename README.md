@@ -95,7 +95,7 @@ Auto-extracts and ranks important information:
 
 Real-time token tracking from session database:
 
-- Monitors context window usage (75% → 90% → 95% thresholds)
+- Monitors context window usage (75% moderate → 90% high)
 - Proactive intervention messages when pressure is high
 - Pressure-aware smart pruning (adapts compression based on pressure)
 
@@ -158,7 +158,7 @@ The plugin exposes these tools to your OpenCode agent:
 ┌───────────────────────────────────────────────────────────┐
 │  Memory Pressure Monitor                                  │
 │  • Tracks tokens from session DB                         │
-│  • Warns at 75% / 90% / 95%                              │
+│  • Warns at 75% (moderate) / 90% (high)                  │
 │  • Sends proactive interventions                         │
 │  • Adjusts pruning aggressiveness                        │
 └───────────────────────────────────────────────────────────┘

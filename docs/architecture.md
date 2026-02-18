@@ -27,8 +27,8 @@ The Working Memory Plugin implements a **four-tier memory architecture** designe
                               ↓
 ┌─────────────────────────────────────────────────────────────┐
 │                 TIER 4: PRESSURE MONITORING                  │
-│  Tracks context usage: safe → moderate → high → critical    │
-│  Thresholds: 70% | 85% | 95%                                │
+│  Tracks context usage: safe → moderate → high               │
+│  Thresholds: 75% (moderate) | 90% (high)                    │
 │  Intervention: Sends promptAsync() with full visible prompt │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -83,18 +83,18 @@ Reduce context bloat by filtering tool outputs before they enter the conversatio
 
 ### Pruning Modes
 
-#### Normal Mode (Pressure < 85%)
+#### Normal Mode (Pressure < 75%)
 - Remove file/directory listings > 50 lines
 - Truncate verbose tool outputs
 - Keep first/last 30 lines of long outputs
 - Preserve error messages and key information
 
-#### Aggressive Mode (85% ≤ Pressure < 95%)
+#### Aggressive Mode (75% ≤ Pressure < 90%)
 - Threshold drops to 30 lines
 - More aggressive truncation (first/last 20 lines)
 - Filter repetitive content
 
-#### Hyper-Aggressive Mode (Pressure ≥ 95%)
+#### Hyper-Aggressive Mode (Pressure ≥ 90%)
 - Threshold drops to 15 lines
 - Keep only first/last 10 lines
 - Maximum compression
@@ -209,10 +209,9 @@ Where:
 
 | Level | Threshold | Behavior |
 |-------|-----------|----------|
-| **safe** | < 70% | Normal operation |
-| **moderate** | 70-84% | Warning in system prompt |
-| **high** | 85-94% | Aggressive pruning + warning |
-| **critical** | ≥ 95% | Hyper-aggressive pruning + intervention |
+| **safe** | < 75% | Normal operation |
+| **moderate** | 75-89% | Warning in system prompt + aggressive pruning |
+| **high** | ≥ 90% | Hyper-aggressive pruning + intervention |
 
 ### Pressure Storage
 
@@ -221,7 +220,7 @@ Where:
   ```typescript
   {
     sessionID: string;
-    level: "safe" | "moderate" | "high" | "critical";
+    level: "safe" | "moderate" | "high";
     percentage: number;
     visiblePromptChars: number;
     estimatedLimit: 180000;
@@ -232,7 +231,7 @@ Where:
 
 ### Intervention Mechanism
 
-When pressure reaches **critical** (≥95%):
+When pressure reaches **high** (≥90%):
 1. Plugin sends `promptAsync()` message to agent
 2. Message includes full visible prompt for review
 3. Agent can compress core memory, clear working memory, or continue

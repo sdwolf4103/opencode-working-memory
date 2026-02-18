@@ -91,13 +91,13 @@ const ESTIMATED_CONTEXT_LIMIT = 180000;  // Conservative estimate (chars)
 ### Line Thresholds
 
 ```typescript
-// Normal mode (pressure < 85%)
+// Normal mode (pressure < 75%)
 const PRUNE_THRESHOLD_NORMAL = 50;
 
-// Aggressive mode (85% ≤ pressure < 95%)
+// Aggressive mode (75% ≤ pressure < 90%)
 const PRUNE_THRESHOLD_AGGRESSIVE = 30;
 
-// Hyper-aggressive mode (pressure ≥ 95%)
+// Hyper-aggressive mode (pressure ≥ 90%)
 const PRUNE_THRESHOLD_HYPER = 15;
 ```
 
