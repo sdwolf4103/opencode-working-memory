@@ -1,6 +1,6 @@
 {
   "name": "opencode-working-memory",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "Advanced four-tier memory architecture for OpenCode with intelligent pressure monitoring and auto-storage governance",
   "type": "module",
   "main": "index.ts",

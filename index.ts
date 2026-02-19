@@ -249,8 +249,7 @@ async function loadCoreMemory(
   try {
     const content = await readFile(path, "utf-8");
     return JSON.parse(content) as CoreMemory;
-  } catch (error) {
-    console.error("Failed to load core memory:", error);
+  } catch {
     return null;
   }
 }
@@ -356,8 +355,7 @@ async function loadWorkingMemory(
     }
     
     return data as WorkingMemory;
-  } catch (error) {
-    console.error("Failed to load working memory:", error);
+  } catch {
     return null;
   }
 }
