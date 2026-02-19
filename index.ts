@@ -1319,28 +1319,34 @@ async function loadModelPressureInfo(
 }
 
 /**
- * Calculate total tokens by querying OpenCode's session database.
+ * Calculate total tokens by querying session messages via OpenCode SDK.
+ * Cross-platform compatible (no sqlite3 CLI dependency).
  */
-async function calculateTotalTokensFromDB(sessionID: string): Promise<number> {
+async function calculateTotalTokensFromDB(
+  client: ReturnType<typeof import("@opencode-ai/sdk").createOpencodeClient>,
+  sessionID: string
+): Promise<number> {
   try {
-    const { execSync } = await import("child_process");
-    const dbPath = join(process.env.HOME || "~", ".local/share/opencode/opencode.db");
+    const result = await client.session.messages({
+      path: { id: sessionID }
+    });
     
-    // Get tokens.total from most recent assistant message
-    const query = `
-      SELECT json_extract(data, '$.tokens.total') as total
-      FROM message 
-      WHERE session_id = '${sessionID}' 
-        AND json_extract(data, '$.role') = 'assistant'
-        AND json_extract(data, '$.tokens.total') IS NOT NULL
-      ORDER BY time_created DESC
-      LIMIT 1;
-    `;
+    if (!result.data) return 0;
     
-    const result = execSync(`sqlite3 "${dbPath}" "${query}"`, { encoding: "utf-8" }).trim();
-    return parseInt(result) || 0;
+    // Find the most recent assistant message with non-zero tokens.
+    // API returns messages oldest-first, so we scan backwards.
+    for (let i = result.data.length - 1; i >= 0; i--) {
+      const { info } = result.data[i];
+      if (info.role !== "assistant") continue;
+      
+      // Total = input + output + reasoning + cache.read
+      const total = info.tokens.input + info.tokens.output + info.tokens.reasoning + info.tokens.cache.read;
+      if (total > 0) return total;
+    }
+    
+    return 0;
   } catch (error) {
-    console.error("[working-memory] Failed to query tokens from DB:", error);
+    // Silent — API call failed
     return 0;
   }
 }
@@ -1523,7 +1529,7 @@ export default async function WorkingMemoryPlugin(
 
       // Calculate current token usage from DB and update pressure info.
       if (model) {
-        const totalTokens = await calculateTotalTokensFromDB(sessionID);
+        const totalTokens = await calculateTotalTokensFromDB(client, sessionID);
         
         // Calculate pressure with current model
         const updatedPressure = calculateModelPressure(
@@ -1725,26 +1731,14 @@ export default async function WorkingMemoryPlugin(
 
       // Inject pending OpenCode todos into compaction context.
       try {
-        const { execSync } = await import("child_process");
-        const dbPath = join(process.env.HOME || "~", ".local/share/opencode/opencode.db");
+        const result = await client.session.todo({
+          path: { id: sessionID }
+        });
         
-        const query = `
-          SELECT content, status, priority 
-          FROM todo 
-          WHERE session_id = '${sessionID}' 
-            AND status != 'completed'
-          ORDER BY position ASC;
-        `;
-        
-        const result = execSync(`sqlite3 "${dbPath}" "${query.replace(/\n/g, ' ')}"`, { 
-          encoding: "utf-8" 
-        }).trim();
-        
-        if (result) {
-          const todos = result.split('\n').map(line => {
-            const [content, status, priority] = line.split('|');
-            return `- [${status}] ${content} (${priority})`;
-          });
+        if (result.data) {
+          const todos = result.data
+            .filter(todo => todo.status !== "completed")
+            .map(todo => `- [${todo.status}] ${todo.content} (${todo.priority})`);
           
           if (todos.length > 0) {
             output.context.push(
@@ -1753,7 +1747,7 @@ export default async function WorkingMemoryPlugin(
           }
         }
       } catch (error) {
-        console.error("[working-memory] Failed to inject todos from DB:", error);
+        // Silent — API call failed
       }
 
       // Inform about preserved working memory
