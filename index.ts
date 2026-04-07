@@ -1592,11 +1592,11 @@ export default async function WorkingMemoryPlugin(
         callID,
         sessionID,
         tool: toolName,
-        fullOutput: toolOutput,
+        fullOutput: toolOutput ?? "",
         timestamp: Date.now(),
       });
 
-      const extractedItems = extractFromToolOutput(toolName, toolOutput);
+      const extractedItems = extractFromToolOutput(toolName, toolOutput ?? "");
       for (const item of extractedItems) {
         await addToWorkingMemory(directory, sessionID, item);
       }
@@ -1636,7 +1636,7 @@ export default async function WorkingMemoryPlugin(
               part.callID || ""
             );
 
-            if (cached) {
+            if (cached && cached.fullOutput) {
               const rule = getPruningRule(part.tool || "");
               const smartPruned = applySmartPruning(cached.fullOutput, rule, pruningConfig);
 
