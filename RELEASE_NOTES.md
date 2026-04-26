@@ -1,5 +1,45 @@
 # Release Notes
 
+## 1.2.3 (2026-04-27)
+
+### Prompt Cache Optimization — Frozen Snapshot + Ephemeral Delta
+
+This release optimizes the plugin's impact on OpenCode's prompt cache, following Hermes-style architecture patterns.
+
+### Key Features
+
+- **Frozen workspace snapshot**: Workspace memory is now rendered once at session start and cached as immutable `system[1]`. No mid-session re-render that could invalidate the cache.
+- **Ephemeral hot state**: Hot session state (active files, errors) is rendered in `system[2+]`, which is excluded from the first-two-system cache control.
+- **Durable pending journal**: Explicit memories are written to both session state and a durable workspace-level pending journal, ensuring no data loss between compactions.
+- **Safe promotion**: Explicit memories are promoted from pending to workspace memory at:
+  - Next session start (before frozen snapshot)
+  - `session.compacted`
+  - `session.deleted` (before cleanup)
+
+### Architecture
+
+```
+system[0]  → OpenCode / agent header (stable cached)
+system[1] → Frozen workspace memory snapshot (stable cached)
+system[2+] → Hot session state + pending memories (dynamic, not cached)
+```
+
+### Fixed
+
+- **Hot state invalidating cache**: Active files / errors updating every tool call previously caused the entire workspace memory block to be re-hashed, killing cache efficiency.
+- **Explicit memory loss**: Without compaction, explicit memories could be lost when sessions ended without promotion.
+- **Mid-session mutation**: Explicit memories no longer mutate the running frozen snapshot; they appear as pending and are promoted safely.
+
+### Migration
+
+- One-time migration: `2026-04-27-p0-cleanup` removes stale pending journal entries older than 60 days.
+
+### Tests
+
+- **91 tests pass** (24 workspace-memory, 34 extractors, 14 plugin, 19 pending-journal)
+
+---
+
 ## 1.2.2 (2026-04-27)
 
 ### Safer Multilingual Memory Capture
