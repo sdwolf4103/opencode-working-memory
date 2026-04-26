@@ -346,3 +346,36 @@ Next steps: continue development.
   assert.equal(candidates.length, 1, "Should parse legacy XML format");
   assert.equal(candidates[0].type, "feedback");
 });
+
+test("chat system transform reuses frozen rendered workspace snapshot", async () => {
+  const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-test-"));
+
+  try {
+    const client = mockRootClient();
+    const plugin = await MemoryV2Plugin({ directory: tmpDir, client });
+
+    const output1 = { system: ["base header"] };
+    await (plugin as Record<string, Function>)["experimental.chat.system.transform"](
+      { sessionID: "snapshot-session", model: {} },
+      output1,
+    );
+
+    const firstWorkspacePrompt = output1.system.find((part: string) =>
+      part.startsWith("Workspace memory")
+    );
+
+    assert.equal(firstWorkspacePrompt, undefined,
+      "empty workspace memory should not render a prompt before any memories exist");
+
+    const output2 = { system: ["base header"] };
+    await (plugin as Record<string, Function>)["experimental.chat.system.transform"](
+      { sessionID: "snapshot-session", model: {} },
+      output2,
+    );
+
+    assert.deepEqual(output2.system, ["base header"],
+      "no compaction summary means no workspace memory prompt is added");
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});

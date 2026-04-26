@@ -162,6 +162,7 @@ export const MemoryV2Plugin: Plugin = async (input) => {
     string,
     {
       store: Awaited<ReturnType<typeof loadWorkspaceMemory>>;
+      renderedPrompt: string;
       loadedAt: number;
     }
   >();
@@ -232,24 +233,28 @@ export const MemoryV2Plugin: Plugin = async (input) => {
   }
 
   /**
-   * Get frozen workspace memory for a session.
-   * Loads from disk once per session, then caches in memory.
+   * Get frozen workspace memory snapshot for a session.
+   * Loads and renders from disk once per session, then reuses the exact rendered string.
    */
-  async function getFrozenWorkspaceMemory(
+  async function getFrozenWorkspaceMemorySnapshot(
     root: string,
     sessionID: string
-  ): Promise<Awaited<ReturnType<typeof loadWorkspaceMemory>>> {
+  ): Promise<{
+    store: Awaited<ReturnType<typeof loadWorkspaceMemory>>;
+    renderedPrompt: string;
+  }> {
     const now = Date.now();
     const cached = frozenWorkspaceMemoryCache.get(sessionID);
 
     // Cache is valid for the session lifetime
     if (cached) {
-      return cached.store;
+      return { store: cached.store, renderedPrompt: cached.renderedPrompt };
     }
 
     const store = await loadWorkspaceMemory(root);
-    frozenWorkspaceMemoryCache.set(sessionID, { store, loadedAt: now });
-    return store;
+    const renderedPrompt = renderWorkspaceMemory(store);
+    frozenWorkspaceMemoryCache.set(sessionID, { store, renderedPrompt, loadedAt: now });
+    return { store, renderedPrompt };
   }
 
   /**
@@ -271,16 +276,15 @@ export const MemoryV2Plugin: Plugin = async (input) => {
       // Process explicit user memory even on no-tool turns.
       await processLatestUserMessage(sessionID);
 
-      // Get frozen workspace memory (loaded once per session)
-      const workspaceMemory = await getFrozenWorkspaceMemory(directory, sessionID);
+      // Get frozen workspace memory snapshot (loaded and rendered once per session)
+      const workspaceSnapshot = await getFrozenWorkspaceMemorySnapshot(directory, sessionID);
 
       // Get current hot session state
       const sessionState = await loadSessionState(directory, sessionID);
 
-      // Render and inject workspace memory
-      const workspacePrompt = renderWorkspaceMemory(workspaceMemory);
-      if (workspacePrompt) {
-        output.system.push(workspacePrompt);
+      // Inject frozen workspace memory snapshot
+      if (workspaceSnapshot.renderedPrompt) {
+        output.system.push(workspaceSnapshot.renderedPrompt);
       }
 
       // Render and inject hot session state
@@ -371,11 +375,10 @@ export const MemoryV2Plugin: Plugin = async (input) => {
       // Build our private context (workspace memory, hot state, todos)
       const contextParts: string[] = [];
 
-      // 1. Frozen workspace memory
-      const workspaceMemory = await getFrozenWorkspaceMemory(directory, sessionID);
-      const workspacePrompt = renderWorkspaceMemory(workspaceMemory);
-      if (workspacePrompt) {
-        contextParts.push(workspacePrompt);
+      // 1. Frozen workspace memory snapshot
+      const workspaceSnapshot = await getFrozenWorkspaceMemorySnapshot(directory, sessionID);
+      if (workspaceSnapshot.renderedPrompt) {
+        contextParts.push(workspaceSnapshot.renderedPrompt);
       }
 
       // 2. Hot session state
