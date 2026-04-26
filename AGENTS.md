@@ -2,11 +2,11 @@
 
 ## Project Overview
 
-The **OpenCode Working Memory Plugin** provides a four-tier memory architecture for AI agents:
-- **Core Memory** - Persistent blocks (goal/progress/context) that survive compaction
-- **Working Memory** - Session-scoped context with slots (error/decision/todo/dependency) and memory pool
-- **Smart Pruning** - Automatic filtering of tool outputs before adding to context
-- **Pressure Monitoring** - Tracks context usage and triggers interventions at thresholds
+The **OpenCode Working Memory Plugin** provides a **three-layer memory architecture** for AI agents:
+
+1. **Workspace Memory** - Long-term memory that persists across sessions (decisions, project info, references)
+2. **Hot Session State** - Automatic tracking of active files, open errors, and recent decisions
+3. **Native OpenCode State** - Delegated to OpenCode's built-in todos during compaction
 
 Written in **TypeScript** for the OpenCode agent environment.
 
@@ -17,6 +17,8 @@ Written in **TypeScript** for the OpenCode agent environment.
 git clone https://github.com/sdwolf4103/opencode-working-memory.git
 cd opencode-working-memory
 npm install
+npm test
+npm run typecheck
 
 # For usage (see README.md)
 ```
@@ -30,24 +32,45 @@ npx tsc --noEmit
 ```
 
 ### Testing
-Tests are manually verified through OpenCode sessions:
 ```bash
-# 1. Load plugin in OpenCode session
-# 2. Run commands that trigger hooks (e.g., tool execution, compaction)
-# 3. Inspect .opencode/memory-core/ and .opencode/memory-working/
-# 4. Verify memory blocks appear in system prompts
+# Run all tests
+npm test
+
+# Run specific test file
+npx node --test --experimental-strip-types tests/plugin.test.ts
 ```
+
+Tests verify:
+- Error extraction false positive guards
+- Explicit memory trigger patterns
+- Negative memory request filtering
+- Compaction candidate quality gate
+- Workspace memory rendering
+- Session state tracking
 
 ### File Structure
 ```
 opencode-working-memory/
-├── index.ts               # Main plugin (1700+ lines)
-├── package.json           # Plugin manifest
-├── tsconfig.json          # TypeScript config
-├── LICENSE                # MIT license
-├── README.md              # User documentation
-├── AGENTS.md              # This file (developer guide)
-└── docs/                  # Detailed documentation
+├── index.ts               # Plugin entry point (exports PluginModule)
+├── src/
+│   ├── plugin.ts           # Main plugin implementation
+│   ├── extractors.ts       # Memory extraction logic
+│   ├── workspace-memory.ts # Workspace memory management
+│   ├── session-state.ts    # Session state tracking
+│   ├── storage.ts          # File storage utilities
+│   ├── paths.ts            # Path utilities
+│   ├── opencode.ts         # OpenCode SDK types
+│   └── types.ts            # Type definitions
+├── tests/
+│   ├── plugin.test.ts      # Plugin hook tests
+│   ├── extractors.test.ts  # Extractor tests
+│   └── workspace-memory.test.ts # Workspace memory tests
+├── package.json            # Plugin manifest
+├── tsconfig.json           # TypeScript config
+├── LICENSE                 # MIT license
+├── README.md               # User documentation
+├── AGENTS.md               # This file (developer guide)
+└── docs/                   # Detailed documentation
     ├── installation.md
     ├── architecture.md
     └── configuration.md
@@ -59,39 +82,38 @@ opencode-working-memory/
 
 ```typescript
 // ✅ REQUIRED: Full type annotations, no implicit any
-async function loadCoreMemory(
-  directory: string,
-  sessionID: string
-): Promise<CoreMemory | null>
+async function loadWorkspaceMemory(
+  workspaceKey: string
+): Promise<WorkspaceMemoryStore | null>
 
 // ❌ AVOID: Implicit any types
-async function loadCoreMemory(directory, sessionID) { }
+async function loadWorkspaceMemory(workspaceKey) { }
 ```
 
 ### Type Definitions
 
 ```typescript
 // ✅ REQUIRED: Define types at module top
-type CoreMemory = {
-  sessionID: string;
-  blocks: {
-    goal: CoreBlock;
-    progress: CoreBlock;
-    context: CoreBlock;
-  };
+export type LongTermMemoryEntry = {
+  id: string;
+  type: LongTermType;
+  text: string;
+  source: LongTermSource;
+  confidence: number;
+  status: "active" | "superseded";
+  createdAt: string;
   updatedAt: string;
 };
 
 // ✅ USE: Union types for variants (not enums)
-type PressureLevel = "safe" | "moderate" | "high" | "critical";
+export type LongTermType = "feedback" | "project" | "decision" | "reference";
+export type LongTermSource = "explicit" | "compaction" | "manual";
 
-// ✅ USE: Record<> for keyed configs
-const SLOT_CONFIG: Record<SlotType, number> = {
-  error: 3,
-  decision: 5,
-  todo: 3,
-  dependency: 3,
-};
+// ✅ USE: const assertions for limits
+export const LONG_TERM_LIMITS = {
+  maxRenderedChars: 5200,
+  maxEntries: 28,
+} as const;
 ```
 
 ### Imports & Module Organization
@@ -105,57 +127,52 @@ import { join } from "path";
 
 // 2. Third-party (OpenCode SDK)
 import type { Plugin } from "@opencode-ai/plugin";
-import { tool } from "@opencode-ai/plugin";
 
-// 3. Local modules (if any)
-// (none currently)
+// 3. Local modules
+import { loadWorkspaceMemory } from "./storage.js";
 ```
 
 ### Naming Conventions
 
 ```typescript
 // ✅ REQUIRED: camelCase for variables & functions
-const maxItems = 50;
-async function loadCoreMemory() { }
+const maxEntries = 28;
+async function loadWorkspaceMemory() { }
 
 // ✅ REQUIRED: SCREAMING_SNAKE_CASE for constants
-const CORE_MEMORY_LIMITS = { goal: 1000, progress: 2000, context: 1500 };
-const SLOT_CONFIG = { error: 3, decision: 5, todo: 3, dependency: 3 };
+const LONG_TERM_LIMITS = { maxRenderedChars: 5200, maxEntries: 28 };
+const HOT_STATE_LIMITS = { maxRenderedChars: 1200 };
 
 // ✅ REQUIRED: PascalCase for types
-type CoreMemory = { ... };
-type WorkingMemoryItem = { ... };
+type WorkspaceMemoryStore = { ... };
+type SessionState = { ... };
 
-// ✅ REQUIRED: get*/set*/load*/save* naming for file operations
-function getCoreMemoryPath(directory: string, sessionID: string): string { }
-async function loadCoreMemory(directory: string, sessionID: string): Promise<CoreMemory | null> { }
-async function saveCoreMemory(directory: string, memory: CoreMemory): Promise<void> { }
-
-// ✅ REQUIRED: ensure*/validate* for pre-checks
-async function ensureCoreMemoryDir(directory: string): Promise<void> { }
-
-// ✅ REQUIRED: Prefix private/internal functions with _
-function _compressPath(filePath: string): string { }
+// ✅ REQUIRED: get*/load*/save* naming for file operations
+function getWorkspaceMemoryPath(workspaceKey: string): string { }
+async function loadWorkspaceMemory(workspaceKey: string): Promise<WorkspaceMemoryStore | null> { }
+async function saveWorkspaceMemory(memory: WorkspaceMemoryStore): Promise<void> { }
 ```
 
 ### Function Signatures & Organization
 
 ```typescript
 // ✅ REQUIRED: Parameters on separate lines if > 80 chars
-async function loadWorkingMemory(
-  directory: string,
-  sessionID: string
-): Promise<WorkingMemory | null> {
+async function extractWorkspaceMemoryCandidates(
+  content: string
+): Promise<WorkspaceMemoryCandidate[]> {
   // ...
 }
 
 // ✅ REQUIRED: Explicit return types (no inference)
-function getCompactionLogPath(directory: string, sessionID: string): string {
-  return join(directory, ".opencode", "memory-working", `${sessionID}_compaction.json`);
+function renderWorkspaceMemory(
+  entries: LongTermMemoryEntry[],
+  maxChars: number
+): string {
+  // ...
 }
 
 // ✅ REQUIRED: Async for file/network I/O
-async function saveCoreMemory(directory: string, memory: CoreMemory): Promise<void> {
+async function saveWorkspaceMemory(memory: WorkspaceMemoryStore): Promise<void> {
   // ...
 }
 ```
@@ -163,28 +180,23 @@ async function saveCoreMemory(directory: string, memory: CoreMemory): Promise<vo
 ### Error Handling
 
 ```typescript
-// ✅ REQUIRED: Try-catch with descriptive console.error
-async function loadCoreMemory(directory: string, sessionID: string): Promise<CoreMemory | null> {
-  const path = getCoreMemoryPath(directory, sessionID);
+// ✅ REQUIRED: Try-catch with graceful degradation
+async function loadWorkspaceMemory(workspaceKey: string): Promise<WorkspaceMemoryStore | null> {
+  const path = getWorkspaceMemoryPath(workspaceKey);
   if (!existsSync(path)) return null;
 
   try {
     const content = await readFile(path, "utf-8");
-    return JSON.parse(content) as CoreMemory;
+    return JSON.parse(content) as WorkspaceMemoryStore;
   } catch (error) {
-    console.error("Failed to load core memory:", error);
-    return null;  // Graceful degradation
+    // Plugin should never block agent - return null and continue
+    return null;
   }
-}
-
-// ✅ REQUIRED: Type guards for runtime safety
-if (!existsSync(path)) {
-  return null;
 }
 
 // ✅ REQUIRED: Validate JSON before use
 const data = JSON.parse(content);
-const typedData = data as CoreMemory;  // Explicit cast after validation
+const typedData = data as WorkspaceMemoryStore;  // Explicit cast after validation
 ```
 
 ### Comments & Documentation
@@ -192,149 +204,123 @@ const typedData = data as CoreMemory;  // Explicit cast after validation
 ```typescript
 // ✅ REQUIRED: Section headers for major sections
 // ============================================================================
-// Phase 1: Core Memory Foundation
+// Workspace Memory: Long-term cross-session storage
 // ============================================================================
 
 // ✅ REQUIRED: Block comments for complex logic
-// Migration: Convert old format (items array) to new format (slots + pool)
-if (data.items && !data.slots) {
-  // ... migration logic
+// Quality gate: Reject candidates that are git hashes, errors, or path-heavy
+function shouldAcceptWorkspaceMemoryCandidate(candidate: string): boolean {
+  // ...
 }
 
-// ✅ USE: Inline comments sparingly
-const gamma = 0.85;  // Exponential decay rate (15% per event)
-
-// ✅ AVOID: Over-commenting obvious code
-const name = "test";  // Set name to test ❌ (obvious)
-```
-
-### Code Organization
-
-```typescript
-// ✅ REQUIRED: Organize plugin file by phase/feature
-// 1. Header & module documentation
-// 2. Imports
-// 3. Types & schemas (grouped by phase)
-// 4. Constants & configs
-// 5. Helper functions (private first, public after)
-// 6. Main plugin export
-// 7. Hook implementations
-
-export default {
-  // Plugin definition
-} as Plugin;
-```
-
-### Working with OpenCode Plugin SDK
-
-```typescript
-// ✅ REQUIRED: Use proper hook signatures
-import { tool, type Plugin } from "@opencode-ai/plugin";
-
-export default {
-  id: "working-memory",
-  name: "Working Memory Plugin",
-  
-  // ✅ Core hooks
-  hooks: {
-    "tool.execute.after": async (ctx) => {
-      // Tool just executed
-    },
-    "experimental.chat.system.transform": async (ctx) => {
-      // Transform system prompt before sending
-    },
-    "experimental.session.compacting": async (ctx) => {
-      // Session is being compacted (clearing old messages)
-    },
-  },
-  
-  // ✅ Exposed tools
-  tools: [
-    tool({
-      id: "core_memory_update",
-      name: "Update Core Memory",
-      description: "Update goal/progress/context blocks",
-      // ... schema & execute
-    }),
-  ],
-} as Plugin;
+// ✅ USE: Inline comments sparingly for non-obvious logic
+const canonical = normalizeText(text);  // Lowercase, strip punctuation, collapse whitespace
 ```
 
 ## Key Implementation Details
 
-### Core Memory Files
-- Location: `.opencode/memory-core/<sessionID>.json`
-- Schema: `{ sessionID, blocks: { goal, progress, context }, updatedAt }`
-- Limits: goal (1000 chars), progress (2000 chars), context (1500 chars)
+### Plugin Entry Point
 
-### Working Memory Files
-- Location: `.opencode/memory-working/<sessionID>.json`
-- Schema: `{ sessionID, slots, pool, eventCounter, updatedAt }`
-- Slot limits: error (3), decision (5), todo (3), dependency (3)
-- Pool decay: γ=0.85 per event
+```typescript
+// index.ts
+import { MemoryV2Plugin } from "./src/plugin.ts";
 
-### Pressure Monitoring
-- Triggers at: 70% (safe→moderate), 85% (moderate→high), 95% (high→critical)
-- Files: `.opencode/memory-working/<sessionID>_pressure.json`
-- Intervention: Sends `promptAsync()` with complete visible prompt
+export default {
+  id: "working-memory",
+  server: MemoryV2Plugin,
+};
+```
 
-### Storage Governance (Layer 1 & 2)
-- **Layer 1**: Session deletion cleanup - removes orphaned memory files
-- **Layer 2**: Tool output cache sweep - maintains 300 most recent files, 7-day TTL
-- Triggered at `eventCounter % 500 === 0` (automatic maintenance)
+### Workspace Memory Files
+
+- **Location**: `~/.local/share/opencode-working-memory/workspaces/{workspaceKey}/workspace-memory.json`
+- **Workspace Key**: First 16 chars of `sha256(realpath(workspaceRoot))`
+- **Schema**: See `src/types.ts:WorkspaceMemoryStore`
+- **Limits**: 5200 chars, 28 entries max
+
+### Session State Files
+
+- **Location**: `~/.local/share/opencode-working-memory/workspaces/{workspaceKey}/sessions/{sessionID}.json`
+- **Session ID**: Hash of session ID from OpenCode
+- **Schema**: See `src/types.ts:SessionState`
+
+### Memory Types
+
+| Type | Purpose | Stale After |
+|------|---------|-------------|
+| `feedback` | User preferences | 90 days |
+| `project` | Project info | 60 days |
+| `decision` | Important decisions | 45 days |
+| `reference` | Key references | 90 days |
+
+### Quality Guards
+
+1. **False Positive Error Prevention**: Commands with "error" in output but `exitCode === undefined` are not tracked as errors
+2. **Negative Memory Filtering**: "don't remember" patterns are correctly interpreted
+3. **Compaction Quality Gate**: Rejects git hashes, stack traces, path-heavy facts
+
+## Plugin Hooks
+
+### `prompt:before`
+
+Injects workspace memory and hot session state into system prompt.
+
+### `tool.execute.before`
+
+Tracks active files (read, grep, edit, write actions).
+
+### `tool.execute.after`
+
+- Tracks open errors from failed commands
+- Clears errors when commands succeed
+- Ignores `exitCode === undefined`
+
+### `compaction:before`
+
+Extracts workspace memory candidates from conversation, applies quality gate and deduplication.
 
 ## Debugging & Testing
 
 ### Manual Testing Steps
-1. **Phase 1 (Core Memory)**: Check `.opencode/memory-core/` after `core_memory_update`
-2. **Phase 2 (Smart Pruning)**: Verify tool outputs are filtered before context injection
-3. **Phase 3 (Working Memory)**: Check `.opencode/memory-working/` for slot/pool items
-4. **Phase 4 (Pressure Monitoring)**: Monitor pressure % in system prompts, verify interventions
-5. **Phase 4.5 (Storage Governance)**: Run 500+ events, check sweep logs
+
+1. **Workspace Memory**: Check `~/.local/share/opencode-working-memory/workspaces/*/workspace-memory.json` after compaction
+2. **Session State**: Check `~/.local/share/opencode-working-memory/workspaces/*/sessions/*.json` after tool usage
+3. **Error Tracking**: Run failing commands, verify errors appear in session state
+4. **Error Clearing**: Run successful commands, verify errors are cleared
 
 ### Common Issues
-- **File not found**: Ensure `.opencode/` directory exists and is writable
+
+- **File not found**: Ensure `~/.local/share/opencode-working-memory/` exists and is writable
 - **Type errors**: Check all imports use `import type { ... }` for types
-- **Lost memory**: Verify `.opencode/memory-*/` is in `.gitignore` (not committed)
-- **Sweep not running**: Check `eventCounter` in `<sessionID>.json`, should trigger at multiples of 500
+- **Memory not persisting**: Verify workspace key is consistent (same workspace = same key)
+- **False positive errors**: Check `exitCode` handling in `plugin.ts`
 
 ## Performance Considerations
 
-- **Memory budgets**: Core (5.5k chars total), Working (1.6k chars for system prompt)
-- **Pruning**: Hyper-aggressive mode activates at ≥85% pressure
-- **Compaction**: Preserves most recent 10 items when space-constrained
-- **Decay**: Pool items scored by exponential decay (γ=0.85) + mention count
-- **Storage sweep**: Limits cache to 300 files, removes files older than 7 days
-
-## File Path References
-
-When referencing code locations in documentation/comments, use:
-```
-path/to/file.ts:L123  or  path/to/file.ts:Line 123
-```
-
-Example: `Function sendPressureInterventionMessage() @ index.ts:L1286`
+- **Workspace memory budget**: 5200 chars injected into system prompt
+- **Session state budget**: 1200 chars injected into system prompt
+- **Total overhead**: ~1500-6000 chars per message (minimal)
+- **Storage footprint**: ~2-5 KB per workspace for memory, ~1-3 KB per session
 
 ## Contributing
 
 1. Fork the repository
 2. Create a feature branch: `git checkout -b feature/my-feature`
 3. Make changes following the code style guidelines above
-4. Test manually in OpenCode session
-5. Commit with descriptive message: `git commit -m "Add feature: ..."`
+4. Run tests: `npm test && npm run typecheck`
+5. Commit with descriptive message: `git commit -m "feat: add ..."`
 6. Push to your fork: `git push origin feature/my-feature`
 7. Open a pull request
 
 ## Architecture Documentation
 
 See `docs/architecture.md` for detailed technical documentation including:
-- Memory tier hierarchy
-- Pruning algorithms
-- Decay formulas
-- Pressure monitoring logic
-- Storage governance policies
+- Three-layer memory architecture
+- Memory extraction and quality gates
+- Error fingerprinting
+- Deduplication strategies
 
 ---
 
-**Last Updated**: February 2026  
-**Plugin Status**: Production (Phases 1-4.5 complete)
+**Last Updated**: April 2026  
+**Plugin Status**: Production (Memory V2 architecture)

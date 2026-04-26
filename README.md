@@ -3,31 +3,18 @@
 [![npm version](https://img.shields.io/npm/v/opencode-working-memory.svg)](https://www.npmjs.com/package/opencode-working-memory)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-**Advanced four-tier memory architecture that keeps your AI agent sharp, focused, and never forgets what matters.**
+**Automatic memory system that keeps your AI agent context-aware across compactions.**
 
-Stop losing context across compactions. Stop watching your agent repeat the same mistakes. This plugin gives your OpenCode agent a professional-grade memory system that scales with your project complexity.
+Stop losing context when OpenCode compacts your conversation. This plugin automatically tracks what matters — decisions, active files, open errors — and preserves it across sessions.
 
 ## What You Get
 
-- 🧠 **Core Memory** - Persistent goal/progress/context blocks that survive compaction
-- 💡 **Working Memory** - Smart slot-based system (errors, decisions, todos, dependencies) 
-- 🎯 **Memory Pressure Monitoring** - Real-time token tracking with automatic interventions
-- 🧹 **Auto Storage Governance** - Prevents unbounded disk growth (300 files/session, 7-day TTL)
-- 📊 **Smart Pruning** - Pressure-aware tool output compression
-- ⚡ **Zero Configuration** - Works out of the box, highly customizable
+- 🧠 **Workspace Memory** - Long-term memory that persists across sessions (decisions, project info, references)
+- 📡 **Hot Session State** - Automatic tracking of active files, open errors, and recent decisions
+- 🔧 **Smart Compaction** - Extracts and preserves important memories during compaction
+- ⚡ **Zero Configuration** - Works out of the box, no tools to call
 
 ## Installation
-
-**Option A: Let an AI agent do it**
-
-Paste this into any AI agent:
-
-```
-Install opencode-working-memory plugin by following:
-https://raw.githubusercontent.com/sdwolf4103/opencode-working-memory/main/docs/installation.md
-```
-
-**Option B: Manual setup**
 
 Add to your `~/.config/opencode/opencode.json`:
 
@@ -37,167 +24,156 @@ Add to your `~/.config/opencode/opencode.json`:
 }
 ```
 
-Restart OpenCode. The plugin is downloaded and installed automatically.
-
-### For LLM Agents
-
-1. Edit `~/.config/opencode/opencode.json`
-2. Add `"opencode-working-memory"` to the `plugin` array
-3. Verify the config file was saved correctly
-
-## Quick Start
-
-The plugin works automatically once installed. No configuration needed.
-
-**Try telling your agent:**
-
-```
-Use core_memory_update to set my current goal
-```
-```
-Use core_memory_read to show me what you remember
-```
-```
-Use working_memory_add to remember this file path
-```
-
-## Features
-
-### 🧠 Core Memory
-
-Persistent blocks that survive conversation resets:
-
-- **goal** (1000 chars) - Current task/objective
-- **progress** (2000 chars) - What's done, in-progress, next steps
-- **context** (1500 chars) - Key file paths, conventions, patterns
-
-### 💡 Working Memory
-
-Auto-extracts and ranks important information:
-
-- **Slots** (guaranteed visibility): errors, decisions, todos, dependencies
-- **Pool** (ranked by relevance): file paths, recent activity
-- Exponential decay keeps memory fresh
-- FIFO limits prevent bloat
-
-### 🎯 Memory Pressure Monitoring
-
-Real-time token tracking from session database:
-
-- Monitors context window usage (75% moderate → 90% high)
-- Proactive intervention messages when pressure is high
-- Pressure-aware smart pruning (adapts compression based on pressure)
-
-### 🧹 Storage Governance
-
-Prevents unbounded disk growth:
-
-- Auto-cleanup on session deletion (all artifacts removed)
-- Active cache management (max 300 files/session, 7-day TTL)
-- Silent background operation
-
-### 📊 Smart Pruning
-
-Intelligent tool output compression:
-
-- Per-tool strategies (keep-all, keep-ends, keep-last, discard)
-- Pressure-aware limits (2k/5k/10k lines based on memory pressure)
-- Preserves important context while reducing noise
-
-## Documentation
-
-- [Installation Guide](docs/installation.md) - Detailed setup instructions
-- [Architecture Overview](docs/architecture.md) - How it works under the hood
-- [Configuration](docs/configuration.md) - Customization options
-- [Agent Developer Guide](AGENTS.md) - For plugin developers
-
-## Tools Provided
-
-The plugin exposes these tools to your OpenCode agent:
-
-- `core_memory_update` - Update goal/progress/context blocks
-- `core_memory_read` - Read current memory state
-- `working_memory_add` - Manually add important items
-- `working_memory_clear` - Clear all working memory
-- `working_memory_clear_slot` - Clear specific slot (errors/decisions)
-- `working_memory_remove` - Remove specific item by content
+Restart OpenCode. The plugin activates automatically — no manual setup needed.
 
 ## How It Works
 
+The plugin operates via three automatic layers:
+
 ```
-┌───────────────────────────────────────────────────────────┐
-│  Core Memory (Always Visible)                             │
-│  ┌─────────┬──────────┬──────────┐                        │
-│  │  Goal   │ Progress │ Context  │                        │
-│  └─────────┴──────────┴──────────┘                        │
-└───────────────────────────────────────────────────────────┘
-                            ↓
-┌───────────────────────────────────────────────────────────┐
-│  Working Memory (Auto-Extracted)                          │
-│  ┌──────────────────┬──────────────────┐                  │
-│  │  Slots (FIFO)    │  Pool (Ranked)   │                  │
-│  │  • errors        │  • file-paths    │                  │
-│  │  • decisions     │  • recent        │                  │
-│  │  • todos         │  • mentions      │                  │
-│  │  • dependencies  │  • decay score   │                  │
-│  └──────────────────┴──────────────────┘                  │
-└───────────────────────────────────────────────────────────┘
-                            ↓
-┌───────────────────────────────────────────────────────────┐
-│  Memory Pressure Monitor                                  │
-│  • Tracks tokens from session DB                          │
-│  • Warns at 75% (moderate) / 90% (high)                   │
-│  • Sends proactive interventions                          │
-│  • Adjusts pruning aggressiveness                         │
-└───────────────────────────────────────────────────────────┘
-                            ↓
-┌───────────────────────────────────────────────────────────┐
-│  Storage Governance                                       │
-│  • Session deletion → cleanup all artifacts               │
-│  • Every 20 calls → sweep old cache (300 max, 7d TTL)     │
-│  • Silent background operation                            │
-└───────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│  WORKSPACE MEMORY (Long-term, cross-session)                │
+│  Storage: ~/.local/share/opencode-working-memory/            │
+│           workspaces/{hash}/workspace-memory.json             │
+│                                                              │
+│  Types: feedback | project | decision | reference           │
+│  Sources: explicit (user) | compaction | manual              │
+│  Limits: 5200 chars / 28 entries                              │
+└─────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────┐
+│  HOT SESSION STATE (Short-term, per-session)                  │
+│  Storage: ~/.local/share/opencode-working-memory/            │
+│           workspaces/{hash}/sessions/{sessionID}.json        │
+│                                                              │
+│  Tracks:                                                     │
+│  • Active files (read, grep, edit, write actions)           │
+│  • Open errors (typecheck, test, lint, build, runtime)      │
+│  • Recent decisions (auto-extracted)                          │
+└─────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────┐
+│  NATIVE OPENCODE STATE                                        │
+│  • Uses OpenCode's built-in todos during compaction          │
+│  • No additional storage required                            │
+└─────────────────────────────────────────────────────────────┘
 ```
 
-## Why This Plugin?
+### Workspace Memory (Long-term)
 
-**Without this plugin:**
-- 🔴 Agent forgets context after compaction
-- 🔴 Repeats resolved errors
-- 🔴 Loses track of project structure  
-- 🔴 Context window fills up uncontrollably
-- 🔴 Disk space grows unbounded
+Persists across sessions within the same workspace. Automatically extracted during compaction when the agent marks something with "remember" or "note":
 
-**With this plugin:**
-- ✅ Persistent memory across compactions
-- ✅ Smart auto-extraction of important info
-- ✅ Real-time pressure monitoring with interventions
-- ✅ Automatic storage cleanup
-- ✅ Pressure-aware compression
-- ✅ Zero configuration, works immediately
+```
+<workspace_memory>
+- [decision] Use npm cache for plugin loading, not npm link
+- [project] This repo uses opencode-agenthub plugin system
+- [reference] Storage: ~/.local/share/opencode-working-memory/...
+</workspace_memory>
+```
 
-## Does working-memory system increase token usage? It depends.
+**Memory types:**
+- `feedback` - User preferences for this workspace
+- `project` - Project-level information
+- `decision` - Important decisions made
+- `reference` - Key references (paths, patterns)
 
-It depends on your workflow.
+**Sources:**
+- `explicit` - User explicitly said "remember this" (confidence: 1.0)
+- `compaction` - Extracted during compaction (confidence: 0.75)
+- `manual` - Added programmatically (confidence: varies)
 
-- 🧹 **Clean Slate user** (for example, using DCP and frequently restarting sessions)
-  - ⚠️ Yes, it might add slight overhead.
-  - Because you keep starting fresh, automated memory persistence does not get enough time to pay off.
+### Hot Session State (Short-term)
 
-- 🚀 **Long Haul user** (staying in one session until token limits/compaction hit)
-  - ✅ This plugin is a token saver.
-  - Without it, compaction can cause the agent to lose the goal, forget active files, or make wrong assumptions, which creates correction loops.
-  - By preserving high-value context (Goals, Progress, Active Files), the agent inherits its previous state quickly. The small memory-prompt cost avoids the larger cost of the agent getting lost.
+Automatically tracks current session context:
 
-## Configuration (Optional)
+- **Active Files**: What files you're working on (ranked by recency and action type)
+- **Open Errors**: Errors that haven't been fixed yet (typecheck, test failures, etc.)
+- **Recent Decisions**: Decisions made this session (candidates for long-term promotion)
 
-The plugin works great with zero configuration. To customize behavior, modify the constants at the top of `index.ts`. See the [Configuration Guide](docs/configuration.md) for all tunable options.
+Injected into system prompt:
+```
+<workspace_memory>
+- [decision] Use npm cache for plugin loading...
+</workspace_memory>
+
+---
+<workspace_memory_candidates>
+- [project] This repo uses opencode-agenthub plugin system
+- [decision] Memory V2 uses three-layer architecture
+</workspace_memory_candidates>
+
+Active Files:
+- src/plugin.ts (edit, 18x)
+- tests/plugin.test.ts (edit, 5x)
+- src/extractors.ts (grep, 3x)
+
+Open Errors: (none)
+```
+
+## Quality Guarantees
+
+The plugin includes several quality guards:
+
+- **No false positive errors**: Bash commands like `git log` or `cat` with "error" in output are not misidentified
+- **Negative memory filtering**: "Don't remember this" is correctly interpreted
+- **Compaction quality gate**: Rejects git hashes, stack traces, path-heavy facts from becoming long-term memories
+- **Canonical deduplication**: Memories are deduplicated with case/punctuation normalization
+
+## No Tools Required
+
+Unlike other memory plugins, **this plugin has no manual tools**. Everything is automatic:
+
+- No `core_memory_update` — memory is extracted automatically
+- No `core_memory_read` — memory is injected into system prompt
+- No `working_memory_add` — active files are tracked automatically
+
+Just install and let it run. The plugin hooks into OpenCode's lifecycle events and does the right thing.
+
+## Configuration
+
+The plugin works out of the box with sensible defaults:
+
+- **Workspace Memory**: 5200 chars, 28 entries max
+- **Hot State**: 1200 chars rendered, 8 active files, 3 errors shown
+- **Storage**: `~/.local/share/opencode-working-memory/workspaces/{hash}/`
+
+See [Configuration Guide](docs/configuration.md) for customization options.
+
+## For AI Agents
+
+When using this plugin, the memory context appears in your system prompt. You can:
+
+1. **Tell users about memories**: "I remember you decided to use npm cache for plugins"
+2. **Ask about preferences**: "Should I add this to my memory for this workspace?"
+3. **Note important decisions**: These will be extracted during compaction
+
+To add something to long-term memory explicitly:
+```
+Remember this: [your note here]
+```
+
+The plugin captures this during compaction.
+
+## Documentation
+
+- [Architecture Overview](docs/architecture.md) - How the three layers work
+- [Configuration](docs/configuration.md) - Customization options
+- [Installation Guide](docs/installation.md) - Step-by-step setup
+
+## Development
+
+```bash
+git clone https://github.com/sdwolf4103/opencode-working-memory.git
+cd opencode-working-memory
+npm install
+npm test
+npm run typecheck
+```
 
 ## Requirements
 
 - OpenCode >= 1.0.0
 - Node.js >= 18.0.0
-- `@opencode-ai/plugin` >= 1.2.0
 
 ## License
 
@@ -207,12 +183,6 @@ MIT License - see [LICENSE](LICENSE) file for details.
 
 - 📖 [Documentation](docs/)
 - 🐛 [Report Issues](https://github.com/sdwolf4103/opencode-working-memory/issues)
-
-## Credits
-
-Inspired by the needs of real-world OpenCode usage and built to solve actual pain points in AI-assisted development.
-
-> This project is not affiliated with or endorsed by the OpenCode team.
 
 ---
 

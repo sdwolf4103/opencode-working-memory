@@ -10,7 +10,7 @@ Add to your `~/.config/opencode/opencode.json`:
 }
 ```
 
-Restart OpenCode. The plugin is downloaded and installed automatically — no `npm install` needed.
+Restart OpenCode. The plugin activates automatically — no manual setup needed.
 
 > **Note**: The correct key is `plugin` (singular), not `plugins`.
 
@@ -22,19 +22,44 @@ Restart OpenCode. The plugin is downloaded and installed automatically — no `n
 
 ## Verification
 
-After restarting OpenCode, ask your agent:
+After restarting OpenCode, memory context appears automatically in system prompts. You'll see:
 
 ```
-Use core_memory_read to show me what you remember
+<workspace_memory>
+- [decision] ... (if any long-term memories exist)
+</workspace_memory>
+
+---
+<workspace_memory_candidates>
+- [project] ... (candidates for long-term memory)
+</workspace_memory_candidates>
+
+Active Files:
+- path/to/file.ts (action, count)
+
+Open Errors: (none, or listed)
 ```
 
-If the tool responds, the plugin is active.
+**No tools to call**. The plugin works automatically via hooks.
+
+## How Memory Works
+
+### Workspace Memory (Long-term)
+
+Persists across sessions. Automatically extracted during compaction when you say "remember this" or when important decisions are made.
+
+### Hot Session State (Short-term)
+
+Tracks current session:
+- Active files (what you're working on)
+- Open errors (unresolved issues)
+- Recent decisions (for compaction candidate promotion)
 
 ## Troubleshooting
 
 ### Plugin Not Loading
 
-**Symptom**: No `core_memory_update` tool available
+**Symptom**: No memory context in system prompt
 
 **Solution**:
 1. Check `~/.config/opencode/opencode.json` uses `"plugin"` (not `"plugins"`)
@@ -43,11 +68,21 @@ If the tool responds, the plugin is active.
 
 ### Memory Files Not Created
 
-**Symptom**: No `.opencode/memory-core/` or `.opencode/memory-working/` directories
+**Symptom**: No `~/.local/share/opencode-working-memory/` directory
 
 **Solution**:
-1. Ensure OpenCode has write permissions in project directory
-2. Trigger memory operations (e.g., use `core_memory_update` tool)
+1. Ensure OpenCode has write permissions in home directory
+2. Trigger memory operations by working normally (plugin creates files on-demand)
+3. Check that plugin is listed in config
+
+### Memory Not Persisting
+
+**Symptom**: Workspace memory empty after restart
+
+**Solution**:
+1. Verify you're in the same workspace (different workspace = different memory)
+2. Ensure `<workspace_memory_candidates>` were captured during compaction
+3. Check `workspace-memory.json` exists
 
 ### Type Errors During Development
 
@@ -56,16 +91,45 @@ If the tool responds, the plugin is active.
 **Solution**:
 1. Run `npm install` to install dev dependencies
 2. Run `npm run typecheck` to check for errors
-3. See [AGENTS.md](../AGENTS.md) for code style guidelines
+3. Run `npm test` to verify functionality
 
 ## Uninstallation
 
 Remove `"opencode-working-memory"` from the `plugin` array in `~/.config/opencode/opencode.json`.
 
-Memory files in `.opencode/memory-*` will persist unless manually deleted.
+Memory files in `~/.local/share/opencode-working-memory/` persist unless manually deleted.
+
+## Manual Memory Management
+
+### View Workspace Memory
+
+```bash
+cat ~/.local/share/opencode-working-memory/workspaces/*/workspace-memory.json | jq
+```
+
+### View Session State
+
+```bash
+cat ~/.local/share/opencode-working-memory/workspaces/*/sessions/*.json | jq
+```
+
+### Clear Workspace Memory
+
+```bash
+rm ~/.local/share/opencode-working-memory/workspaces/*/workspace-memory.json
+```
+
+### Clear All Session States
+
+```bash
+rm -rf ~/.local/share/opencode-working-memory/workspaces/*/sessions/*.json
+```
 
 ## Next Steps
 
-- Read [Architecture Documentation](./architecture.md) to understand how memory tiers work
+- Read [Architecture Documentation](./architecture.md) to understand how the three layers work
 - See [Configuration Guide](./configuration.md) for customization options
-- Check [AGENTS.md](../AGENTS.md) for development guidelines
+
+---
+
+**Last Updated**: April 2026

@@ -2,374 +2,348 @@
 
 ## Overview
 
-The Working Memory Plugin implements a **four-tier memory architecture** designed to maximize context efficiency for AI agents in OpenCode sessions.
+The Working Memory Plugin implements a **three-layer memory architecture** designed to preserve context across OpenCode session compactions.
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                    TIER 1: CORE MEMORY                       │
-│  Persistent blocks: goal (1000) | progress (2000) | context (1500) │
-│  Survives compaction, always visible in system prompt       │
+│  LAYER 1: WORKSPACE MEMORY (Long-term, cross-session)      │
+│  • Persistent storage: ~/.local/share/opencode-working-...  │
+│  • Types: feedback | project | decision | reference        │
+│  • Sources: explicit | compaction | manual                  │
+│  • Limits: 5200 chars / 28 entries                          │
+│  • Survives: session reset, workspace switch                │
 └─────────────────────────────────────────────────────────────┘
                               ↓
 ┌─────────────────────────────────────────────────────────────┐
-│                  TIER 2: WORKING MEMORY                      │
-│  Session-scoped slots + memory pool                         │
-│  Slots: error(3) | decision(5) | todo(3) | dependency(3)   │
-│  Pool: Exponential decay (γ=0.85) + mention tracking        │
+│  LAYER 2: HOT SESSION STATE (Short-term, per-session)        │
+│  • Session-scoped tracking: active files, open errors       │
+│  • Storage: sessions/{sessionID}.json                       │
+│  • Auto-extracted from tool usage patterns                  │
+│  • Cleared: on new session start                             │
 └─────────────────────────────────────────────────────────────┘
                               ↓
 ┌─────────────────────────────────────────────────────────────┐
-│                   TIER 3: SMART PRUNING                      │
-│  Filters tool outputs before adding to conversation         │
-│  Removes: file lists, verbose logs, repetitive content      │
-│  Modes: normal → aggressive → hyper-aggressive               │
-└─────────────────────────────────────────────────────────────┘
-                              ↓
-┌─────────────────────────────────────────────────────────────┐
-│                 TIER 4: PRESSURE MONITORING                  │
-│  Tracks context usage: safe → moderate → high               │
-│  Thresholds: 75% (moderate) | 90% (high)                    │
-│  Intervention: Sends promptAsync() with full visible prompt │
+│  LAYER 3: NATIVE OPENCODE STATE                             │
+│  • Uses OpenCode's built-in todos during compaction          │
+│  • No additional storage required                            │
+│  • Delegated to OpenCode's native features                   │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-## Phase 1: Core Memory Foundation
+## Layer 1: Workspace Memory
 
 ### Purpose
-Provide persistent memory blocks that survive conversation compaction and are always injected into the system prompt.
+
+Long-term memory that persists across sessions within the same workspace. Perfect for:
+- Project conventions and patterns
+- Important decisions that span sessions
+- User preferences for this codebase
 
 ### Storage
-- **Location**: `.opencode/memory-core/<sessionID>.json`
+
+- **Location**: `~/.local/share/opencode-working-memory/workspaces/{workspaceKey}/workspace-memory.json`
+- **Workspace Key**: First 16 chars of `sha256(realpath(workspaceRoot))`
 - **Schema**:
   ```typescript
   {
-    sessionID: string;
-    blocks: {
-      goal: { content: string; chars: number; maxChars: 1000; updatedAt: string };
-      progress: { content: string; chars: number; maxChars: 2000; updatedAt: string };
-      context: { content: string; chars: number; maxChars: 1500; updatedAt: string };
-    };
-    updatedAt: string;
+    version: 1,
+    workspace: { root: string, key: string },
+    limits: { maxRenderedChars: 5200, maxEntries: 28 },
+    entries: LongTermMemoryEntry[],
+    updatedAt: string
   }
   ```
 
-### Character Limits
-- **goal**: 1000 chars (ONE specific task)
-- **progress**: 2000 chars (done/in-progress/blocked checklist)
-- **context**: 1500 chars (current working files + key patterns)
+### Entry Types
 
-### Operations
-- **replace**: Completely replace block content
-- **append**: Add content to end (auto-adds newline)
+| Type | Purpose | Example |
+|------|---------|---------|
+| `feedback` | User preferences | "User prefers functional React components" |
+| `project` | Project-level info | "This monorepo uses turborepo" |
+| `decision` | Important decisions | "Use PostgreSQL for primary database" |
+| `reference` | Key references | "API endpoints defined in `src/api/`" |
 
-### Tools
-- `core_memory_update`: Update or append to blocks
-- `core_memory_read`: Read current state of all blocks
+### Entry Sources
+
+| Source | Confidence | How Added |
+|--------|------------|-----------|
+| `explicit` | 1.0 | User said "remember this" |
+| `compaction` | 0.75 | Extracted during compaction |
+| `manual` | varies | Programmatically added |
+
+### Memory Extraction
+
+During compaction, the plugin scans for `<workspace_memory_candidates>` blocks:
+
+```
+<workspace_memory_candidates>
+- [decision] Use npm cache for plugin loading
+- [project] This repo uses TypeScript with strict mode
+</workspace_memory_candidates>
+```
+
+**Quality Gate**: Not all candidates become memories. The plugin rejects:
+- Git commit hashes (e.g., `abc1234`)
+- Raw errors (e.g., `Error: something failed`)
+- Stack traces
+- Path-heavy facts (>50% paths)
+- Very short text (<20 chars)
+
+### Deduplication
+
+Memories are deduplicated using **canonical text matching**:
+1. Normalize: lowercase, strip punctuation, collapse whitespace
+2. Hash the canonical text
+3. Keep the entry with highest confidence
 
 ### System Prompt Injection
-Blocks are injected into every agent message as:
+
+Workspace memory is injected at the top of every message:
+
 ```
-<core_memory>
-<goal chars="87/1000">...</goal>
-<progress chars="560/2000">...</progress>
-<context chars="479/1500">...</context>
-</core_memory>
+<workspace_memory>
+- [decision] Use npm cache for plugin loading, not npm link
+- [project] This repo uses opencode-agenthub plugin system
+- [reference] Storage: ~/.local/share/opencode-working-memory/...
+</workspace_memory>
 ```
 
-## Phase 2: Smart Pruning
+## Layer 2: Hot Session State
 
 ### Purpose
-Reduce context bloat by filtering tool outputs before they enter the conversation history.
 
-### Pruning Modes
-
-#### Normal Mode (Pressure < 75%)
-- Remove file/directory listings > 50 lines
-- Truncate verbose tool outputs
-- Keep first/last 30 lines of long outputs
-- Preserve error messages and key information
-
-#### Aggressive Mode (75% ≤ Pressure < 90%)
-- Threshold drops to 30 lines
-- More aggressive truncation (first/last 20 lines)
-- Filter repetitive content
-
-#### Hyper-Aggressive Mode (Pressure ≥ 90%)
-- Threshold drops to 15 lines
-- Keep only first/last 10 lines
-- Maximum compression
-
-### Pruning Heuristics
-
-1. **File Listings**: Detect `ls`, `find`, `glob` outputs
-2. **Directory Trees**: Detect tree-like structures with `/`
-3. **Log Files**: Detect timestamp patterns, stack traces
-4. **Repetitive Content**: Detect similar consecutive lines
-5. **Synthetic Content**: Preserve `synthetic: true` markers
-
-### Implementation
-Pruning happens in `tool.execute.after` hook before tool output enters conversation.
-
-## Phase 3: Working Memory
-
-### Purpose
-Provide session-scoped memory with structured slots and a general-purpose pool with intelligent decay.
+Track current session context automatically:
+- What files are you working on?
+- What errors are currently open?
+- What decisions were made recently?
 
 ### Storage
-- **Location**: `.opencode/memory-working/<sessionID>.json`
+
+- **Location**: `~/.local/share/opencode-working-memory/workspaces/{workspaceKey}/sessions/{hashedSessionID}.json`
 - **Schema**:
   ```typescript
   {
-    sessionID: string;
-    slots: {
-      error: Array<WorkingMemoryItem>;      // Max 3
-      decision: Array<WorkingMemoryItem>;   // Max 5
-      todo: Array<WorkingMemoryItem>;       // Max 3
-      dependency: Array<WorkingMemoryItem>; // Max 3
-    };
-    pool: Array<WorkingMemoryItem>;
-    eventCounter: number;
-    updatedAt: string;
+    version: 1,
+    sessionID: string,
+    turn: number,
+    updatedAt: string,
+    activeFiles: ActiveFile[],
+    openErrors: OpenError[],
+    recentDecisions: SessionDecision[]
   }
   ```
 
-### Slot Types
+### Active Files
 
-| Slot | Max Items | Purpose |
-|------|-----------|---------|
-| **error** | 3 | Recent errors that need fixing |
-| **decision** | 5 | Important decisions made |
-| **todo** | 3 | Current task checklist |
-| **dependency** | 3 | File/package dependencies |
+Automatically tracked from `tool.execute.before` events:
 
-### Memory Pool
+| Action | Ranking Boost |
+|--------|---------------|
+| `write` | 4x |
+| `edit` | 3x |
+| `read` | 2x |
+| `grep` | 1x |
 
-General-purpose storage with **exponential decay**:
+Files are ranked by: `count * action_weight * recency_decay`
 
-```typescript
-score = exp(-γ * age) + mentionCount
-```
+### Open Errors
 
-Where:
-- `γ = 0.85` (decay rate, 15% per event)
-- `age = eventCounter - item.eventNumber`
-- `mentionCount`: Number of times item mentioned in conversation
+Tracked from `tool.execute.after` events when `exitCode !== 0`:
 
-Items with `score < 0.01` are pruned.
+| Category | Trigger Pattern |
+|----------|-----------------|
+| `typecheck` | `TS####:` or TypeScript errors |
+| `test` | Test failures |
+| `lint` | ESLint warnings/errors |
+| `build` | Build failures |
+| `runtime` | `Error:`, `TypeError:`, etc. |
 
-### Auto-Extraction
+**False Positive Guards**:
+- Commands like `git log`, `cat` with "error" in output are ignored
+- Only actual command failures (`exitCode !== 0`) trigger errors
+- `exitCode === undefined` is treated as success (no error tracking)
 
-Working memory items are **automatically extracted** from:
-- Tool outputs (file paths, errors, dependencies)
-- User messages (decisions, todos)
-- Assistant responses (key information)
+### Error Fingerprinting
 
-### Manual Management
+Errors are fingerprinted by:
+1. Extract error message summary
+2. Generate fingerprint: `first 12 chars of sha256(summary)`
+3. Group similar errors by fingerprint
 
-Tools:
-- `working_memory_add`: Manually add item
-- `working_memory_clear`: Clear all items
-- `working_memory_clear_slot`: Clear specific slot (e.g., after fixing all errors)
-- `working_memory_remove`: Remove specific item by content match
+### recentDecisions
 
-### System Prompt Injection
-
-```
-<working_memory>
-Recent session context (auto-managed, sorted by relevance):
-
-⚠️ Errors:
-  - TypeError at line 42 in utils.ts
-  - Missing import in index.ts
-
-📁 Key Files:
-  - src/components/Button.tsx
-  - src/utils/helpers.ts
-
-(15 items shown, updated: 9:46:47 AM)
-</working_memory>
-```
-
-## Phase 4: Pressure Monitoring
-
-### Purpose
-Track conversation context usage and trigger interventions when approaching limits.
-
-### Pressure Calculation
-
-```typescript
-pressure = (visiblePromptChars / estimatedContextLimit) * 100
-```
-
-Where:
-- `visiblePromptChars`: Total characters in system prompt + tool outputs
-- `estimatedContextLimit`: ~180,000 chars (conservative estimate)
-
-### Pressure Levels
-
-| Level | Threshold | Behavior |
-|-------|-----------|----------|
-| **safe** | < 75% | Normal operation |
-| **moderate** | 75-89% | Warning in system prompt + aggressive pruning |
-| **high** | ≥ 90% | Hyper-aggressive pruning + intervention |
-
-### Pressure Storage
-
-- **Location**: `.opencode/memory-working/<sessionID>_pressure.json`
-- **Schema**:
-  ```typescript
-  {
-    sessionID: string;
-    level: "safe" | "moderate" | "high";
-    percentage: number;
-    visiblePromptChars: number;
-    estimatedLimit: 180000;
-    lastChecked: string;
-    interventionsSent: number;
-  }
-  ```
-
-### Intervention Mechanism
-
-When pressure reaches **high** (≥90%):
-1. Plugin sends `promptAsync()` message to agent
-2. Message includes full visible prompt for review
-3. Agent can compress core memory, clear working memory, or continue
-4. Intervention tracked in `interventionsSent` counter
+Short-term decisions made this session. Candidates for promotion to workspace memory during compaction.
 
 ### System Prompt Injection
 
+Hot session state is injected after workspace memory:
+
 ```
-[Memory Pressure: 87% (high) - 156,600/180,000 chars]
-⚠️ High memory pressure detected. Consider:
-- Compressing core_memory blocks (use core_memory_update)
-- Clearing resolved errors (use working_memory_clear_slot)
-- Removing old pool items (auto-pruned at score < 0.01)
+---
+<workspace_memory_candidates>
+- [project] This repo uses TypeScript with strict mode
+</workspace_memory_candidates>
+
+Active Files:
+- src/plugin.ts (edit, 18x)
+- tests/plugin.test.ts (edit, 5x)
+
+Open Errors: (none)
 ```
 
-## Phase 4.5: Storage Governance
+## Layer 3: Native OpenCode State
 
 ### Purpose
-Prevent `.opencode/` directory bloat from accumulating tool output caches and orphaned memory files.
 
-### Layer 1: Session Deletion Cleanup
+Delegate task tracking to OpenCode's native features.
 
-**Trigger**: `experimental.session.deleted` hook
+### Behavior
 
-**Actions**:
-1. Remove `.opencode/memory-core/<sessionID>.json`
-2. Remove `.opencode/memory-working/<sessionID>.json`
-3. Remove `.opencode/memory-working/<sessionID>_pressure.json`
-4. Remove `.opencode/memory-working/<sessionID>_compaction.json`
+- Uses OpenCode's built-in `todos` during compaction
+- No additional storage or injection required
+- Allows the agent to manage task lists natively
 
-### Layer 2: Tool Output Cache Sweep
+## Plugin Hooks
 
-**Trigger**: Every 500 events (`eventCounter % 500 === 0`)
+The plugin hooks into OpenCode lifecycle events:
 
-**Target**: `.opencode/cache/tool-outputs/` directory
+### `prompt:before`
 
-**Policy**:
-- Keep most recent **300 files** (sorted by mtime)
-- Delete files older than **7 days** (TTL policy)
+Injects workspace memory and hot session state into system prompt.
 
-**Logging**: Write sweep results to `.opencode/memory-working/<sessionID>_sweep.json`
+### `tool.execute.before`
+
+Tracks active files (read, grep, edit, write actions).
+
+### `tool.execute.after`
+
+- Tracks open errors from failed commands
+- Clears errors when commands succeed
+- Ignores `exitCode === undefined` (successful commands without explicit exit codes)
+
+### `compaction:before`
+
+Extracts workspace memory candidates from conversation.
+Applies quality gate, deduplication, and source priority.
+
+## Quality Guarantees
+
+### No False Positive Errors
 
 ```typescript
-{
-  sessionID: string;
-  timestamp: string;
-  eventCounter: number;
-  results: {
-    filesScanned: number;
-    filesDeleted: number;
-    bytesReclaimed: number;
-    errors: Array<string>;
-  };
-}
+// Bad: Would create false positive
+"Error: something failed" in output
+
+// Good: Actually failed
+exitCode === 1 && output.includes("Error")
+
+// Good: Actually succeeded
+exitCode === 0 (clears errors for that category)
+
+// Good: Ignore ambiguous cases
+exitCode === undefined → skip error tracking
+```
+
+### Negative Memory Filtering
+
+```typescript
+// Correctly interpreted
+"don't remember this" → NOT added to memory
+"不要記住這個" → NOT added to memory
+"remember this" → added to memory candidates
+```
+
+### Canonical Deduplication
+
+```typescript
+// Same memory (after normalization)
+"Use npm cache for plugins"
+"USE NPM CACHE for plugins!!"
+"use npm cache for plugins."
+
+// All map to same canonical key
+canonical("Use npm cache for plugins") === "use npm cache for plugins"
+```
+
+### Compaction Quality Gate
+
+```typescript
+// Rejected (not valuable as long-term memory)
+"4832b38 fix: something"  // git hash
+"Error: something failed"  // raw error
+"at Object.method (file.ts:42)"  // stack trace
+"/Users/x/project/file.ts /Users/x/project/other.ts"  // path-heavy
+
+// Accepted
+"[decision] Use npm cache for plugin loading"  // good pattern
+```
+
+## File System Layout
+
+```
+~/.local/share/opencode-working-memory/
+└── workspaces/
+    └── {workspaceKey}/
+        ├── workspace-memory.json      # Long-term memory
+        └── sessions/
+            └── {hashedSessionID}.json  # Session state
+```
+
+### Workspace Key
+
+```typescript
+// First 16 chars of SHA-256 hash of workspace root realpath
+const workspaceKey = sha256(realpath(workspaceRoot)).slice(0, 16)
 ```
 
 ## Performance Considerations
 
 ### Memory Budgets
-- **Core Memory**: 4,500 chars (injected every message)
-- **Working Memory**: ~1,600 chars (injected every message)
-- **Total Overhead**: ~6,100 chars per message
 
-### Compaction Behavior
-When OpenCode compacts conversation (clears old messages):
-- Core memory: **Preserved** (persistent across compactions)
-- Working memory: **Preserved** (session-scoped, cleared on session end)
-- Pressure state: **Preserved** (tracks across compaction)
-- Compaction log: Saved to `<sessionID>_compaction.json`
+| Layer | Max Chars | Max Entries |
+|-------|-----------|-------------|
+| Workspace Memory | 5200 | 28 |
+| Hot Session State | 1200 | 8 files, 3 errors |
+
+### Injection Overhead
+
+- Workspace memory: ~200-500 chars per message
+- Hot session state: ~200-400 chars per message
+- Total: ~400-900 chars per message (minimal)
 
 ### Storage Footprint
-- Each session: 4 JSON files (~5-20 KB total)
-- Tool output cache: Max 300 files (~10-50 MB depending on outputs)
-- Sweep every 500 events keeps storage bounded
+
+- Workspace memory: ~2-5 KB per workspace
+- Session state: ~1-3 KB per session
+- Auto-cleanup on workspace/session deletion
 
 ## Extension Points
 
-### Custom Slot Types
-To add new slot types:
-1. Update `SlotType` union in types
-2. Add to `SLOT_CONFIG` with max items
-3. Update `formatWorkingMemoryForPrompt()` for display
-4. Update extraction heuristics in `tool.execute.after`
+### Custom Memory Types
 
-### Custom Pruning Rules
-To add pruning heuristics:
-1. Update `shouldPrune()` with new detection logic
-2. Add to `pruneToolOutput()` with filtering rules
-3. Test with representative tool outputs
-
-### Custom Pressure Thresholds
-Adjust in constants:
+Add new types in `src/types.ts`:
 ```typescript
-const PRESSURE_THRESHOLDS = {
-  moderate: 70,
-  high: 85,
-  critical: 95,
-};
+export type LongTermType = "feedback" | "project" | "decision" | "reference" | "custom";
 ```
 
-## Migration & Compatibility
+### Custom Error Categories
 
-### Old Format → New Format
-Plugin automatically migrates from old format:
+Add new categories in `src/types.ts`:
 ```typescript
-// Old format (pre-Phase 3)
-{ items: Array<Item> }
-
-// New format (Phase 3+)
-{ slots: Record<SlotType, Array<Item>>, pool: Array<Item> }
+export type ErrorCategory = "typecheck" | "test" | "lint" | "build" | "runtime" | "custom";
 ```
 
-Migration happens on first load of old format files.
+### Custom Extraction Patterns
 
-## File System Layout
+Modify `src/extractors.ts` to add new extraction patterns.
 
-```
-.opencode/
-├── memory-core/
-│   └── <sessionID>.json          # Core memory blocks
-├── memory-working/
-│   ├── <sessionID>.json          # Working memory (slots + pool)
-│   ├── <sessionID>_pressure.json # Pressure monitoring state
-│   ├── <sessionID>_compaction.json # Compaction event log
-│   └── <sessionID>_sweep.json    # Storage sweep log
-└── cache/
-    └── tool-outputs/
-        └── *.json                # Tool output cache (auto-swept)
-```
+## Migration Notes
 
-## Security Considerations
+### Memory V1 to V2
 
-- All files written with `0644` permissions (owner read/write, group/others read)
-- Directories created with `0755` permissions (owner rwx, group/others rx)
-- No sensitive data should be stored in memory blocks (user responsibility)
-- Session IDs are opaque identifiers, not derived from sensitive data
+The plugin automatically migrates old format files to the new three-layer architecture. No manual intervention needed.
 
 ---
 
-**Last Updated**: February 2026  
-**Implementation**: `index.ts` (1700+ lines)
+**Last Updated**: April 2026  
+**Implementation**: `src/plugin.ts`, `src/extractors.ts`, `src/workspace-memory.ts`, `src/session-state.ts`
