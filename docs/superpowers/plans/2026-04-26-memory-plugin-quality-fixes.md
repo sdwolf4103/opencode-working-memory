@@ -982,11 +982,33 @@ for (const { text, expected } of QUALITY_GATE_TESTS) {
 ### 本週：PR-1
 
 1. Baseline snapshot
-2. Task 1: inline exitCode + 收窄 extractErrorsFromBash + **plugin hook regression test**
-3. Task 2: budget-aware render + **min envelope handling**
-4. Task 3: remove bare `always` + **ensure all patterns have `g` flag**
+2. Task 1: inline exitCode + 收窄 extractErrorsFromBash + **plugin hook regression test** ✅ DONE
+3. Task 2: budget-aware render + **min envelope handling** ✅ DONE
+4. Task 3: remove bare `always` + **ensure all patterns have `g` flag** ✅ DONE
 5. Manual verification
 6. Cleanup false positives
+
+### Hotfix: 紫色斜體渲染問題
+
+**問題**：Plugin compaction context 輸出在 OpenCode UI 中顯示為紫色斜體。
+
+**根因分析**：
+1. 第一次嘗試：XML 標籤 `<workspace_memory>` → 紫色斜體
+2. 第二次嘗試：HTML 註釋 `<!-- workspace_memory_candidates -->` → 仍然紫色斜體
+3. 第三次嘗試：Markdown 標題 `## Memory Candidates` → 紫色（無斜體）
+4. 第四次嘗試：純文本標籤 `Memory candidates:` → 無特殊渲染 ✅
+
+**解決方案**：架構師建議使用純文本標籤，避免所有 Markdown/XML/HTML 語法。
+
+**修改內容**：
+- `src/plugin.ts`: `compactionContextHeader()` 改用 `Memory candidates:` 標籤
+- `src/plugin.ts`: `renderTodosForCompaction()` 改用 `Pending todos:` 標籤
+- `src/extractors.ts`: `extractCandidateBlock()` 支援純文本格式解析（primary）
+- `src/workspace-memory.ts`: `renderWorkspaceMemory()` 使用純文本 `Workspace memory:` 標籤
+- `src/session-state.ts`: `renderHotSessionState()` 使用純文本 `Hot session state:` 標籤
+- 移除 `stripXmlTags()` 函數（不再需要）
+
+**測試**：42 個測試全部通過。
 
 ### 下週：PR-2
 

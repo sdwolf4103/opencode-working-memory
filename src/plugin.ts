@@ -46,28 +46,63 @@ import {
 } from "./opencode.ts";
 
 /**
- * Generate instructions for the compaction model.
+ * Build the complete compaction prompt.
+ *
+ * Replaces OpenCode's default template (which uses --- separators that trigger
+ * YAML frontmatter comment scope in markdown rendering, producing purple italic text).
+ * Our template uses only ## Markdown headings and explicitly forbids YAML frontmatter,
+ * horizontal rules, and delimiter lines.
+ *
+ * @param privateContext - Background context (workspace memory, hot session state,
+ *   pending todos) from our plugin and any other plugins. Shown to the model to
+ *   inform the summary but not copied verbatim.
  */
-function compactionContextHeader(): string {
-  return `
-Background context for memory extraction (do not output verbatim):
-- Use facts to update Goal/Progress/Key Decisions/Next Steps sections
-- At the end, emit durable future-session memories in this format:
-
-Memory candidates:
-- [feedback] content
-- [project] content
-- [decision] content
-- [reference] content
-`.trim();
-}
-
-/**
- * Generate the memory candidate instruction.
- * This is included in compactionContextHeader() above.
- */
-function memoryCandidateInstruction(): string {
-  return "";
+function buildCompactionPrompt(privateContext: string): string {
+  return [
+    "Provide a detailed summary for continuing our conversation above.",
+    "Focus on information that would help another agent continue the work: the goal, user instructions, completed work, current state, decisions, relevant files, and next steps.",
+    "",
+    "Do not call any tools. Respond only with the summary text.",
+    "Respond in the same language as the user's messages in the conversation.",
+    "",
+    "Formatting rules:",
+    "- Start the response with \"## Goal\".",
+    "- Use Markdown headings only.",
+    "- Do not output YAML frontmatter.",
+    "- Do not output horizontal rules.",
+    "- Do not wrap the summary in delimiter lines such as ---.",
+    "- Do not use code fences around the summary.",
+    "",
+    "Use this structure:",
+    "",
+    "## Goal",
+    "",
+    "## Instructions",
+    "",
+    "## Progress",
+    "",
+    "## Key Decisions",
+    "",
+    "## Discoveries",
+    "",
+    "## Next Steps",
+    "",
+    "## Relevant Files",
+    "",
+    "At the end of the summary, extract durable memory entries for future",
+    "sessions using these labels:",
+    "",
+    "Memory candidates:",
+    "- [feedback] content",
+    "- [project] content",
+    "- [decision] content",
+    "- [reference] content",
+    "",
+    "Background context, use this to inform the summary above.",
+    "Do not output this context verbatim:",
+    "",
+    privateContext,
+  ].join("\n");
 }
 
 /**
@@ -295,7 +330,17 @@ export const MemoryV2Plugin: Plugin = async (input) => {
       await processLatestUserMessage(sessionID);
     },
 
-    // Add compaction context before summarization
+    /**
+     * Replace the default compaction prompt with a ---free template.
+     *
+     * OpenCode's default template wraps sections in --- separators. When the
+     * model follows the template (which our structured context encourages),
+     * the TUI renders --- at position 0 as YAML frontmatter, applying the
+     * "comment" syntax scope (purple italic in palenight theme).
+     *
+     * We set output.prompt to replace the entire prompt, removing all ---
+     * and explicitly forbidding YAML frontmatter / horizontal rules.
+     */
     "experimental.session.compacting": async (hookInput, output) => {
       const { sessionID } = hookInput;
       if (!sessionID) return;
@@ -303,36 +348,47 @@ export const MemoryV2Plugin: Plugin = async (input) => {
       // Sub-agents don't need compaction support
       if (await isSubAgent(sessionID)) return;
 
-// Build private context with Markdown-neutral format
-const contextParts: string[] = [];
+      // Preserve context injected by other plugins that ran before us.
+      // Setting output.prompt bypasses the default prompt + context join,
+      // so we must explicitly carry forward any existing output.context.
+      const otherContext = output.context.filter(Boolean).join("\n\n");
 
-// 1. Frozen workspace memory
-const workspaceMemory = await getFrozenWorkspaceMemory(directory, sessionID);
-const workspacePrompt = renderWorkspaceMemory(workspaceMemory);
-if (workspacePrompt) {
-  contextParts.push(workspacePrompt);
-}
+      // Build our private context (workspace memory, hot state, todos)
+      const contextParts: string[] = [];
 
-// 2. Hot session state
-const sessionState = await loadSessionState(directory, sessionID);
-const hotPrompt = renderHotSessionState(sessionState, directory);
-if (hotPrompt) {
-  contextParts.push(hotPrompt);
-}
+      // 1. Frozen workspace memory
+      const workspaceMemory = await getFrozenWorkspaceMemory(directory, sessionID);
+      const workspacePrompt = renderWorkspaceMemory(workspaceMemory);
+      if (workspacePrompt) {
+        contextParts.push(workspacePrompt);
+      }
 
-      // 3. Pending todos from OpenCode (Markdown-neutral format)
+      // 2. Hot session state
+      const sessionState = await loadSessionState(directory, sessionID);
+      const hotPrompt = renderHotSessionState(sessionState, directory);
+      if (hotPrompt) {
+        contextParts.push(hotPrompt);
+      }
+
+      // 3. Pending todos from OpenCode
       const todos = await pendingTodos(client, sessionID);
       const todosPrompt = renderTodosForCompaction(todos);
       if (todosPrompt) {
         contextParts.push(todosPrompt);
       }
 
-      // Combine into single private context block
-      const privateContext = contextParts.length > 0
-        ? `${compactionContextHeader()}\n\n${contextParts.join("\n\n")}`
-        : compactionContextHeader();
+      // Combine: other plugins' context first, then our private context
+      const privateContext = [otherContext, ...contextParts]
+        .filter(Boolean)
+        .join("\n\n");
 
-      output.context.push(privateContext);
+      // Replace the default prompt entirely with our ---free template
+      output.prompt = buildCompactionPrompt(privateContext);
+
+      // Clear context array since we consumed it into output.prompt.
+      // Subsequent plugins that set output.prompt will also need to check
+      // output.context if they want to preserve other plugin contributions.
+      output.context.length = 0;
     },
 
     // Handle session events

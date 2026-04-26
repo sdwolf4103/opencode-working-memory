@@ -195,7 +195,7 @@ test("tool.execute.after: exitCode non-zero creates open error", async () => {
   }
 });
 
-test("experimental.session.compacting: context contains no XML tags for compaction", async () => {
+test("compaction hook sets output.prompt with ---free template", async () => {
   const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-test-"));
 
   try {
@@ -220,53 +220,75 @@ test("experimental.session.compacting: context contains no XML tags for compacti
       output
     );
 
-    // The context should be a single string (private context block)
-    assert.equal(output.context.length, 1, "Context should be a single block");
+    // Should set output.prompt and clear output.context
+    const prompt = (output as Record<string, unknown>).prompt as string | undefined;
+    assert.ok(prompt, "output.prompt should be set");
+    assert.equal(typeof prompt, "string", "output.prompt should be a string");
+    assert.equal(output.context.length, 0, "output.context should be cleared after setting prompt");
 
-    const contextText = output.context[0];
+    // Should NOT contain YAML frontmatter separators (--- at start)
+    assert.equal(prompt!.includes("\n---"), false,
+      "Prompt should not contain --- separators on their own line");
 
-    // Verify: context should NOT contain XML-like tags that confuse Markdown
-    assert.equal(contextText.includes("<workspace_memory>"), false,
-      "Context should not contain <workspace_memory> tag");
-    assert.equal(contextText.includes("</workspace_memory>"), false,
-      "Context should not contain </workspace_memory> tag");
-    assert.equal(contextText.includes("<hot_session_state>"), false,
-      "Context should not contain <hot_session_state> tag");
-    assert.equal(contextText.includes("<pending_todos>"), false,
-      "Context should not contain <pending_todos> tag");
+    // Should NOT contain XML-like tags
+    assert.equal(prompt!.includes("<workspace_memory>"), false);
+    assert.equal(prompt!.includes("</workspace_memory>"), false);
+    assert.equal(prompt!.includes("<hot_session_state>"), false);
+    assert.equal(prompt!.includes("<pending_todos>"), false);
 
-    // Verify: context should NOT contain square bracket markers
-    assert.equal(contextText.includes("[PRIVATE COMPACTION CONTEXT"), false,
-      "Context should not contain square bracket markers");
+    // Should NOT contain HTML comments
+    assert.equal(prompt!.includes("<!--"), false);
 
-    // Verify: context should contain plain text headers
-    assert.equal(contextText.includes("Workspace memory") || contextText.includes("Hot session state") || contextText.includes("Pending todos"), true,
-      "Context should use plain text headers instead of XML tags");
+    // Should contain the ---free template heading
+    assert.equal(prompt!.includes("## Goal"), true,
+      "Prompt should use ## Goal heading, not --- separators");
+
+    // Should contain formatting rules that explicitly forbid ---
+    assert.equal(prompt!.includes("Do not output YAML frontmatter"), true,
+      "Prompt should explicitly forbid YAML frontmatter");
+    assert.equal(prompt!.includes("horizontal rules"), true,
+      "Prompt should explicitly forbid horizontal rules");
+
+    // Should contain Memory candidates format
+    assert.equal(prompt!.includes("Memory candidates:"), true,
+      "Prompt should include Memory candidates: label");
+
+    // Should contain our context data (hot session state)
+    assert.equal(prompt!.includes("Hot session state"), true,
+      "Prompt should include hot session state context");
+
+    // Verify: prompt starts with plain text, not a markup delimiter
+    assert.equal(prompt!.startsWith("---"), false,
+      "Prompt should not start with --- (YAML frontmatter)");
+    assert.equal(prompt!.startsWith("##"), false,
+      "Prompt should start with plain instructions, not a heading");
 
   } finally {
     await rm(tmpDir, { recursive: true, force: true });
   }
 });
 
-test("compactionContextHeader does not require XML output", async () => {
+test("compaction hook merges existing output.context from other plugins", async () => {
   const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-test-"));
 
   try {
     const client = mockRootClient();
     const plugin = await MemoryV2Plugin({ directory: tmpDir, client });
 
-    // Call the compaction hook to get the actual header
-    const output = { context: [] as string[] };
+    // Simulate another plugin having pushed context first
+    const output = { context: ["Other plugin context data"] };
     await (plugin as Record<string, Function>)["experimental.session.compacting"](
-      { sessionID: "test-header-session" },
+      { sessionID: "test-merge-context" },
       output
     );
 
-    const header = output.context[0] || "";
+    const prompt = (output as Record<string, unknown>).prompt as string | undefined;
+    assert.ok(prompt, "output.prompt should be set");
+    assert.equal(output.context.length, 0, "output.context should be cleared");
 
-    // Should instruct plain text label format (not Markdown headers)
-    assert.equal(header.includes("Memory candidates:"), true,
-      "Header should use plain text 'Memory candidates:' label");
+    // Should contain the other plugin's context
+    assert.equal(prompt!.includes("Other plugin context data"), true,
+      "Prompt should preserve context from other plugins");
 
   } finally {
     await rm(tmpDir, { recursive: true, force: true });
