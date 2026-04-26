@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MemoryV2Plugin } from "../src/plugin.ts";
 import { loadSessionState, saveSessionState } from "../src/session-state.ts";
+import { parseWorkspaceMemoryCandidates } from "../src/extractors.ts";
 import type { OpenError } from "../src/types.ts";
 
 // Mock client for root session (not a sub-agent)
@@ -245,4 +246,95 @@ test("experimental.session.compacting: context contains no XML tags for compacti
   } finally {
     await rm(tmpDir, { recursive: true, force: true });
   }
+});
+
+test("compactionContextHeader does not require XML output", async () => {
+  const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-test-"));
+
+  try {
+    const client = mockRootClient();
+    const plugin = await MemoryV2Plugin({ directory: tmpDir, client });
+
+    // Call the compaction hook to get the actual header
+    const output = { context: [] as string[] };
+    await (plugin as Record<string, Function>)["experimental.session.compacting"](
+      { sessionID: "test-header-session" },
+      output
+    );
+
+    const header = output.context[0] || "";
+
+    // Should instruct HTML comment format
+    assert.equal(header.includes("<!-- workspace_memory_candidates"), true,
+      "Header should instruct HTML comment format");
+
+    // Should NOT instruct legacy XML format as primary
+    // Note: We check that the instruction for HTML comments comes before any XML mention
+    const htmlCommentIndex = header.indexOf("<!-- workspace_memory_candidates");
+    const xmlTagIndex = header.indexOf("<workspace_memory_candidates>\n");
+    if (xmlTagIndex !== -1) {
+      assert.equal(htmlCommentIndex < xmlTagIndex, true,
+        "HTML comment format should be the primary instruction, not XML");
+    }
+
+    // Should explicitly forbid XML
+    assert.equal(header.includes("DO NOT use XML tags"), true,
+      "Header should forbid XML tags");
+
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("parseWorkspaceMemoryCandidates accepts HTML comment format", async () => {
+  const summary = `
+## Summary
+Progress made on testing.
+
+<!-- workspace_memory_candidates
+- [decision] Use HTML comments for candidates
+- [project] This repo uses Markdown for docs
+-->
+
+Next steps: continue development.
+`;
+
+  const candidates = parseWorkspaceMemoryCandidates(summary);
+  assert.equal(candidates.length, 2, "Should parse HTML comment format");
+  assert.equal(candidates[0].type, "decision");
+  assert.equal(candidates[1].type, "project");
+});
+
+test("parseWorkspaceMemoryCandidates accepts Markdown section format", async () => {
+  const summary = `
+## Summary
+Progress made on testing.
+
+## Workspace Memory Candidates
+- [reference] Check docs at README.md
+
+## Next Steps
+Continue development.
+`;
+
+  const candidates = parseWorkspaceMemoryCandidates(summary);
+  assert.equal(candidates.length, 1, "Should parse Markdown section format");
+  assert.equal(candidates[0].type, "reference");
+});
+
+test("parseWorkspaceMemoryCandidates still accepts legacy XML format", async () => {
+  const summary = `
+## Summary
+Progress made on testing.
+
+<workspace_memory_candidates>
+- [feedback] Users prefer darker themes
+</workspace_memory_candidates>
+
+Next steps: continue development.
+`;
+
+  const candidates = parseWorkspaceMemoryCandidates(summary);
+  assert.equal(candidates.length, 1, "Should parse legacy XML format");
+  assert.equal(candidates[0].type, "feedback");
 });

@@ -73,14 +73,16 @@ The following sections are PRIVATE INPUT for updating the compaction summary.
 DO NOT copy these sections, their headings, or their contents verbatim.
 Use the facts only to update the normal summary sections (Goal, Progress, etc.).
 
-At the VERY END of your summary, you MAY include ONE output block:
+At the VERY END of your summary, if there are durable memory candidates, include this hidden block:
 
-<workspace_memory_candidates>
+<!-- workspace_memory_candidates
 - [type] content (types: feedback, project, decision, reference)
-</workspace_memory_candidates>
+-->
 
 Only include truly durable information useful across FUTURE sessions.
 If nothing qualifies, omit the block entirely.
+DO NOT use XML tags like <workspace_memory_candidates>.
+DO NOT start with "---" frontmatter delimiters.
 
 [END PRIVATE COMPACTION CONTEXT]
 `.trim();

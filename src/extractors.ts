@@ -221,14 +221,34 @@ function shouldAcceptWorkspaceMemoryCandidate(entry: {
   return true;
 }
 
+/**
+ * Extract candidate block from summary using multiple formats.
+ * Supports: HTML comment, Markdown section, legacy XML.
+ */
+function extractCandidateBlock(summary: string): string | null {
+  // 1. HTML comment block (preferred, hidden from user)
+  const commentMatch = summary.match(/<!--\s*workspace_memory_candidates\s*\n([\s\S]*?)-->/i);
+  if (commentMatch) return commentMatch[1];
+
+  // 2. Markdown section (visible but clean)
+  const markdownMatch = summary.match(/##\s*Workspace Memory Candidates\s*\n([\s\S]*?)(?:\n##|$)/i);
+  if (markdownMatch) return markdownMatch[1];
+
+  // 3. Legacy XML block (backward compatible)
+  const xmlMatch = summary.match(/<workspace_memory_candidates>([\s\S]*?)<\/workspace_memory_candidates>/i);
+  if (xmlMatch) return xmlMatch[1];
+
+  return null;
+}
+
 export function parseWorkspaceMemoryCandidates(summary: string): LongTermMemoryEntry[] {
-  const match = summary.match(/<workspace_memory_candidates>([\s\S]*?)<\/workspace_memory_candidates>/i);
-  if (!match) return [];
+  const block = extractCandidateBlock(summary);
+  if (!block) return [];
 
   const now = new Date().toISOString();
   const entries: LongTermMemoryEntry[] = [];
 
-  for (const line of match[1].split("\n")) {
+  for (const line of block.split("\n")) {
     const item = line.trim().match(/^-\s*\[(feedback|project|decision|reference)\]\s*(.+)$/i);
     if (!item) continue;
     const type = item[1].toLowerCase() as LongTermType;
