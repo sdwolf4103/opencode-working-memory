@@ -9,10 +9,19 @@ Stop losing context when OpenCode compacts your conversation. This plugin automa
 
 ## What You Get
 
-- 🧠 **Workspace Memory** - Long-term memory that persists across sessions (decisions, project info, references)
-- 📡 **Hot Session State** - Automatic tracking of active files, open errors, and recent decisions
-- 🔧 **Smart Compaction** - Extracts and preserves important memories during compaction
-- ⚡ **Zero Configuration** - Works out of the box, no tools to call
+**Three-layer memory, zero extra API calls:**
+
+| Layer | Scope | What It Tracks | Persists? |
+|-------|-------|----------------|-----------|
+| **Workspace Memory** | Cross-session | Decisions, project info, references | ✅ Yes |
+| **Hot Session State** | Per-session | Active files, open errors | ❌ Resets |
+| **Native OpenCode** | Per-session | Todos | ✅ Built-in |
+
+**Key benefits:**
+- 🧠 **Remembers across sessions** — Workspace memory survives restarts
+- 🔌 **No extra API calls** — Piggybacks on existing compaction
+- 📡 **Zero configuration** — Works out of the box
+- 🔧 **Zero tools** — No manual memory management needed
 
 ## Installation
 
@@ -28,35 +37,77 @@ Restart OpenCode. The plugin activates automatically — no manual setup needed.
 
 ## How It Works
 
-The plugin operates via three automatic layers:
+**Three layers, zero API calls, automatic persistence:**
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│  WORKSPACE MEMORY (Long-term, cross-session)                │
-│  Storage: ~/.local/share/opencode-working-memory/            │
-│           workspaces/{hash}/workspace-memory.json             │
-│                                                              │
-│  Types: feedback | project | decision | reference           │
-│  Sources: explicit (user) | compaction | manual              │
-│  Limits: 5200 chars / 28 entries                              │
-└─────────────────────────────────────────────────────────────┘
-                              ↓
-┌─────────────────────────────────────────────────────────────┐
-│  HOT SESSION STATE (Short-term, per-session)                  │
-│  Storage: ~/.local/share/opencode-working-memory/            │
-│           workspaces/{hash}/sessions/{sessionID}.json        │
-│                                                              │
-│  Tracks:                                                     │
-│  • Active files (read, grep, edit, write actions)           │
-│  • Open errors (typecheck, test, lint, build, runtime)      │
-│  • Recent decisions (auto-extracted)                          │
-└─────────────────────────────────────────────────────────────┘
-                              ↓
-┌─────────────────────────────────────────────────────────────┐
-│  NATIVE OPENCODE STATE                                        │
-│  • Uses OpenCode's built-in todos during compaction          │
-│  • No additional storage required                            │
-└─────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│  LAYER 1: WORKSPACE MEMORY                                       │
+│  ┌────────────────────────────────────────────────────────────┐  │
+│  │  📦 Persists across sessions (in same workspace)           │  │
+│  │  📦 Survives compaction & restart                          │  │
+│  │                                                            │  │
+│  │  Stored in: ~/.local/share/.../workspace-memory.json       │  │
+│  │  Contains: decisions • project info • references           │  │
+│  │  Written: during compaction (no extra LLM call!)           │  │
+│  └────────────────────────────────────────────────────────────┘  │
+└──────────────────────────────────────────────────────────────────┘
+          ↑ extracted during compaction (piggyback, no API call)
+          │
+┌──────────────────────────────────────────────────────────────────┐
+│  LAYER 2: HOT SESSION STATE                                      │
+│  ┌────────────────────────────────────────────────────────────┐  │
+│  │  🔥 Per-session, auto-tracked, resets on new session       │  │
+│  │                                                            │  │
+│  │  Active files (what you're editing)                        │  │
+│  │  Open errors (typecheck, test, lint failures)              │  │
+│  │  Recent decisions (candidates for Layer 1)                 │  │
+│  └────────────────────────────────────────────────────────────┘  │
+└──────────────────────────────────────────────────────────────────┘
+          ↑ harvested during compaction → promoted to Layer 1
+          │
+┌──────────────────────────────────────────────────────────────────┐
+│  LAYER 3: NATIVE OPENCODE STATE                                  │
+│  ┌────────────────────────────────────────────────────────────┐  │
+│  │  ✅ Uses OpenCode's built-in todos                         │  │
+│  │  ✅ No plugin storage needed                               │  │
+│  │  ✅ Delegates to native features                           │  │
+│  └────────────────────────────────────────────────────────────┘  │
+└──────────────────────────────────────────────────────────────────┘
+
+KEY INSIGHT: Layer 1 memories are extracted during OpenCode's
+             built-in compaction summary — NO additional LLM call!
+```
+
+### The Compaction Flow (No Extra API Call)
+
+```
+User Message ───────────────┐
+                            │
+Agent Response ─────────────┤
+                            │  normal conversation
+... more turns ... ─────────┤
+                            │
+                            ▼
+              ╔═══════════════════════════════════════════╗
+              ║     COMPACTION (OpenCode built-in)        ║
+              ║                                           ║
+              ║  OpenCode already calls LLM to summarize  ║
+              ║  ──────────────────────────────────────── ║
+              ║  Plugin piggybacks on THIS call           ║
+              ║  to extract workspace memory candidates   ║
+              ║                                           ║
+              ║  Output includes:                         ║
+              ║  <workspace_memory_candidates>            ║
+              ║  - [decision] Use npm cache for plugins   ║
+              ║  - [project] React 18 with TypeScript     ║
+              ║  </workspace_memory_candidates>           ║
+              ╚═══════════════════════════════════════════╝
+                            │
+                            ▼
+              ┌─────────────────────────────────┐
+              │  Workspace Memory Updated       │
+              │  (persists across sessions)     │
+              └─────────────────────────────────┘
 ```
 
 ### Workspace Memory (Long-term)
