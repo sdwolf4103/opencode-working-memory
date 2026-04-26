@@ -85,3 +85,131 @@ test("extractExplicitMemories captures from now on", () => {
   assert.equal(items.length, 1);
   assert.match(items[0].text, /Traditional Chinese/);
 });
+
+// ============================================
+// Task 6: Negative memory request tests
+// ============================================
+
+test("extractExplicitMemories ignores Chinese negative request", () => {
+  const items = extractExplicitMemories("不要記住：這個 repo 使用 npm cache");
+  assert.equal(items.length, 0);
+});
+
+test("extractExplicitMemories ignores English negative request", () => {
+  const items = extractExplicitMemories("please don't remember this: use npm cache");
+  assert.equal(items.length, 0);
+});
+
+test("extractExplicitMemories does not false positive on 'not forget'", () => {
+  // "remember this" in middle of sentence should NOT match (not a directive)
+  const items = extractExplicitMemories("I will not forget to remember this: use pnpm");
+  assert.equal(items.length, 0);
+});
+
+test("extractExplicitMemories captures remember at line start", () => {
+  // "remember this" at line start IS a directive
+  const items = extractExplicitMemories("remember this: use pnpm for all packages");
+  assert.equal(items.length, 1);
+  assert.match(items[0].text, /pnpm/);
+});
+
+test("extractExplicitMemories still captures positive request after negative", () => {
+  // Ensure negative guard doesn't block positive requests
+  const items = extractExplicitMemories("記住：使用 pnpm 來管理套件");
+  assert.equal(items.length, 1);
+  assert.match(items[0].text, /pnpm/);
+});
+
+test("extractExplicitMemories captures multiple memories in same message", () => {
+  const items = extractExplicitMemories("請記住：使用 pnpm 管理套件\n記住這點：用 TypeScript 撰寫程式碼");
+  assert.equal(items.length, 2);
+});
+
+// ============================================
+// Task 7: Compaction quality gate tests
+// ============================================
+
+import { parseWorkspaceMemoryCandidates } from "../src/extractors.ts";
+
+test("parseWorkspaceMemoryCandidates rejects short text", () => {
+  const summary = `
+<workspace_memory_candidates>
+- [decision] short text
+</workspace_memory_candidates>
+`;
+  const items = parseWorkspaceMemoryCandidates(summary);
+  assert.equal(items.length, 0);
+});
+
+test("parseWorkspaceMemoryCandidates rejects git commit hash", () => {
+  const summary = `
+<workspace_memory_candidates>
+- [project] abc123def456 is the commit hash
+</workspace_memory_candidates>
+`;
+  const items = parseWorkspaceMemoryCandidates(summary);
+  assert.equal(items.length, 0);
+});
+
+test("parseWorkspaceMemoryCandidates rejects raw error", () => {
+  const summary = `
+<workspace_memory_candidates>
+- [feedback] TypeError: Cannot read property 'x' of undefined
+</workspace_memory_candidates>
+`;
+  const items = parseWorkspaceMemoryCandidates(summary);
+  assert.equal(items.length, 0);
+});
+
+test("parseWorkspaceMemoryCandidates rejects stack trace", () => {
+  const summary = `
+<workspace_memory_candidates>
+- [reference] at foo (bar.ts:10:5)
+</workspace_memory_candidates>
+`;
+  const items = parseWorkspaceMemoryCandidates(summary);
+  assert.equal(items.length, 0);
+});
+
+test("parseWorkspaceMemoryCandidates rejects commit prefix", () => {
+  const summary = `
+<workspace_memory_candidates>
+- [project] fix: add new feature
+</workspace_memory_candidates>
+`;
+  const items = parseWorkspaceMemoryCandidates(summary);
+  assert.equal(items.length, 0);
+});
+
+test("parseWorkspaceMemoryCandidates rejects path-heavy facts", () => {
+  const summary = `
+<workspace_memory_candidates>
+- [project] files at /src/a.ts /src/b.ts /src/c.ts are important
+</workspace_memory_candidates>
+`;
+  const items = parseWorkspaceMemoryCandidates(summary);
+  assert.equal(items.length, 0);
+});
+
+test("parseWorkspaceMemoryCandidates accepts valid decision", () => {
+  const summary = `
+<workspace_memory_candidates>
+- [decision] Use pnpm instead of npm for package management
+</workspace_memory_candidates>
+`;
+  const items = parseWorkspaceMemoryCandidates(summary);
+  assert.equal(items.length, 1);
+  assert.equal(items[0].type, "decision");
+  assert.match(items[0].text, /pnpm/);
+});
+
+test("parseWorkspaceMemoryCandidates accepts valid project info", () => {
+  const summary = `
+<workspace_memory_candidates>
+- [project] This project uses TypeScript for all source files
+</workspace_memory_candidates>
+`;
+  const items = parseWorkspaceMemoryCandidates(summary);
+  assert.equal(items.length, 1);
+  assert.equal(items[0].type, "project");
+});
