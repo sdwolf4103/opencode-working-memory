@@ -84,10 +84,7 @@ function extractEntityKey(text: string): string | null {
   if (/opencode.*agenthub/i.test(normalized)) {
     return "opencode-agenthub plugin system";
   }
-  // plugin config variations
-  if (/plugin.*config|config.*plugin/i.test(normalized)) {
-    return "plugin config";
-  }
+  // For generic config references, fall back to canonical text dedup — no entity key
   return null;
 }
 
@@ -120,9 +117,13 @@ function feedbackTopicKey(text: string): string | null {
   if (/purple.*italic/i.test(normalized)) {
     return "purple-italic-rendering";
   }
-  // Browser login/server errors
-  if (/login.*500|500.*internal|server.*error|port.*occup/i.test(normalized)) {
-    return "server-error-port-issue";
+  // Browser login/server errors (500 internal_error)
+  if (/login.*500|500.*internal|internal_error|server.*error/i.test(normalized)) {
+    return "server-error";
+  }
+  // Port occupied / environment issues
+  if (/port.*occup|9473|端口|舊進程|旧进程/i.test(normalized)) {
+    return "port-occupied-environment";
   }
   // Theme preferences
   if (/theme|dark.*light|prefer.*theme/i.test(normalized)) {
@@ -198,8 +199,12 @@ export function enforceLongTermLimits(entries: LongTermMemoryEntry[]): LongTermM
     const existing = entityDeduped.get(key);
     if (!existing) {
       entityDeduped.set(key, entry);
-    } else if (chooseBetterMemory(entry, existing) === entry) {
-      entityDeduped.set(key, entry);
+    } else {
+      // Feedback topic conflicts use supersession mode (newer beats longer)
+      const mode = entry.type === "feedback" && entityKey ? "supersession" as const : "entity" as const;
+      if (chooseBetterMemory(entry, existing, mode) === entry) {
+        entityDeduped.set(key, entry);
+      }
     }
   }
 

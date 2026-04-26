@@ -381,3 +381,36 @@ test("enforceLongTermLimits supersession: newer shorter decision beats older lon
   assert.equal(decisions.length, 1, "Newer shorter decision should supersede older longer one");
   assert.ok(decisions[0].text.includes("4 formats"), "Kept entry should be the newer 4-formats");
 });
+
+test("enforceLongTermLimits feedback: English port issue does NOT collapse with server error", () => {
+  const entries = [
+    agedEntry("e1", "Browser login 500 internal_error, code correct but cause unknown", "feedback", { daysAgo: 0 }),
+    agedEntry("e2", "Port 9473 occupied by old process, may need to kill and restart", "feedback", { daysAgo: 0 }),
+  ];
+
+  const kept = enforceLongTermLimits(entries);
+  const feedbackEntries = kept.filter(e => e.type === "feedback");
+  assert.equal(feedbackEntries.length, 2, "English port issue and server error should remain separate");
+});
+
+test("enforceLongTermLimits config: unrelated generic plugin configs do NOT collapse", () => {
+  const entries = [
+    agedEntry("c1", "Vite plugin config location: vite.config.ts at project root", "reference", { daysAgo: 0 }),
+    agedEntry("c2", "ESLint plugin config location: eslint.config.js at project root", "reference", { daysAgo: 0 }),
+  ];
+
+  const kept = enforceLongTermLimits(entries);
+  const refEntries = kept.filter(e => e.type === "reference");
+  assert.equal(refEntries.length, 2, "Unrelated plugin configs without entity key should remain separate");
+});
+
+test("enforceLongTermLimits feedback: supersession prefers newer shorter over older longer", () => {
+  // Same purple/italic issue, newer shorter fix supersedes older verbose fix
+  const older = agedEntry("f1", "Purple/italic text issue resolved by using plain text labels instead of any special markup syntax in the prompt", "feedback", { daysAgo: 5 });
+  const newer = agedEntry("f2", "Purple/italic text fixed via template replacement", "feedback", { daysAgo: 0 });
+
+  const kept = enforceLongTermLimits([older, newer]);
+  const feedbackEntries = kept.filter(e => e.type === "feedback");
+  assert.equal(feedbackEntries.length, 1, "Newer shorter feedback should supersede older longer");
+  assert.ok(feedbackEntries[0].text.includes("template replacement"), "Kept entry should be the newer fix");
+});
