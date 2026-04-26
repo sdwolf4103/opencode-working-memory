@@ -1,9 +1,18 @@
 {
   "name": "opencode-working-memory",
-  "version": "1.1.2",
+  "version": "1.2.0",
   "description": "Three-layer memory architecture for OpenCode with workspace memory and hot session state",
   "type": "module",
   "main": "index.ts",
+  "exports": {
+    ".": "./index.ts"
+  },
+  "files": [
+    "index.ts",
+    "src/",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "build": "node -e \"console.log('No build step required: OpenCode loads index.ts directly')\"",
     "typecheck": "tsc --noEmit",

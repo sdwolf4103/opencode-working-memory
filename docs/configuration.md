@@ -90,7 +90,7 @@ Score formula: `count * action_weight * recency_decay`
     └── {workspaceKey}/
         ├── workspace-memory.json      # Long-term memory
         └── sessions/
-            └── {sessionID}.json      # Session state
+            └── {hashedSessionID}.json # Session state (hashed)
 ```
 
 ### Workspace Key
@@ -98,6 +98,13 @@ Score formula: `count * action_weight * recency_decay`
 ```typescript
 // First 16 characters of SHA-256 hash
 const workspaceKey = sha256(realpath(workspaceRoot)).slice(0, 16);
+```
+
+### Session ID
+
+```typescript
+// Hashed session ID for privacy
+const hashedSessionID = sha256(sessionID).slice(0, 32);
 ```
 
 ## Customization

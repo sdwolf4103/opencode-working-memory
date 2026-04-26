@@ -11,7 +11,7 @@ The Working Memory Plugin implements a **three-layer memory architecture** desig
 │  • Types: feedback | project | decision | reference        │
 │  • Sources: explicit | compaction | manual                  │
 │  • Limits: 5200 chars / 28 entries                          │
-│  • Survives: session reset, workspace switch                │
+│  • Survives: session reset, compaction (same workspace)    │
 └─────────────────────────────────────────────────────────────┘
                               ↓
 ┌─────────────────────────────────────────────────────────────┐
@@ -135,16 +135,16 @@ Track current session context automatically:
 
 ### Active Files
 
-Automatically tracked from `tool.execute.before` events:
+Automatically tracked from `tool.execute.after` events:
 
-| Action | Ranking Boost |
-|--------|---------------|
-| `write` | 4x |
-| `edit` | 3x |
-| `read` | 2x |
-| `grep` | 1x |
+| Action | Weight |
+|--------|--------|
+| `edit` | 50 |
+| `write` | 45 |
+| `grep` | 30 |
+| `read` | 20 |
 
-Files are ranked by: `count * action_weight * recency_decay`
+Files are ranked by: `ACTION_WEIGHT[action] + count * 3`
 
 ### Open Errors
 
@@ -161,7 +161,7 @@ Tracked from `tool.execute.after` events when `exitCode !== 0`:
 **False Positive Guards**:
 - Commands like `git log`, `cat` with "error" in output are ignored
 - Only actual command failures (`exitCode !== 0`) trigger errors
-- `exitCode === undefined` is treated as success (no error tracking)
+- `exitCode === undefined` is ignored (no error created, no error cleared)
 
 ### Error Fingerprinting
 

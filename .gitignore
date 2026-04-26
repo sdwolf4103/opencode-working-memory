@@ -43,3 +43,8 @@ pnpm-lock.yaml
 
 # Git worktrees
 .worktrees/
+
+# OpenCode plugin runtime
+.opencode/
+.opencode-agenthub/
+.opencode-agenthub.user.json
