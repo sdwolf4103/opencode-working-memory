@@ -46,38 +46,65 @@ import {
 } from "./opencode.ts";
 
 /**
- * Generate the memory candidate instruction to include in compaction context.
+ * Strip XML-like tags from text for Markdown-neutral rendering.
+ * Converts `<workspace_memory>` blocks to plain "Workspace memory:" sections.
  */
-function memoryCandidateInstruction(): string {
+function stripXmlTags(text: string): string {
+  if (!text) return "";
+  
+  // Replace XML tag pairs with Markdown headers
+  return text
+    .replace(/<workspace_memory>\n?/gi, "## Workspace Memory\n")
+    .replace(/<\/workspace_memory>\n?/gi, "")
+    .replace(/<hot_session_state>\n?/gi, "## Hot Session State\n")
+    .replace(/<\/hot_session_state>\n?/gi, "")
+    .replace(/<pending_todos>\n?/gi, "## Pending Todos\n")
+    .replace(/<\/pending_todos>\n?/gi, "");
+}
+
+/**
+ * Generate instructions for the compaction model.
+ * IMPORTANT: These instructions make clear what should NOT be in the final output.
+ */
+function compactionContextHeader(): string {
   return `
-At the end of the compaction summary, include:
+[PRIVATE COMPACTION CONTEXT - DO NOT OUTPUT]
+The following sections are PRIVATE INPUT for updating the compaction summary.
+DO NOT copy these sections, their headings, or their contents verbatim.
+Use the facts only to update the normal summary sections (Goal, Progress, etc.).
+
+At the VERY END of your summary, you MAY include ONE output block:
 
 <workspace_memory_candidates>
-- [feedback] ...
-- [project] ...
-- [decision] ...
-- [reference] ...
+- [type] content (types: feedback, project, decision, reference)
 </workspace_memory_candidates>
 
-Only include durable information useful across future sessions in this exact workspace.
-Do NOT include active file lists, raw errors, temporary progress, stack traces, code signatures, API docs, git history, or facts easily rediscovered from the repository.
-For decisions, include rationale in one sentence.
-If nothing qualifies, output an empty block.
+Only include truly durable information useful across FUTURE sessions.
+If nothing qualifies, omit the block entirely.
+
+[END PRIVATE COMPACTION CONTEXT]
 `.trim();
 }
 
 /**
- * Render todos for compaction context.
+ * Generate the memory candidate instruction.
+ * This is included in compactionContextHeader() above.
  */
-function renderTodos(todos: Array<{ content: string; status: string; priority?: string }>): string {
-  if (todos.length === 0) return "";
+function memoryCandidateInstruction(): string {
+  return "";
+}
 
-  const lines = ["<pending_todos>"];
+/**
+ * Render todos for compaction context (Markdown-neutral format).
+ */
+function renderTodosForCompaction(todos: Array<{ content: string; status: string; priority?: string }>): string {
+  if (todos.length === 0) return "";
+  const lines = ["## Pending Todos"];
   for (const todo of todos) {
     const priority = todo.priority ? ` [${todo.priority}]` : "";
-    lines.push(`- ${todo.content}${priority}`);
+    const status = todo.status === "completed" ? "✓" : todo.status === "in_progress" ? "→" : "○";
+    lines.push(`- ${status} ${todo.content}${priority}`);
   }
-  lines.push("</pending_todos>");
   return lines.join("\n");
 }
 
@@ -300,37 +327,36 @@ export const MemoryV2Plugin: Plugin = async (input) => {
       // Sub-agents don't need compaction support
       if (await isSubAgent(sessionID)) return;
 
-      // Add compaction context with memory, hot state, todos, and instruction
+      // Build private context with Markdown-neutral format
       const contextParts: string[] = [];
 
-      // 1. Frozen workspace memory
+      // 1. Frozen workspace memory (strip XML tags for compaction context)
       const workspaceMemory = await getFrozenWorkspaceMemory(directory, sessionID);
       const workspacePrompt = renderWorkspaceMemory(workspaceMemory);
       if (workspacePrompt) {
-        contextParts.push(workspacePrompt);
+        contextParts.push(stripXmlTags(workspacePrompt));
       }
 
-      // 2. Hot session state
+      // 2. Hot session state (strip XML tags for compaction context)
       const sessionState = await loadSessionState(directory, sessionID);
       const hotPrompt = renderHotSessionState(sessionState, directory);
       if (hotPrompt) {
-        contextParts.push(hotPrompt);
+        contextParts.push(stripXmlTags(hotPrompt));
       }
 
-      // 3. Pending todos from OpenCode
+      // 3. Pending todos from OpenCode (Markdown-neutral format)
       const todos = await pendingTodos(client, sessionID);
-      const todosPrompt = renderTodos(todos);
+      const todosPrompt = renderTodosForCompaction(todos);
       if (todosPrompt) {
         contextParts.push(todosPrompt);
       }
 
-      // 4. Memory candidate instruction
-      contextParts.push(memoryCandidateInstruction());
+      // Combine into single private context block
+      const privateContext = contextParts.length > 0
+        ? `${compactionContextHeader()}\n\n${contextParts.join("\n\n")}`
+        : compactionContextHeader();
 
-      // Add to compaction context (output.context is an array)
-      for (const part of contextParts) {
-        output.context.push(part);
-      }
+      output.context.push(privateContext);
     },
 
     // Handle session events

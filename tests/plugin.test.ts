@@ -193,3 +193,56 @@ test("tool.execute.after: exitCode non-zero creates open error", async () => {
     await rm(tmpDir, { recursive: true, force: true });
   }
 });
+
+test("experimental.session.compacting: context contains no XML tags for compaction", async () => {
+  const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-test-"));
+
+  try {
+    const client = mockRootClient();
+    const plugin = await MemoryV2Plugin({ directory: tmpDir, client });
+
+    // Create a session state with some data
+    await saveSessionState(tmpDir, {
+      version: 1,
+      sessionID: "test-session-compaction",
+      turn: 1,
+      updatedAt: new Date().toISOString(),
+      activeFiles: [{ path: "/src/index.ts", action: "edit", count: 5, lastSeen: Date.now() }],
+      openErrors: [],
+      recentDecisions: [{ text: "Test decision", rationale: "Testing", source: "user", createdAt: Date.now() }],
+    });
+
+    // Call the compaction hook
+    const output = { context: [] as string[] };
+    await (plugin as Record<string, Function>)["experimental.session.compacting"](
+      { sessionID: "test-session-compaction" },
+      output
+    );
+
+    // The context should be a single string (private context block)
+    assert.equal(output.context.length, 1, "Context should be a single block");
+
+    const contextText = output.context[0];
+
+    // Verify: context should NOT contain XML-like tags that confuse Markdown
+    assert.equal(contextText.includes("<workspace_memory>"), false,
+      "Context should not contain <workspace_memory> tag");
+    assert.equal(contextText.includes("</workspace_memory>"), false,
+      "Context should not contain </workspace_memory> tag");
+    assert.equal(contextText.includes("<hot_session_state>"), false,
+      "Context should not contain <hot_session_state> tag");
+    assert.equal(contextText.includes("<pending_todos>"), false,
+      "Context should not contain <pending_todos> tag");
+
+    // Verify: context should contain the private context header
+    assert.equal(contextText.includes("[PRIVATE COMPACTION CONTEXT - DO NOT OUTPUT]"), true,
+      "Context should contain private context header");
+
+    // Verify: context should contain Markdown headers instead
+    assert.equal(contextText.includes("## Workspace Memory") || contextText.includes("## Hot Session State") || contextText.includes("## Pending Todos"), true,
+      "Context should use Markdown headers instead of XML tags");
+
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
