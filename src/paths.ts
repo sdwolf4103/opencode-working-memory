@@ -20,6 +20,10 @@ export async function workspaceMemoryPath(root: string): Promise<string> {
   return join(await memoryRoot(root), "workspace-memory.json");
 }
 
+export async function workspacePendingJournalPath(root: string): Promise<string> {
+  return join(await memoryRoot(root), "workspace-pending-journal.json");
+}
+
 export async function sessionStatePath(root: string, sessionID: string): Promise<string> {
   const safeSessionID = createHash("sha256").update(sessionID).digest("hex").slice(0, 32);
   return join(await memoryRoot(root), "sessions", `${safeSessionID}.json`);

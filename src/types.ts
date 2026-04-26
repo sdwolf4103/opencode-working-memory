@@ -32,6 +32,16 @@ export type WorkspaceMemoryStore = {
   updatedAt: string;
 };
 
+export type PendingMemoryJournalStore = {
+  version: 1;
+  workspace: {
+    root: string;
+    key: string;
+  };
+  entries: LongTermMemoryEntry[];
+  updatedAt: string;
+};
+
 export type ActiveFile = {
   path: string;
   action: "read" | "grep" | "edit" | "write";
@@ -69,6 +79,7 @@ export type SessionState = {
   activeFiles: ActiveFile[];
   openErrors: OpenError[];
   recentDecisions: SessionDecision[];
+  pendingMemories: LongTermMemoryEntry[];
 };
 
 export const LONG_TERM_LIMITS = {
@@ -86,4 +97,6 @@ export const HOT_STATE_LIMITS = {
   maxOpenErrorsStored: 5,
   maxOpenErrorsRendered: 3,
   maxRecentDecisionsStored: 8,
+  maxPendingMemoriesStored: 12,
+  maxPendingMemoriesRendered: 6,
 } as const;

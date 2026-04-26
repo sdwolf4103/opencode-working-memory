@@ -1,8 +1,9 @@
 import { relative } from "path";
 import { sessionStatePath } from "./paths.ts";
 import { atomicWriteJSON, readJSON, updateJSON } from "./storage.ts";
-import type { ActiveFile, OpenError, SessionDecision, SessionState } from "./types.ts";
+import type { ActiveFile, LongTermMemoryEntry, OpenError, SessionDecision, SessionState } from "./types.ts";
 import { HOT_STATE_LIMITS } from "./types.ts";
+import { memoryKey } from "./pending-journal.ts";
 
 const ACTION_WEIGHT: Record<ActiveFile["action"], number> = {
   edit: 50,
@@ -20,6 +21,7 @@ export function createEmptySessionState(sessionID: string): SessionState {
     activeFiles: [],
     openErrors: [],
     recentDecisions: [],
+    pendingMemories: [],
   };
 }
 
@@ -30,6 +32,7 @@ export async function loadSessionState(root: string, sessionID: string): Promise
   loaded.activeFiles = Array.isArray(loaded.activeFiles) ? loaded.activeFiles : [];
   loaded.openErrors = Array.isArray(loaded.openErrors) ? loaded.openErrors : [];
   loaded.recentDecisions = Array.isArray(loaded.recentDecisions) ? loaded.recentDecisions : [];
+  loaded.pendingMemories = Array.isArray(loaded.pendingMemories) ? loaded.pendingMemories : [];
   return loaded;
 }
 
@@ -48,6 +51,7 @@ export async function updateSessionState(
     current.activeFiles = Array.isArray(current.activeFiles) ? current.activeFiles : [];
     current.openErrors = Array.isArray(current.openErrors) ? current.openErrors : [];
     current.recentDecisions = Array.isArray(current.recentDecisions) ? current.recentDecisions : [];
+    current.pendingMemories = Array.isArray(current.pendingMemories) ? current.pendingMemories : [];
     return normalizeSessionState(await updater(current));
   });
 }
@@ -57,7 +61,21 @@ function normalizeSessionState(state: SessionState): SessionState {
   state.activeFiles = state.activeFiles.slice(0, HOT_STATE_LIMITS.maxActiveFilesStored);
   state.openErrors = state.openErrors.slice(0, HOT_STATE_LIMITS.maxOpenErrorsStored);
   state.recentDecisions = state.recentDecisions.slice(0, HOT_STATE_LIMITS.maxRecentDecisionsStored);
+  state.pendingMemories = dedupePendingMemories(Array.isArray(state.pendingMemories) ? state.pendingMemories : [])
+    .slice(-HOT_STATE_LIMITS.maxPendingMemoriesStored);
   return state;
+}
+
+function dedupePendingMemories(memories: LongTermMemoryEntry[]): LongTermMemoryEntry[] {
+  const seen = new Set<string>();
+  const deduped: LongTermMemoryEntry[] = [];
+  for (const memory of memories) {
+    const key = memoryKey(memory);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(memory);
+  }
+  return deduped;
 }
 
 export function touchActiveFile(state: SessionState, filePath: string, action: ActiveFile["action"]): void {
@@ -177,8 +195,10 @@ export function renderHotSessionState(state: SessionState, workspaceRoot: string
     .sort((a, b) => b.lastSeen - a.lastSeen)
     .slice(0, HOT_STATE_LIMITS.maxOpenErrorsRendered);
   const decisions = state.recentDecisions.slice(-HOT_STATE_LIMITS.maxRecentDecisionsStored);
+  const pendingMemories = dedupePendingMemories(state.pendingMemories)
+    .slice(-HOT_STATE_LIMITS.maxPendingMemoriesRendered);
 
-  if (activeFiles.length === 0 && openErrors.length === 0 && decisions.length === 0) return "";
+  if (activeFiles.length === 0 && openErrors.length === 0 && decisions.length === 0 && pendingMemories.length === 0) return "";
 
   const lines: string[] = ["Hot session state (current session):"];
 
@@ -201,6 +221,13 @@ export function renderHotSessionState(state: SessionState, workspaceRoot: string
     lines.push("recent_decisions:");
     for (const decision of decisions) {
       lines.push(`- ${decision.text}`);
+    }
+  }
+
+  if (pendingMemories.length > 0) {
+    lines.push("pending_memories:");
+    for (const memory of pendingMemories) {
+      lines.push(`- [${memory.type}] ${memory.text}`);
     }
   }
 

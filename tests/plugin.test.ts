@@ -1,18 +1,39 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { MemoryV2Plugin } from "../src/plugin.ts";
 import { loadSessionState, saveSessionState } from "../src/session-state.ts";
 import { parseWorkspaceMemoryCandidates } from "../src/extractors.ts";
 import type { OpenError } from "../src/types.ts";
+import { workspaceMemoryPath, workspacePendingJournalPath } from "../src/paths.ts";
+import { loadPendingJournal, savePendingJournal } from "../src/pending-journal.ts";
 
 // Mock client for root session (not a sub-agent)
 function mockRootClient() {
   return {
     session: {
       get: async () => ({ data: { parentID: null } }),
+      messages: async () => ({ data: [] }),
+      todo: async () => ({ data: [] }),
+    },
+  };
+}
+
+function mockClientWithLatestUser(text: string, messageID: string) {
+  return {
+    session: {
+      get: async () => ({ data: { parentID: null } }),
+      messages: async () => ({
+        data: [
+          {
+            info: { role: "user", id: messageID },
+            parts: [{ type: "text", text }],
+          },
+        ],
+      }),
+      todo: async () => ({ data: [] }),
     },
   };
 }
@@ -27,6 +48,7 @@ function createSessionWithError(sessionID: string, error: OpenError) {
     activeFiles: [],
     openErrors: [error],
     recentDecisions: [],
+    pendingMemories: [],
   };
 }
 
@@ -375,6 +397,230 @@ test("chat system transform reuses frozen rendered workspace snapshot", async ()
 
     assert.deepEqual(output2.system, ["base header"],
       "no compaction summary means no workspace memory prompt is added");
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("no compaction: explicit memory is promoted on next session start from durable journal", async () => {
+  const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-test-"));
+
+  try {
+    const firstClient = mockClientWithLatestUser("remember this: Prefer boring cache boundaries.", "msg-remember-1");
+    const firstPlugin = await MemoryV2Plugin({ directory: tmpDir, client: firstClient });
+
+    await (firstPlugin as Record<string, Function>)["experimental.chat.system.transform"](
+      { sessionID: "session-without-compaction", model: {} },
+      { system: ["base header"] },
+    );
+
+    const secondPlugin = await MemoryV2Plugin({ directory: tmpDir, client: mockRootClient() });
+    const output = { system: ["base header"] };
+
+    await (secondPlugin as Record<string, Function>)["experimental.chat.system.transform"](
+      { sessionID: "new-session", model: {} },
+      output,
+    );
+
+    const workspacePrompt = output.system.find((part: string) => part.startsWith("Workspace memory"));
+    assert.match(workspacePrompt ?? "", /Prefer boring cache boundaries/);
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("session.deleted promotes pending memories before deleting session state", async () => {
+  const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-test-"));
+
+  try {
+    const client = mockClientWithLatestUser("remember this: Promote pending memories before delete.", "msg-delete-1");
+    const plugin = await MemoryV2Plugin({ directory: tmpDir, client });
+
+    await (plugin as Record<string, Function>)["experimental.chat.system.transform"](
+      { sessionID: "delete-session", model: {} },
+      { system: ["base header"] },
+    );
+
+    await (plugin as Record<string, Function>)["event"]({
+      event: {
+        type: "session.deleted",
+        properties: { info: { id: "delete-session" } },
+      },
+    });
+
+    const nextPlugin = await MemoryV2Plugin({ directory: tmpDir, client: mockRootClient() });
+    const output = { system: ["base header"] };
+    await (nextPlugin as Record<string, Function>)["experimental.chat.system.transform"](
+      { sessionID: "after-delete-session", model: {} },
+      output,
+    );
+
+    const workspacePrompt = output.system.find((part: string) => part.startsWith("Workspace memory"));
+    assert.match(workspacePrompt ?? "", /Promote pending memories before delete/);
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("duplicate explicit memories dedupe by normalized type and text, not generated id", async () => {
+  const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-test-"));
+
+  try {
+    const pluginA = await MemoryV2Plugin({
+      directory: tmpDir,
+      client: mockClientWithLatestUser("remember this: Prefer stable cache boundaries.", "msg-a"),
+    });
+    await (pluginA as Record<string, Function>)["experimental.chat.system.transform"](
+      { sessionID: "dedupe-session", model: {} },
+      { system: ["base header"] },
+    );
+
+    const pluginB = await MemoryV2Plugin({
+      directory: tmpDir,
+      client: mockClientWithLatestUser("remember this: prefer   stable cache boundaries.", "msg-b"),
+    });
+    await (pluginB as Record<string, Function>)["experimental.chat.system.transform"](
+      { sessionID: "dedupe-session", model: {} },
+      { system: ["base header"] },
+    );
+
+    await (pluginB as Record<string, Function>)["event"]({
+      event: { type: "session.compacted", properties: { sessionID: "dedupe-session" } },
+    });
+
+    const output = { system: ["base header"] };
+    const pluginC = await MemoryV2Plugin({ directory: tmpDir, client: mockRootClient() });
+    await (pluginC as Record<string, Function>)["experimental.chat.system.transform"](
+      { sessionID: "dedupe-next", model: {} },
+      output,
+    );
+
+    const joined = output.system.join("\n");
+    assert.equal((joined.match(/stable cache boundaries/gi) ?? []).length, 1);
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("session.compacted promotes pending memories to workspace memory and clears pending list", async () => {
+  const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-test-"));
+
+  try {
+    const client = mockRootClient();
+    const plugin = await MemoryV2Plugin({ directory: tmpDir, client });
+
+    await saveSessionState(tmpDir, {
+      version: 1,
+      sessionID: "promote-session",
+      turn: 1,
+      updatedAt: new Date().toISOString(),
+      activeFiles: [],
+      openErrors: [],
+      recentDecisions: [],
+      pendingMemories: [{
+        id: "mem_pending_1",
+        type: "decision",
+        text: "Use frozen rendered snapshots for cache stability.",
+        source: "explicit",
+        confidence: 1,
+        status: "active",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      }],
+    });
+
+    await (plugin as Record<string, Function>)["event"]({
+      event: {
+        type: "session.compacted",
+        properties: { sessionID: "promote-session" },
+      },
+    });
+
+    const state = await loadSessionState(tmpDir, "promote-session");
+    assert.equal(state.pendingMemories.length, 0,
+      "pending memories should be cleared after promotion");
+
+    const after = { system: ["base header"] };
+    await (plugin as Record<string, Function>)["experimental.chat.system.transform"](
+      { sessionID: "new-session-after-promotion", model: {} },
+      after,
+    );
+
+    const workspacePrompt = after.system.find((part: string) => part.startsWith("Workspace memory"));
+    assert.match(workspacePrompt ?? "", /Use frozen rendered snapshots for cache stability/);
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("promotion failure does not clear pending memories in session or journal", async () => {
+  const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-test-"));
+
+  try {
+    const client = mockRootClient();
+    const plugin = await MemoryV2Plugin({ directory: tmpDir, client });
+
+    const now = new Date().toISOString();
+    await saveSessionState(tmpDir, {
+      version: 1,
+      sessionID: "failure-session",
+      turn: 0,
+      updatedAt: now,
+      activeFiles: [],
+      openErrors: [],
+      recentDecisions: [],
+      pendingMemories: [{
+        id: "mem_pending_failure",
+        type: "decision",
+        text: "Keep pending when promotion fails",
+        source: "explicit",
+        confidence: 1,
+        status: "active",
+        createdAt: now,
+        updatedAt: now,
+      }],
+    });
+
+    const journalPath = await workspacePendingJournalPath(tmpDir);
+    await mkdir(dirname(journalPath), { recursive: true });
+    const journal = await loadPendingJournal(tmpDir);
+    journal.entries = [{
+      id: "mem_pending_failure_journal",
+      type: "decision",
+      text: "Keep pending when promotion fails",
+      source: "explicit",
+      confidence: 1,
+      status: "active",
+      createdAt: now,
+      updatedAt: now,
+    }];
+    await savePendingJournal(tmpDir, journal);
+
+    const wmPath = await workspaceMemoryPath(tmpDir);
+    await rm(wmPath, { force: true }).catch(() => undefined);
+    await mkdir(wmPath, { recursive: true });
+
+    let didThrow = false;
+    try {
+      await (plugin as Record<string, Function>)["event"]({
+        event: {
+          type: "session.compacted",
+          properties: { sessionID: "failure-session" },
+        },
+      });
+    } catch {
+      didThrow = true;
+    }
+    assert.equal(didThrow, false,
+      "promotion failure should not throw from session.compacted handler");
+
+    const state = await loadSessionState(tmpDir, "failure-session");
+    assert.equal(state.pendingMemories.length, 1,
+      "session pending memories should remain when promotion fails");
+
+    const pendingAfter = await loadPendingJournal(tmpDir);
+    assert.equal(pendingAfter.entries.length, 1,
+      "journal pending memories should remain when promotion fails");
   } finally {
     await rm(tmpDir, { recursive: true, force: true });
   }

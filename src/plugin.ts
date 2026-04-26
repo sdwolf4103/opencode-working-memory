@@ -29,6 +29,13 @@ import {
   renderWorkspaceMemory,
 } from "./workspace-memory.ts";
 import {
+  appendPendingMemories,
+  clearPendingMemories,
+  hasPendingJournalEntries,
+  loadPendingJournal,
+  memoryKey,
+} from "./pending-journal.ts";
+import {
   loadSessionState,
   updateSessionState,
   touchActiveFile,
@@ -178,19 +185,13 @@ export const MemoryV2Plugin: Plugin = async (input) => {
 
     const memories = extractExplicitMemories(latestMessage.text);
     const decisions = memories.filter(memory => memory.type === "decision");
-    let workspaceMemory: Awaited<ReturnType<typeof loadWorkspaceMemory>> | undefined;
 
     if (memories.length > 0) {
-      workspaceMemory = await updateWorkspaceMemory(directory, store => {
-        store.entries.push(...memories);
-        return store;
+      await updateSessionState(directory, sessionID, state => {
+        state.pendingMemories.push(...memories);
+        return state;
       });
-
-      // Update frozen cache
-      const cached = frozenWorkspaceMemoryCache.get(sessionID);
-      if (cached) {
-        cached.store = workspaceMemory;
-      }
+      await appendPendingMemories(directory, memories);
     }
 
     if (decisions.length > 0) {
@@ -208,6 +209,45 @@ export const MemoryV2Plugin: Plugin = async (input) => {
 
     processedForSession.add(latestMessage.id);
     processedUserMessages.set(sessionID, processedForSession);
+  }
+
+  async function promotePendingMemories(sessionID?: string): Promise<void> {
+    const [journal, sessionState] = await Promise.all([
+      loadPendingJournal(directory),
+      sessionID ? loadSessionState(directory, sessionID) : Promise.resolve(undefined),
+    ]);
+
+    const pending = [
+      ...(sessionState?.pendingMemories ?? []),
+      ...journal.entries,
+    ];
+    if (pending.length === 0) return;
+
+    const promotedKeys = new Set<string>();
+    await updateWorkspaceMemory(directory, workspaceMemory => {
+      const existingKeys = new Set(workspaceMemory.entries.map(memory => memoryKey(memory)));
+
+      for (const memory of pending) {
+        const key = memoryKey(memory);
+        if (!existingKeys.has(key)) {
+          workspaceMemory.entries.push(memory);
+          existingKeys.add(key);
+        }
+        promotedKeys.add(key);
+      }
+
+      return workspaceMemory;
+    });
+
+    if (sessionID) {
+      await updateSessionState(directory, sessionID, state => {
+        state.pendingMemories = state.pendingMemories.filter(memory => !promotedKeys.has(memoryKey(memory)));
+        return state;
+      });
+      clearFrozenWorkspaceMemoryCache(sessionID);
+    }
+
+    await clearPendingMemories(directory, promotedKeys);
   }
 
   function bashExitCode(hookOutput: unknown): number | undefined {
@@ -272,6 +312,13 @@ export const MemoryV2Plugin: Plugin = async (input) => {
 
       // Sub-agents are short-lived - skip memory system
       if (await isSubAgent(sessionID)) return;
+
+      // Before first snapshot in this session, promote durable pending memories from
+      // prior sessions. Keep this before processing latest user text so current-turn
+      // explicit memory remains pending (not immediately frozen into system[1]).
+      if (!frozenWorkspaceMemoryCache.has(sessionID) && await hasPendingJournalEntries(directory)) {
+        await promotePendingMemories();
+      }
 
       // Process explicit user memory even on no-tool turns.
       await processLatestUserMessage(sessionID);
@@ -419,25 +466,32 @@ export const MemoryV2Plugin: Plugin = async (input) => {
         // Sub-agents don't need post-compaction processing
         if (await isSubAgent(sessionID)) return;
 
-        // Parse latest compaction summary for memory candidates
+        // Parse latest compaction summary for memory candidates, stage them into
+        // durable pending journal, then promote pending memories.
         const summary = await latestCompactionSummary(client, sessionID);
-        if (summary) {
-          const candidates = parseWorkspaceMemoryCandidates(summary);
-          if (candidates.length > 0) {
-            await updateWorkspaceMemory(directory, workspaceMemory => {
-              workspaceMemory.entries.push(...candidates);
-              return workspaceMemory;
-            });
+        const candidates = summary ? parseWorkspaceMemoryCandidates(summary) : [];
+        if (candidates.length > 0) {
+          await appendPendingMemories(directory, candidates);
+        }
 
-            // Clear frozen cache so next session reloads with new memories
-            clearFrozenWorkspaceMemoryCache(sessionID);
-          }
+        try {
+          await promotePendingMemories(sessionID);
+        } catch {
+          // Keep pending memories in session/journal for retry on next event/session.
         }
       }
 
       if (event.type === "session.deleted") {
         const sessionID = (event.properties as { info?: { id?: string } })?.info?.id;
         if (sessionID) {
+          // Promote pending memories before deleting per-session state.
+          // If promotion fails, leave session state and journal intact.
+          try {
+            await promotePendingMemories(sessionID);
+          } catch {
+            return;
+          }
+
           // Clean up caches
           frozenWorkspaceMemoryCache.delete(sessionID);
           processedUserMessages.delete(sessionID);
