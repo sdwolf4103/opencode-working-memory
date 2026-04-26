@@ -1,5 +1,51 @@
 # Release Notes
 
+## 1.2.1 (2026-04-26)
+
+### Compaction Memory Quality — Four-Layer Defense
+
+This release addresses systemic quality issues in workspace memory: duplicates, stale entries, and silently lost memory candidates. A four-layer defense is now in place:
+
+```
+Prompt    → Durable-content guidance keeps LLM on factual memories
+Parser    → Accepts bracketless format, filters session snapshots
+Storage   → Entity-key dedup + topic supersession + source priority
+Staleness → Age-based pruning of obsolete compaction/manual entries
+```
+
+### Key Features
+
+- **Self-cleaning memory**: Entity-key deduplication, topic supersession, and age-based staleness pruning automatically maintain memory quality
+- **Robust parser**: Accepts both bracketless (`- type text`) and bracketed (`- [type] text`) formats — no more silently lost memories
+- **Durable-content prompt**: Compaction template now guides LLM toward factual, long-lived memories while explicitly discouraging session ephemera
+- **Smart snapshot filtering**: Automatically rejects project-type snapshots (file counts, test counts, Phase progress) that don't belong in long-term memory
+
+### Fixed
+
+- **Bracketless format bug**: Parser regex only matched `- [type]` pattern; real LLM output often uses `- type` (no brackets). Both formats now accepted. (P0a)
+- **Purple/italic text in OpenCode UI**: Replaced XML/HTML comment templates with clean Markdown headings. Further hardened with negative instructions to forbid YAML frontmatter. (P0b β)
+- **Session snapshots polluting memory**: Project entries like "37 個文件", "26 tests pass", "Phase 2 completed" now rejected by parser filter. (P0c)
+- **Duplicate entries**: Entities deduped by key (e.g., `opencode-agenthub plugin system`). Topic conflicts resolved via supersession: newer shorter facts beat older verbose ones for decisions/feedback. (P0d)
+- **Stale entries never cleaned**: Compaction/manual entries with `staleAfterDays` now auto-pruned after 30-day grace period.
+- **Short reference entries rejected**: Admin PIN (`456123`) and config values (`Scrypt n=32768`) now allowed through config value allowlist despite being under 20 chars.
+
+### Changed
+
+- **`chooseBetterMemory`**: Now accepts `"entity"` mode (length preferred, for project/reference) and `"supersession"` mode (freshness preferred, for decision/feedback).
+- **Source priority in sort**: Manual/source priority now included as secondary sort tie-breaker after entry priority.
+
+### Technical Details
+
+- **Parser formats**: 4 accepted (plain text label primary, plus Markdown section, legacy section, legacy XML)
+- **Chinese counter words**: Regex matches `個`/`个` between numbers and nouns (e.g., `37 個文件`)
+- **Entity keys cautious**: Only known product keys extracted (`opencode-agenthub`); generic config references fall back to canonical text dedup
+
+### Tests
+
+- **70/70 tests pass** (24 workspace-memory, 34 extractors, 12 plugin)
+
+---
+
 ## 1.2.0 (2026-04-26)
 
 ### Memory V2 Architecture
