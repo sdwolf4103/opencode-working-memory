@@ -27,6 +27,16 @@ function isNegatedMemoryRequest(text: string, matchIndex: number): boolean {
     return true;
   }
 
+  // Japanese negative
+  if (/(?:覚えないで|記憶しないで|メモしないで)\s*$/u.test(prefix)) {
+    return true;
+  }
+
+  // Korean negative
+  if (/(?:기억하지\s*마|기억하지마|메모하지\s*마|메모하지마)\s*$/u.test(prefix)) {
+    return true;
+  }
+
   return false;
 }
 
@@ -35,7 +45,11 @@ export function extractExplicitMemories(text: string): LongTermMemoryEntry[] {
   // Pattern 必須在行首匹配，避免匹配到句子中間的非指令式用法
   const patterns = [
     // 中文：請/幫我 + 記住 + 可選後綴
-    /(?:^|\n)\s*(?:请|請)?(?:帮我|幫我)?(?:记住|記住)(?:这一点|這一點|这点|這點|这个|這個)?[:：,，]?\s*(.+)$/gim,
+    /(?:^|\n)\s*(?:请|請)?(?:帮我|幫我)?(?:记住|記住|记得|記得|记下来|記下來)(?:这一点|這一點|这点|這點|这个|這個)?[:：,，]?\s*(.+)$/gim,
+    // 日文（長詞優先）：覚えておいて must come before 覚えて
+    /(?:^|\n)\s*(?:覚えておいて|覚えて|忘れないで|メモして)[:：,，]?\s*(.+)$/gim,
+    // 韓文（長詞優先）：기억해줘/메모해줘 must come before 기억해/메모해
+    /(?:^|\n)\s*(?:기억해줘|기억해|잊지 마|잊지마|메모해줘|메모해)[:：,，]?\s*(.+)$/gim,
     // 英文：remember this/that - 必須在行首，避免 "to remember" 非指令匹配
     /(?:^|\n)\s*(?:please\s+)?remember\s+(?:this|that)?[:：,，]?\s*(.+)$/gim,
     // save/add to memory
@@ -179,6 +193,31 @@ export function classifyCommand(command: string): OpenError["category"] | null {
   return null;
 }
 
+function normalizeCandidateBody(body: string): { text: string; hadTrigger: boolean } | null {
+  const text = body.trim();
+  const triggerPatterns = [
+    /(?:请|請)?(?:帮我|幫我)?(?:记住|記住|记得|記得|记下来|記下來)(?:这一点|這一點|这点|這點|这个|這個)?[:：,，]?\s*(.+)$/im,
+    /(?:覚えておいて|覚えて|忘れないで|メモして)[:：,，]?\s*(.+)$/im,
+    /(?:기억해줘|기억해|잊지 마|잊지마|메모해줘|메모해)[:：,，]?\s*(.+)$/im,
+    /(?:please\s+)?remember\s+(?:this|that)?[:：,，]?\s*(.+)$/im,
+    /(?:please\s+)?(?:save|add)\s+(?:this|that)?\s*(?:to|in)\s+memory[:：,，]?\s*(.+)$/im,
+    /(?:please\s+)?commit\s+(?:this|that)?\s*to memory[:：,，]?\s*(.+)$/im,
+  ];
+
+  for (const pattern of triggerPatterns) {
+    const match = pattern.exec(text);
+    if (!match) continue;
+
+    const triggerIndex = match.index + (match[0].match(/^\s*/)?.[0]?.length || 0);
+    if (isNegatedMemoryRequest(text, triggerIndex)) return null;
+
+    const extracted = match[1]?.trim();
+    return extracted ? { text: extracted, hadTrigger: true } : null;
+  }
+
+  return { text, hadTrigger: false };
+}
+
 function extractFirstPath(text: string): string | undefined {
   return text.match(/[\w./-]+\.(ts|tsx|js|jsx|json|md|py|go|rs)/)?.[0];
 }
@@ -187,16 +226,22 @@ function extractFirstPath(text: string): string | undefined {
  * Quality gate for workspace memory candidates.
  * Rejects low-quality entries like git hashes, error messages, etc.
  */
-function shouldAcceptWorkspaceMemoryCandidate(entry: {
-  type: LongTermType;
-  text: string;
-}): boolean {
+function shouldAcceptWorkspaceMemoryCandidate(
+  entry: {
+    type: LongTermType;
+    text: string;
+  },
+  options: {
+    fromMemoryTrigger?: boolean;
+  } = {},
+): boolean {
   const text = entry.text.trim();
+  const minLength = options.fromMemoryTrigger ? 6 : 20;
 
   // Too short (with type-specific allowlist for stable config values)
   if (entry.type === "reference" && /\b(?:admin\s+)?pin\s|scrypt|n=\d+|r=\d+|p=\d+/i.test(text)) {
     // Stable config values can be short — allow below generic min length
-  } else if (text.length < 20) {
+  } else if (text.length < minLength) {
     return false;
   }
 
@@ -224,17 +269,31 @@ function shouldAcceptWorkspaceMemoryCandidate(entry: {
 
   // Session-specific progress snapshots for project type
   if (entry.type === "project") {
-    if (/\b\d+\s+tests?\s+pass(?:ed)?\b/i.test(text)) return false;
-    if (/\b\d+\s+suites?\b/i.test(text)) return false;
-    if (/\b\d+\s*(?:個|个)?\s*(?:files?|文件)/i.test(text)) return false;
-    // Reject "Phase N completed" using semantic window (within 20 chars either direction)
-    if (/\bphase\s*\d+(?:\s*[-–]\s*\d+)?\b.{0,20}\b(?:completed|done|finished)\b/i.test(text)) return false;
-    if (/\b(?:completed|done|finished)\b.{0,20}\bphase\s*\d+(?:\s*[-–]\s*\d+)?\b/i.test(text)) return false;
-    if (/已完成.{0,20}Phase\s*\d+(?:\s*[-–]\s*\d+)?/i.test(text)) return false;
-    if (/Phase\s*\d+(?:\s*[-–]\s*\d+)?.{0,20}已完成/i.test(text)) return false;
+    if (isProjectSnapshotViolation(text)) return false;
   }
 
   return true;
+}
+
+function isProjectSnapshotViolation(text: string): boolean {
+  // Test/suite counts
+  if (/\d+\s+tests?\s+pass(?:ed)?/i.test(text)) return true;
+  if (/\d+\s+suites?\s+(?:pass|fail)/i.test(text)) return true;
+
+  // File counts with snapshot/process context only, not static limits
+  if (/\d+\s*(?:個|个)?\s*(?:files?|文件)/i.test(text)) {
+    const hasSnapshotContext = /同步|synced|uploaded|downloaded|completed|generated|created|modified|processed|完成/i.test(text);
+    const hasLimitContext = /limit|max|maximum|min|minimum|supports?|allowed|per\s+(?:batch|request|upload)/i.test(text);
+    if (hasSnapshotContext && !hasLimitContext) return true;
+  }
+
+  // Phase/Wave/Sprint/Milestone/Task progress
+  if (/(?:phases?|waves?|sprints?|milestones?|tasks?)\s*\d+(?:\s*[-–]\s*\d+)?/i.test(text)) {
+    if (/completed|done|finished|完成/i.test(text)) return true;
+  }
+  if (/(?:已完成|完成).{0,30}(?:phases?|waves?|sprints?|milestones?|tasks?)/i.test(text)) return true;
+
+  return false;
 }
 
 /**
@@ -275,16 +334,22 @@ export function parseWorkspaceMemoryCandidates(summary: string): LongTermMemoryE
     );
     if (!item) continue;
     const type = (item[1] ?? item[2]).toLowerCase() as LongTermType;
-    const body = item[3].trim();
-    if (body.length < 12) continue;
+    const normalizedBody = normalizeCandidateBody(item[3]);
+    if (!normalizedBody) continue;
+
+    const minLength = normalizedBody.hadTrigger ? 6 : 12;
+    if (normalizedBody.text.length < minLength) continue;
 
     // Apply quality gate
-    if (!shouldAcceptWorkspaceMemoryCandidate({ type, text: body })) continue;
+    if (!shouldAcceptWorkspaceMemoryCandidate(
+      { type, text: normalizedBody.text },
+      { fromMemoryTrigger: normalizedBody.hadTrigger },
+    )) continue;
 
     entries.push({
       id: id("mem"),
       type,
-      text: body.slice(0, LONG_TERM_LIMITS.maxEntryTextChars),
+      text: normalizedBody.text.slice(0, LONG_TERM_LIMITS.maxEntryTextChars),
       source: "compaction",
       confidence: 0.75,
       status: "active",

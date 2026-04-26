@@ -1,7 +1,20 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import { join, dirname } from "node:path";
+import { tmpdir } from "node:os";
 import type { LongTermMemoryEntry, WorkspaceMemoryStore } from "../src/types.ts";
-import { renderWorkspaceMemory, enforceLongTermLimits } from "../src/workspace-memory.ts";
+import { LONG_TERM_LIMITS } from "../src/types.ts";
+import { workspaceMemoryPath } from "../src/paths.ts";
+import {
+  renderWorkspaceMemory,
+  enforceLongTermLimits,
+  redactCredentials,
+  isProjectSnapshotViolation,
+  runMigrationP0Cleanup,
+  loadWorkspaceMemory,
+  saveWorkspaceMemory,
+} from "../src/workspace-memory.ts";
 
 function entry(id: string, text: string, type: LongTermMemoryEntry["type"] = "decision"): LongTermMemoryEntry {
   const now = new Date().toISOString();
@@ -413,4 +426,230 @@ test("enforceLongTermLimits feedback: supersession prefers newer shorter over ol
   const feedbackEntries = kept.filter(e => e.type === "feedback");
   assert.equal(feedbackEntries.length, 1, "Newer shorter feedback should supersede older longer");
   assert.ok(feedbackEntries[0].text.includes("template replacement"), "Kept entry should be the newer fix");
+});
+
+// ============================================
+// Workspace cleanup migration tests
+// ============================================
+
+test("redactCredentials preserves PIN delimiter variants", () => {
+  assert.equal(redactCredentials("Admin PIN 是 456123"), "Admin PIN 是 [REDACTED]");
+  assert.equal(redactCredentials("Admin PIN = 456123"), "Admin PIN = [REDACTED]");
+  assert.equal(redactCredentials("Admin PIN 456123"), "Admin PIN [REDACTED]");
+});
+
+test("redactCredentials handles multilingual passwords", () => {
+  assert.equal(redactCredentials("パスワード：secret"), "パスワード：[REDACTED]");
+  assert.equal(redactCredentials("비밀번호: secret"), "비밀번호: [REDACTED]");
+  assert.equal(redactCredentials("contraseña: secret"), "contraseña: [REDACTED]");
+});
+
+test("redactCredentials handles username+password pair and punctuation boundary", () => {
+  assert.equal(
+    redactCredentials("測試用戶名：shihlab，密碼：sushi"),
+    "測試用戶名：[REDACTED]，密碼：[REDACTED]",
+  );
+  assert.equal(
+    redactCredentials("密碼：sushi，用於測試"),
+    "密碼：[REDACTED]，用於測試",
+  );
+});
+
+test("redactCredentials is idempotent and also redacts rationale text", () => {
+  assert.equal(redactCredentials("password: [REDACTED]"), "password: [REDACTED]");
+
+  const now = new Date().toISOString();
+  const store: WorkspaceMemoryStore = {
+    version: 1,
+    workspace: { root: "/repo", key: "abc" },
+    limits: { maxRenderedChars: 5200, maxEntries: 28 },
+    migrations: [],
+    entries: [
+      {
+        id: "cred",
+        type: "reference",
+        text: "Admin PIN 是 456123",
+        rationale: "password: sushi",
+        source: "explicit",
+        confidence: 1,
+        status: "active",
+        createdAt: now,
+        updatedAt: now,
+      },
+    ],
+    updatedAt: now,
+  };
+
+  const migrated = runMigrationP0Cleanup(
+    {
+      ...store,
+      entries: store.entries.map(entry => ({
+        ...entry,
+        text: redactCredentials(entry.text),
+        rationale: entry.rationale ? redactCredentials(entry.rationale) : undefined,
+      })),
+    },
+    now,
+  );
+  assert.equal(migrated.entries[0].text, "Admin PIN 是 [REDACTED]");
+  assert.equal(migrated.entries[0].rationale, "password: [REDACTED]");
+});
+
+test("isProjectSnapshotViolation detects wave progress and avoids limit context false positives", () => {
+  assert.equal(isProjectSnapshotViolation("1237 tests pass, 226 suites"), true);
+  assert.equal(isProjectSnapshotViolation("USB 同步：37 個文件"), true);
+  assert.equal(isProjectSnapshotViolation("Waves 1-5 已完成，Wave 6 deferred"), true);
+
+  assert.equal(isProjectSnapshotViolation("Upload limit is 10 files"), false);
+  assert.equal(isProjectSnapshotViolation("Project supports 5 test suites"), false);
+});
+
+test("runMigrationP0Cleanup marks only non-explicit project snapshots and runs once", () => {
+  const now = new Date().toISOString();
+  const later = new Date(Date.now() + 1000).toISOString();
+
+  const store: WorkspaceMemoryStore = {
+    version: 1,
+    workspace: { root: "/repo", key: "abc" },
+    limits: { maxRenderedChars: 5200, maxEntries: 28 },
+    migrations: [],
+    entries: [
+      {
+        id: "project-snapshot",
+        type: "project",
+        text: "Phase 1-4 已完成",
+        source: "compaction",
+        confidence: 0.75,
+        status: "active",
+        createdAt: now,
+        updatedAt: now,
+      },
+      {
+        id: "project-explicit",
+        type: "project",
+        text: "Waves 1-5 已完成",
+        source: "explicit",
+        confidence: 1,
+        status: "active",
+        createdAt: now,
+        updatedAt: now,
+      },
+      {
+        id: "feedback-snapshot-like",
+        type: "feedback",
+        text: "1237 tests pass",
+        source: "compaction",
+        confidence: 0.75,
+        status: "active",
+        createdAt: now,
+        updatedAt: now,
+      },
+    ],
+    updatedAt: now,
+  };
+
+  const once = runMigrationP0Cleanup(store, now);
+  assert.deepEqual(once.migrations, ["2026-04-26-p0-cleanup"]);
+  assert.equal(once.entries.find(e => e.id === "project-snapshot")?.status, "superseded");
+  assert.equal(once.entries.find(e => e.id === "project-explicit")?.status, "active");
+  assert.equal(once.entries.find(e => e.id === "feedback-snapshot-like")?.status, "active");
+
+  const twice = runMigrationP0Cleanup(once, later);
+  assert.deepEqual(twice.migrations, ["2026-04-26-p0-cleanup"], "migration id should not duplicate");
+  assert.equal(twice.entries.find(e => e.id === "project-snapshot")?.updatedAt, once.entries.find(e => e.id === "project-snapshot")?.updatedAt);
+});
+
+test("renderWorkspaceMemory excludes superseded entries", () => {
+  const now = new Date().toISOString();
+  const store: WorkspaceMemoryStore = {
+    version: 1,
+    workspace: { root: "/repo", key: "abc" },
+    limits: { maxRenderedChars: 5200, maxEntries: 28 },
+    migrations: ["2026-04-26-p0-cleanup"],
+    entries: [
+      {
+        id: "active-1",
+        type: "decision",
+        text: "Use pnpm for this workspace",
+        source: "compaction",
+        confidence: 0.75,
+        status: "active",
+        createdAt: now,
+        updatedAt: now,
+      },
+      {
+        id: "sup-1",
+        type: "project",
+        text: "Waves 1-5 已完成",
+        source: "compaction",
+        confidence: 0.75,
+        status: "superseded",
+        createdAt: now,
+        updatedAt: now,
+      },
+    ],
+    updatedAt: now,
+  };
+
+  const rendered = renderWorkspaceMemory(store);
+  assert.match(rendered, /Use pnpm/);
+  assert.doesNotMatch(rendered, /Waves 1-5 已完成/);
+});
+
+test("loadWorkspaceMemory normalizes and persists credentials from legacy unredacted store", async () => {
+  const sandbox = await mkdtemp(join(tmpdir(), "wm-redact-"));
+  const dataHome = join(sandbox, "xdg-data-home");
+  const root = join(sandbox, "workspace");
+  const previousXdgDataHome = process.env.XDG_DATA_HOME;
+  process.env.XDG_DATA_HOME = dataHome;
+
+  try {
+    const now = new Date().toISOString();
+    // Write UNREDACTED JSON directly to disk (simulating legacy store)
+    const unredactedStore: WorkspaceMemoryStore = {
+      version: 1,
+      workspace: { root, key: "test" },
+      limits: {
+        maxRenderedChars: LONG_TERM_LIMITS.maxRenderedChars,
+        maxEntries: LONG_TERM_LIMITS.maxEntries,
+      },
+      entries: [
+        {
+          id: "cred-1",
+          text: "Admin PIN 是 456123",
+          type: "project",
+          source: "compaction",
+          confidence: 0.75,
+          status: "active",
+          createdAt: now,
+          updatedAt: now,
+        },
+      ],
+      migrations: [],
+      updatedAt: now,
+    };
+
+    // Write directly to disk WITHOUT using saveWorkspaceMemory (which would redact)
+    const { mkdir, writeFile } = await import("node:fs/promises");
+    const storePath = await workspaceMemoryPath(root);
+    await mkdir(dirname(storePath), { recursive: true });
+    await writeFile(storePath, JSON.stringify(unredactedStore, null, 2), "utf-8");
+
+    // Load should normalize and redact
+    const loaded = await loadWorkspaceMemory(root);
+    assert.equal(loaded.entries[0].text, "Admin PIN 是 [REDACTED]");
+
+    // Verify persisted to disk (not just in-memory)
+    const { readFile } = await import("node:fs/promises");
+    const persistedRaw = await readFile(storePath, "utf-8");
+    const persisted = JSON.parse(persistedRaw);
+    assert.equal(persisted.entries[0].text, "Admin PIN 是 [REDACTED]");
+  } finally {
+    if (previousXdgDataHome === undefined) {
+      delete process.env.XDG_DATA_HOME;
+    } else {
+      process.env.XDG_DATA_HOME = previousXdgDataHome;
+    }
+    await rm(sandbox, { recursive: true, force: true });
+  }
 });

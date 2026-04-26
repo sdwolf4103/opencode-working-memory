@@ -1,5 +1,30 @@
 # Release Notes
 
+## 1.2.2 (2026-04-27)
+
+### Safer Multilingual Memory Capture
+
+This release strengthens explicit memory handling across languages while keeping sensitive credentials out of stored workspace memory.
+
+### Key Features
+
+- **Always-on credential redaction**: Credentials are redacted both when memory is loaded and when it is saved
+- **Multilingual memory triggers**: Added Japanese and Korean explicit-memory phrases, plus expanded Chinese coverage
+- **Expanded snapshot filtering**: Rejects Wave/Sprint/Milestone/Task progress snapshots that should not become durable memory
+- **Higher memory quality bar**: Extraction now focuses on durable facts that will change future behavior
+
+### Fixed
+
+- **Credential leakage risk**: Password/PIN-style values are now redacted with delimiter-preserving patterns, including multilingual labels such as `パスワード`, `비밀번호`, `contraseña`, `mot de passe`, and `Passwort`.
+- **Missing non-English explicit memory requests**: Japanese (`覚えて`, `メモして`), Korean (`기억해`, `메모해줘`), and additional Chinese triggers are now recognized.
+- **Progress snapshots polluting memory**: Wave/Sprint/Milestone/Task status updates are filtered from long-term memory unless they contain durable facts.
+
+### Migration
+
+- Runs one-time cleanup for legacy snapshot entries: `2026-04-26-p0-cleanup`
+
+---
+
 ## 1.2.1 (2026-04-26)
 
 ### Compaction Memory Quality — Four-Layer Defense

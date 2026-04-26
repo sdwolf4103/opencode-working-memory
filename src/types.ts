@@ -28,6 +28,7 @@ export type WorkspaceMemoryStore = {
     maxEntries: number;
   };
   entries: LongTermMemoryEntry[];
+  migrations?: string[];
   updatedAt: string;
 };
 

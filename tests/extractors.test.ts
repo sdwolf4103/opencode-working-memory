@@ -304,6 +304,31 @@ Memory candidates:
   assert.equal(items.length, 0, "Phase progress is session snapshot, not durable milestone");
 });
 
+test("parseWorkspaceMemoryCandidates rejects wave/sprint/milestone/task progress snapshots", () => {
+  const summary = `
+Memory candidates:
+- project Waves 1-5 已完成，Wave 6 deferred
+- project Sprint 3 completed
+- project Milestone 2 done
+- project Task 8 finished
+`;
+
+  const items = parseWorkspaceMemoryCandidates(summary);
+  assert.equal(items.length, 0, "Wave/Sprint/Milestone/Task progress should be rejected as snapshots");
+});
+
+test("parseWorkspaceMemoryCandidates keeps file limits but rejects file sync snapshots", () => {
+  const summary = `
+Memory candidates:
+- project Upload limit is 10 files per request
+- project USB uploaded 37 files for sync verification
+`;
+
+  const items = parseWorkspaceMemoryCandidates(summary);
+  assert.equal(items.length, 1, "Should keep static file-limit facts and reject processed file-count snapshots");
+  assert.match(items[0].text, /Upload limit is 10 files/);
+});
+
 test("parseWorkspaceMemoryCandidates accepts durable project facts", () => {
   const summary = `
 Memory candidates:
@@ -360,4 +385,53 @@ Memory candidates:
 
   const items = parseWorkspaceMemoryCandidates(summary);
   assert.equal(items.length, 0, "Phase snapshot mid-description should still be rejected");
+});
+
+test("parseWorkspaceMemoryCandidates extracts Japanese triggers", () => {
+  const summary = `
+Memory candidates:
+- project 覚えて: このプロジェクトは pnpm を使う
+- project 覚えておいて: 日本語でメモ
+`;
+  const items = parseWorkspaceMemoryCandidates(summary);
+  assert.equal(items.length, 2);
+  assert.match(items[0].text, /pnpm/);
+});
+
+test("parseWorkspaceMemoryCandidates extracts Korean triggers", () => {
+  const summary = `
+Memory candidates:
+- project 기억해: 이 프로젝트는 pnpm을 사용한다
+- project 메모해줘: 한국어 메모
+`;
+  const items = parseWorkspaceMemoryCandidates(summary);
+  assert.equal(items.length, 2);
+});
+
+test("parseWorkspaceMemoryCandidates rejects negated Japanese triggers", () => {
+  const summary = `
+Memory candidates:
+- project 覚えないで 覚えて: 一時的なメモ
+`;
+  const items = parseWorkspaceMemoryCandidates(summary);
+  assert.equal(items.length, 0, "Negated Japanese trigger should be rejected");
+});
+
+test("parseWorkspaceMemoryCandidates rejects negated Korean triggers", () => {
+  const summary = `
+Memory candidates:
+- project 기억하지 마 기억해: 일시적인 메모
+`;
+  const items = parseWorkspaceMemoryCandidates(summary);
+  assert.equal(items.length, 0, "Negated Korean trigger should be rejected");
+});
+
+test("parseWorkspaceMemoryCandidates body extraction excludes trigger suffix", () => {
+  const summary = `
+Memory candidates:
+- project 覚えておいて: このプロジェクトは pnpm を使う
+`;
+  const items = parseWorkspaceMemoryCandidates(summary);
+  assert.equal(items[0].text, "このプロジェクトは pnpm を使う");
+  assert.equal(items[0].text.includes("おいて"), false);
 });

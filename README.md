@@ -133,6 +133,31 @@ Persists across sessions within the same workspace. Automatically extracted duri
 - `compaction` - Extracted during compaction (confidence: 0.75)
 - `manual` - Added programmatically (confidence: varies)
 
+### Explicit Memory Triggers
+
+Workspace memory is automatic, but you can also explicitly ask the agent to remember durable facts for future sessions.
+
+Use memory triggers for preferences, decisions, project conventions, and stable references — not temporary progress updates or secrets.
+
+| Language | Example trigger phrases |
+|----------|--------------------------|
+| English | `remember this`, `save to memory`, `commit to memory`, `from now on`, `my preference` |
+| Chinese | `记住`, `記住`, `记得`, `記得`, `请帮我记住`, `幫我記住` |
+| Japanese | `覚えて`, `覚えておいて`, `忘れないで`, `メモして` |
+| Korean | `기억해`, `기억해줘`, `잊지 마`, `메모해줘` |
+
+Negative requests are respected too, such as "don't remember this", `不要記住`, `覚えないで`, or `기억하지 마`.
+
+**Good examples:**
+- "Remember this: we prefer Vitest for new unit tests."
+- "覚えておいて: API clients should use the shared retry helper."
+- "기억해줘: this project uses pnpm, not npm."
+
+**Avoid:**
+- "Remember my password is hunter2." — credentials are redacted.
+- "Remember Sprint 3 is 40% done." — temporary progress snapshots are filtered.
+- "Remember the last command output." — session-specific details usually are not durable.
+
 ### Hot Session State (Short-term)
 
 Automatically tracks current session context:

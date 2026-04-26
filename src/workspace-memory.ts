@@ -5,6 +5,16 @@ import { atomicWriteJSON, readJSON, updateJSON } from "./storage.ts";
 
 // Minimum length for workspace_memory envelope: <workspace_memory>\n...\n</workspace_memory>
 const MIN_ENVELOPE_LENGTH = 80;
+const MIGRATION_ID = "2026-04-26-p0-cleanup";
+
+const SECRET_VALUE = String.raw`[^` + "`" + String.raw`'",，,\s\[]+`;
+
+const PASSWORD_LABELS = /password|passwd|pwd|密碼|密码|パスワード|비밀번호|contraseña|mot de passe|passwort/i;
+const USERNAME_LABELS = /username|user name|用戶名|用户名|ユーザー名|사용자명|usuario|utilisateur|benutzer/i;
+
+const PIN_PREFIX = String.raw`(\bPIN\b(?:\s*(?:是|=|:|：)\s*|\s+(?![是=:：])))`;
+const PASSWORD_PREFIX = String.raw`((?:${PASSWORD_LABELS.source})(?:\s*(?:是|=|:|：)\s*|\s+(?![是=:：])))`;
+const USERNAME_PREFIX = String.raw`((?:${USERNAME_LABELS.source})(?:\s*(?:是|=|:|：)\s*|\s+(?![是=:：])))`;
 
 export async function emptyWorkspaceMemory(root: string): Promise<WorkspaceMemoryStore> {
   return {
@@ -15,20 +25,53 @@ export async function emptyWorkspaceMemory(root: string): Promise<WorkspaceMemor
       maxEntries: LONG_TERM_LIMITS.maxEntries,
     },
     entries: [],
+    migrations: [],
     updatedAt: new Date().toISOString(),
   };
 }
 
 export async function loadWorkspaceMemory(root: string): Promise<WorkspaceMemoryStore> {
+  const path = await workspaceMemoryPath(root);
   const fallback = await emptyWorkspaceMemory(root);
-  const loaded = await readJSON(await workspaceMemoryPath(root), () => fallback);
-  loaded.workspace = { root, key: await workspaceKey(root) };
-  loaded.limits = {
-    maxRenderedChars: loaded.limits?.maxRenderedChars ?? LONG_TERM_LIMITS.maxRenderedChars,
-    maxEntries: loaded.limits?.maxEntries ?? LONG_TERM_LIMITS.maxEntries,
+  const loaded = await readJSON(path, () => fallback) as Partial<WorkspaceMemoryStore>;
+
+  const store: WorkspaceMemoryStore = {
+    version: loaded.version ?? 1,
+    workspace: loaded.workspace ?? { root, key: await workspaceKey(root) },
+    limits: {
+      maxRenderedChars: loaded.limits?.maxRenderedChars ?? LONG_TERM_LIMITS.maxRenderedChars,
+      maxEntries: loaded.limits?.maxEntries ?? LONG_TERM_LIMITS.maxEntries,
+    },
+    entries: Array.isArray(loaded.entries) ? loaded.entries : [],
+    migrations: Array.isArray(loaded.migrations) ? loaded.migrations : [],
+    updatedAt: loaded.updatedAt ?? fallback.updatedAt,
   };
-  loaded.entries = Array.isArray(loaded.entries) ? loaded.entries : [];
-  return loaded;
+
+  // Always normalize on load so redaction/migrations are always-on.
+  const normalized = await normalizeWorkspaceMemory(root, store);
+
+  // Persist only when meaningful content changed (ignore timestamps).
+  if (didStoreMeaningfullyChange(store, normalized)) {
+    await atomicWriteJSON(path, normalized);
+  }
+
+  return normalized;
+}
+
+function didStoreMeaningfullyChange(
+  before: WorkspaceMemoryStore,
+  after: WorkspaceMemoryStore,
+): boolean {
+  const sanitize = (store: WorkspaceMemoryStore) => ({
+    ...store,
+    updatedAt: "",
+    entries: store.entries.map(entry => ({
+      ...entry,
+      updatedAt: "",
+    })),
+  });
+
+  return JSON.stringify(sanitize(before)) !== JSON.stringify(sanitize(after));
 }
 
 export async function saveWorkspaceMemory(root: string, store: WorkspaceMemoryStore): Promise<void> {
@@ -52,14 +95,130 @@ async function normalizeWorkspaceMemory(
   root: string,
   store: WorkspaceMemoryStore,
 ): Promise<WorkspaceMemoryStore> {
-  store.workspace = { root, key: await workspaceKey(root) };
-  store.limits = {
-    maxRenderedChars: store.limits?.maxRenderedChars ?? LONG_TERM_LIMITS.maxRenderedChars,
-    maxEntries: store.limits?.maxEntries ?? LONG_TERM_LIMITS.maxEntries,
+  const nowIso = new Date().toISOString();
+
+  let result: WorkspaceMemoryStore = {
+    ...store,
+    workspace: { root, key: await workspaceKey(root) },
+    limits: {
+      maxRenderedChars: store.limits?.maxRenderedChars ?? LONG_TERM_LIMITS.maxRenderedChars,
+      maxEntries: store.limits?.maxEntries ?? LONG_TERM_LIMITS.maxEntries,
+    },
+    entries: Array.isArray(store.entries) ? store.entries : [],
+    migrations: Array.isArray(store.migrations) ? store.migrations : [],
+    updatedAt: nowIso,
   };
-  store.entries = enforceLongTermLimits(store.entries);
-  store.updatedAt = new Date().toISOString();
-  return store;
+
+  // Always-on credential redaction
+  result.entries = result.entries.map(entry => {
+    const text = redactCredentials(entry.text);
+    const rationale = entry.rationale ? redactCredentials(entry.rationale) : undefined;
+
+    if (text === entry.text && rationale === entry.rationale) {
+      return entry;
+    }
+
+    return {
+      ...entry,
+      text,
+      rationale,
+      updatedAt: nowIso,
+    };
+  });
+
+  // One-time migration for legacy snapshot violations
+  result = runMigrationP0Cleanup(result, nowIso);
+
+  // Enforce limits on active entries while preserving superseded entries in storage
+  const activeEntries = result.entries.filter(entry => entry.status !== "superseded");
+  const supersededEntries = result.entries.filter(entry => entry.status === "superseded");
+  const processedActive = enforceLongTermLimits(activeEntries);
+
+  return {
+    ...result,
+    entries: [...processedActive, ...supersededEntries],
+    updatedAt: nowIso,
+  };
+}
+
+export function redactCredentials(text: string): string {
+  let result = text;
+
+  // 1. PIN
+  result = result.replace(
+    new RegExp(String.raw`${PIN_PREFIX}[\`'"]?(${SECRET_VALUE})`, "gi"),
+    "$1[REDACTED]",
+  );
+
+  // 2. Username+password pair
+  result = result.replace(
+    new RegExp(
+      String.raw`${USERNAME_PREFIX}[\`'"]?(${SECRET_VALUE})((?:，|,)\s*)${PASSWORD_PREFIX}[\`'"]?(${SECRET_VALUE})`,
+      "gi",
+    ),
+    "$1[REDACTED]$3$4[REDACTED]",
+  );
+
+  // 3. Standalone password
+  result = result.replace(
+    new RegExp(String.raw`${PASSWORD_PREFIX}[\`'"]?(${SECRET_VALUE})`, "gi"),
+    "$1[REDACTED]",
+  );
+
+  return result;
+}
+
+export function isProjectSnapshotViolation(text: string): boolean {
+  // Test/suite counts
+  if (/\d+\s+tests?\s+pass(?:ed)?/i.test(text)) return true;
+  if (/\d+\s+suites?\s+(?:pass|fail)/i.test(text)) return true;
+
+  // File counts with snapshot context, excluding limit statements
+  if (/\d+\s*(?:個|个)?\s*(?:files?|文件)/i.test(text)) {
+    const hasSnapshotContext = /同步|synced|uploaded|downloaded|completed|generated|created|modified|processed|完成/i.test(text);
+    const hasLimitContext = /limit|max|maximum|min|minimum|supports?|allowed|per\s+(?:batch|request|upload)/i.test(text);
+    if (hasSnapshotContext && !hasLimitContext) return true;
+  }
+
+  // Phase/Wave/Sprint/Milestone/Task progress
+  if (/(?:phases?|waves?|sprints?|milestones?|tasks?)\s*\d+(?:\s*[-–]\s*\d+)?/i.test(text)) {
+    if (/completed|done|finished|完成/i.test(text)) return true;
+  }
+
+  if (/(?:已完成|完成).{0,30}(?:phases?|waves?|sprints?|milestones?|tasks?)/i.test(text)) return true;
+
+  return false;
+}
+
+export function runMigrationP0Cleanup(
+  store: WorkspaceMemoryStore,
+  nowIso: string,
+): WorkspaceMemoryStore {
+  if (store.migrations?.includes(MIGRATION_ID)) {
+    return store;
+  }
+
+  const entries = store.entries.map(entry => {
+    if (entry.source === "explicit") return entry;
+    if (entry.type !== "project") return entry;
+
+    if (isProjectSnapshotViolation(entry.text)) {
+      return {
+        ...entry,
+        status: "superseded" as const,
+        updatedAt: nowIso,
+      };
+    }
+
+    return entry;
+  });
+
+  return {
+    ...store,
+    entries,
+    migrations: [...(store.migrations || []), MIGRATION_ID],
+    updatedAt: nowIso,
+  };
 }
 
 function sourcePriority(source: LongTermMemoryEntry["source"]): number {
@@ -181,7 +340,7 @@ export function enforceLongTermLimits(entries: LongTermMemoryEntry[]): LongTermM
 
   // Phase 1: filter active, prune by age
   const phase1 = entries
-    .filter(entry => entry.status === "active")
+    .filter(entry => entry.status !== "superseded")
     .filter(entry => !isPrunableByAge(entry, now))
     .map(entry => ({ ...entry, text: entry.text.slice(0, LONG_TERM_LIMITS.maxEntryTextChars) }));
 
