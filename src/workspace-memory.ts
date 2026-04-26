@@ -145,7 +145,11 @@ function isPrunableByAge(entry: LongTermMemoryEntry, now: number): boolean {
 }
 
 /** Choose better memory when identity/topic keys conflict */
-function chooseBetterMemory(a: LongTermMemoryEntry, b: LongTermMemoryEntry): LongTermMemoryEntry {
+function chooseBetterMemory(
+  a: LongTermMemoryEntry,
+  b: LongTermMemoryEntry,
+  mode: "entity" | "supersession" = "entity",
+): LongTermMemoryEntry {
   // Source priority: explicit > manual > compaction
   if (sourcePriority(a.source) !== sourcePriority(b.source)) {
     return sourcePriority(a.source) > sourcePriority(b.source) ? a : b;
@@ -154,11 +158,20 @@ function chooseBetterMemory(a: LongTermMemoryEntry, b: LongTermMemoryEntry): Lon
   if (a.confidence !== b.confidence) {
     return a.confidence > b.confidence ? a : b;
   }
-  // Prefer longer (more specific) text
+  // For entity dedup: longer (more specific) beats shorter
+  // For supersession: newer beats older (and thus longer is not preferred)
+  if (mode === "supersession") {
+    // Newer wins for same-topic supersession
+    if (new Date(a.createdAt).getTime() !== new Date(b.createdAt).getTime()) {
+      return new Date(a.createdAt) > new Date(b.createdAt) ? a : b;
+    }
+    return a.text.length > b.text.length ? a : b;
+  }
+  // Entity mode: longer text means more specific
   if (Math.abs(a.text.length - b.text.length) > 10) {
     return a.text.length > b.text.length ? a : b;
   }
-  // Freshness tie-breaker: newer wins
+  // Freshness tie-breaker
   return new Date(a.createdAt) > new Date(b.createdAt) ? a : b;
 }
 
@@ -200,7 +213,7 @@ export function enforceLongTermLimits(entries: LongTermMemoryEntry[]): LongTermM
     const existing = decisionDeduped.get(key);
     if (!existing) {
       decisionDeduped.set(key, entry);
-    } else if (chooseBetterMemory(entry, existing) === entry) {
+    } else if (chooseBetterMemory(entry, existing, "supersession") === entry) {
       decisionDeduped.set(key, entry);
     }
   }
@@ -217,6 +230,8 @@ export function enforceLongTermLimits(entries: LongTermMemoryEntry[]): LongTermM
       const pA = priorityWithFreshness(a);
       const pB = priorityWithFreshness(b);
       if (pB !== pA) return pB - pA;
+      const sourceDiff = sourcePriority(b.source) - sourcePriority(a.source);
+      if (sourceDiff !== 0) return sourceDiff;
       return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
     })
     .slice(0, LONG_TERM_LIMITS.maxEntries);

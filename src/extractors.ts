@@ -193,8 +193,12 @@ function shouldAcceptWorkspaceMemoryCandidate(entry: {
 }): boolean {
   const text = entry.text.trim();
 
-  // Too short
-  if (text.length < 20) return false;
+  // Too short (with type-specific allowlist for stable config values)
+  if (entry.type === "reference" && /\b(?:admin\s+)?pin\s|scrypt|n=\d+|r=\d+|p=\d+/i.test(text)) {
+    // Stable config values can be short — allow below generic min length
+  } else if (text.length < 20) {
+    return false;
+  }
 
   // Git history / commit hash
   if (/\b[0-9a-f]{7,40}\b/.test(text)) return false;
@@ -219,16 +223,15 @@ function shouldAcceptWorkspaceMemoryCandidate(entry: {
   if (pathCount > 2) return false;
 
   // Session-specific progress snapshots for project type
-  // Only reject when Phase/completed appears at/near START (not mid-description)
   if (entry.type === "project") {
     if (/\b\d+\s+tests?\s+pass(?:ed)?\b/i.test(text)) return false;
     if (/\b\d+\s+suites?\b/i.test(text)) return false;
-    if (/\b\d+\s+(?:files?|文件)\b/i.test(text)) return false;
-    // Reject "Phase N completed" only when it appears early in the string (snapshot)
-    if (text.toLowerCase().indexOf("phase") < 25) {
-      if (/\bphase\s*\d+(?:\s*[-–]\s*\d+)?\s*(?:completed|done|finished)\b/i.test(text)) return false;
-      if (/已完成\s*Phase\s*\d+/i.test(text)) return false;
-    }
+    if (/\b\d+\s*(?:個|个)?\s*(?:files?|文件)/i.test(text)) return false;
+    // Reject "Phase N completed" using semantic window (within 20 chars either direction)
+    if (/\bphase\s*\d+(?:\s*[-–]\s*\d+)?\b.{0,20}\b(?:completed|done|finished)\b/i.test(text)) return false;
+    if (/\b(?:completed|done|finished)\b.{0,20}\bphase\s*\d+(?:\s*[-–]\s*\d+)?\b/i.test(text)) return false;
+    if (/已完成.{0,20}Phase\s*\d+(?:\s*[-–]\s*\d+)?/i.test(text)) return false;
+    if (/Phase\s*\d+(?:\s*[-–]\s*\d+)?.{0,20}已完成/i.test(text)) return false;
   }
 
   return true;

@@ -347,3 +347,37 @@ test("enforceLongTermLimits priority: freshness used as tie-breaker among same p
   assert.equal(kept.length, 1);
   assert.equal(kept[0].id, "newer", "Newer entry should win as tie-breaker");
 });
+
+test("enforceLongTermLimits feedback: 500 error and port issue are NOT collapsed", () => {
+  // Distinct feedback entries should remain separate
+  const entries = [
+    agedEntry("f1", "瀏覽器登入出現 500 internal_error，代碼邏輯正確但原因不明", "feedback", { daysAgo: 0 }),
+    agedEntry("f2", "端口 9473 可能被舊進程佔用，需殺掉後重啟", "feedback", { daysAgo: 0 }),
+  ];
+
+  const kept = enforceLongTermLimits(entries);
+  const feedbackEntries = kept.filter(e => e.type === "feedback");
+  assert.equal(feedbackEntries.length, 2, "Distinct feedback items should not collapse");
+});
+
+test("enforceLongTermLimits config: unrelated plugin configs are NOT collapsed", () => {
+  const entries = [
+    agedEntry("c1", "OpenCode plugin config: .opencode-agenthub/current/xdg/opencode/opencode.json in workspace", "reference", { daysAgo: 0 }),
+    agedEntry("c2", "Vite plugin config location: vite.config.ts at project root", "reference", { daysAgo: 0 }),
+  ];
+
+  const kept = enforceLongTermLimits(entries);
+  const refEntries = kept.filter(e => e.type === "reference");
+  assert.equal(refEntries.length, 2, "Unrelated plugin configs should remain separate");
+});
+
+test("enforceLongTermLimits supersession: newer shorter decision beats older longer one", () => {
+  // Same topic, same source, same confidence — newer wins even if shorter
+  const older = agedEntry("d1", "Parser supports 3 formats: HTML comment, Markdown section, legacy XML with backward compatibility", "decision", { daysAgo: 5 });
+  const newer = agedEntry("d2", "Parser supports 4 formats", "decision", { daysAgo: 0 });
+
+  const kept = enforceLongTermLimits([older, newer]);
+  const decisions = kept.filter(e => e.type === "decision" && /parser.*format/i.test(e.text));
+  assert.equal(decisions.length, 1, "Newer shorter decision should supersede older longer one");
+  assert.ok(decisions[0].text.includes("4 formats"), "Kept entry should be the newer 4-formats");
+});

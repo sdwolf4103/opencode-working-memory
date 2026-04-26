@@ -221,7 +221,7 @@ Memory candidates:
 test("parseWorkspaceMemoryCandidates accepts bracketless candidate format", () => {
   const summary = `
 Memory candidates:
-- project pathology-playground 後端健康改進計劃已完成 Phase 1-4
+- project Backend health improvements organized into phased milestones
 - reference Scrypt 參數必須是 N=16384, r=8, p=1
 - feedback 端口 9473 可能被舊進程佔用，需殺掉後重啟
 - decision Use output.prompt to replace the default compaction template
@@ -316,16 +316,48 @@ Memory candidates:
   assert.equal(items.length, 3, "Durable project facts should pass");
 });
 
-test("parseWorkspaceMemoryCandidates accepts durable reference values with numbers", () => {
-  // Scrypt has sufficient length (>20 chars) and no paths - should pass quality gate
-  // Admin PIN too short (<20 chars) - intentionally omitted to isolate the test
+test("parseWorkspaceMemoryCandidates accepts short Admin PIN reference entry", () => {
+  // Real Admin PIN is <20 chars — should pass via config value allowlist
   const summary = `
 Memory candidates:
-- reference Scrypt 參數必須是 N=16384, r=8, p=1，必須嚴格遵守
-- reference Admin PIN 456123 是系統管理員的預設登入密碼
+- reference Admin PIN 是 456123
 `;
 
   const items = parseWorkspaceMemoryCandidates(summary);
-  assert.equal(items.length, 2, "Both durable reference values with numbers should pass quality gate");
-  assert.deepEqual(items.map(i => i.type), ["reference", "reference"]);
+  assert.equal(items.length, 1, "Short config reference should pass via allowlist");
+  assert.equal(items[0].type, "reference");
+});
+
+test("parseWorkspaceMemoryCandidates accepts Scrypt config reference", () => {
+  // Scrypt parameters with numbers should pass
+  const summary = `
+Memory candidates:
+- reference Scrypt 參數必須是 N=16384, r=8, p=1
+`;
+
+  const items = parseWorkspaceMemoryCandidates(summary);
+  assert.equal(items.length, 1, "Scrypt config values should pass");
+  assert.equal(items[0].type, "reference");
+});
+
+test("parseWorkspaceMemoryCandidates rejects Chinese file count snapshot", () => {
+  // Real Chinese file count with counter word 個
+  const summary = `
+Memory candidates:
+- project USB 同步：37 個文件（bundles, server, frontend, tests, docs）
+`;
+
+  const items = parseWorkspaceMemoryCandidates(summary);
+  assert.equal(items.length, 0, "Chinese file count with 個 should be rejected");
+});
+
+test("parseWorkspaceMemoryCandidates rejects real phase snapshot mid-description", () => {
+  // Real phase snapshot where Phase appears deep in the string
+  const summary = `
+Memory candidates:
+- project pathology-playground 後端健康改進計劃已完成 Phase 1-4
+`;
+
+  const items = parseWorkspaceMemoryCandidates(summary);
+  assert.equal(items.length, 0, "Phase snapshot mid-description should still be rejected");
 });
