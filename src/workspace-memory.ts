@@ -76,30 +76,149 @@ function canonicalMemoryText(text: string): string {
     .trim();
 }
 
+/** Extract entity/destination keys for project and reference dedup */
+function extractEntityKey(text: string): string | null {
+  const normalized = canonicalMemoryText(text);
+  // Check known key phrases (bilingual-friendly)
+  // opencode + agenthub plugin system
+  if (/opencode.*agenthub/i.test(normalized)) {
+    return "opencode-agenthub plugin system";
+  }
+  // plugin config variations
+  if (/plugin.*config|config.*plugin/i.test(normalized)) {
+    return "plugin config";
+  }
+  return null;
+}
+
+/** Extract decision topic key for supersession detection */
+function decisionTopicKey(text: string): string | null {
+  const normalized = text.toLowerCase();
+  // Parser format versions
+  if (/parser.*formats?|supports?\s*\d+\s*format/i.test(normalized)) {
+    return "parser-supported-formats";
+  }
+  // Compaction template replacement
+  if (/compaction.*template|output\.prompt|template.*replace/i.test(normalized)) {
+    return "compaction-template-replacement";
+  }
+  // Plugin loading
+  if (/plugin.*load|npm.*cache|plugin.*config/i.test(normalized)) {
+    return "plugin-loading-config";
+  }
+  // Output format changes (purple/italic, YAML frontmatter, etc)
+  if (/purple.*italic|markup|markdown.*render|frontmatter/i.test(normalized)) {
+    return "output-format-rendering";
+  }
+  return null;
+}
+
+/** Extract feedback topic key for supersession detection */
+function feedbackTopicKey(text: string): string | null {
+  const normalized = text.toLowerCase();
+  // Purple/italic rendering issue
+  if (/purple.*italic/i.test(normalized)) {
+    return "purple-italic-rendering";
+  }
+  // Browser login/server errors
+  if (/login.*500|500.*internal|server.*error|port.*occup/i.test(normalized)) {
+    return "server-error-port-issue";
+  }
+  // Theme preferences
+  if (/theme|dark.*light|prefer.*theme/i.test(normalized)) {
+    return "theme-preference";
+  }
+  return null;
+}
+
+/** Check if entry should be pruned by age (for compaction/manual entries only) */
+function isPrunableByAge(entry: LongTermMemoryEntry, now: number): boolean {
+  // Never prune feedback or explicit entries
+  if (entry.type === "feedback") return false;
+  if (entry.source === "explicit") return false;
+  if (!entry.staleAfterDays) return false;
+
+  const createdAt = new Date(entry.createdAt).getTime();
+  const ageDays = (now - createdAt) / 86400000;
+  const grace = 30; // 30-day grace period
+  return ageDays > entry.staleAfterDays + grace;
+}
+
+/** Choose better memory when identity/topic keys conflict */
+function chooseBetterMemory(a: LongTermMemoryEntry, b: LongTermMemoryEntry): LongTermMemoryEntry {
+  // Source priority: explicit > manual > compaction
+  if (sourcePriority(a.source) !== sourcePriority(b.source)) {
+    return sourcePriority(a.source) > sourcePriority(b.source) ? a : b;
+  }
+  // Higher confidence wins
+  if (a.confidence !== b.confidence) {
+    return a.confidence > b.confidence ? a : b;
+  }
+  // Prefer longer (more specific) text
+  if (Math.abs(a.text.length - b.text.length) > 10) {
+    return a.text.length > b.text.length ? a : b;
+  }
+  // Freshness tie-breaker: newer wins
+  return new Date(a.createdAt) > new Date(b.createdAt) ? a : b;
+}
+
 export function enforceLongTermLimits(entries: LongTermMemoryEntry[]): LongTermMemoryEntry[] {
-  const byKey = new Map<string, LongTermMemoryEntry>();
+  const now = Date.now();
 
-  for (const entry of entries.filter(entry => entry.status === "active")) {
-    const text = entry.text.slice(0, LONG_TERM_LIMITS.maxEntryTextChars);
-    const key = `${entry.type}:${canonicalMemoryText(text)}`;
+  // Phase 1: filter active, prune by age
+  const phase1 = entries
+    .filter(entry => entry.status === "active")
+    .filter(entry => !isPrunableByAge(entry, now))
+    .map(entry => ({ ...entry, text: entry.text.slice(0, LONG_TERM_LIMITS.maxEntryTextChars) }));
 
-    const existing = byKey.get(key);
+  // For project/reference/feedback: detect entity keys FIRST, then dedupe by entity OR canonical
+  const projectRefEntries = phase1.filter(e => e.type === "project" || e.type === "reference" || e.type === "feedback");
 
-    // Source priority: explicit > manual > compaction
-    // Same source: higher confidence wins
+  // Build entity key dedup for project/reference/feedback
+  const entityDeduped = new Map<string, LongTermMemoryEntry>();
+  for (const entry of projectRefEntries) {
+    const entityKey = entry.type === "project" || entry.type === "reference"
+      ? extractEntityKey(entry.text)
+      : feedbackTopicKey(entry.text);
+    const key = entityKey ? `${entry.type}:${entityKey}` : `${entry.type}:${canonicalMemoryText(entry.text)}`;
+
+    const existing = entityDeduped.get(key);
     if (!existing) {
-      byKey.set(key, { ...entry, text });
-    } else if (sourcePriority(entry.source) > sourcePriority(existing.source)) {
-      byKey.set(key, { ...entry, text });
-    } else if (sourcePriority(entry.source) === sourcePriority(existing.source)) {
-      if (entry.confidence > existing.confidence) {
-        byKey.set(key, { ...entry, text });
-      }
+      entityDeduped.set(key, entry);
+    } else if (chooseBetterMemory(entry, existing) === entry) {
+      entityDeduped.set(key, entry);
     }
   }
 
-  return [...byKey.values()]
-    .sort((a, b) => priority(b) - priority(a))
+  // For decisions: detect topic keys for supersession, or use canonical
+  const decisionEntries = phase1.filter(e => e.type === "decision");
+  const decisionDeduped = new Map<string, LongTermMemoryEntry>();
+  for (const entry of decisionEntries) {
+    const topic = decisionTopicKey(entry.text);
+    const key = topic ? `decision:${topic}` : `decision:${canonicalMemoryText(entry.text)}`;
+
+    const existing = decisionDeduped.get(key);
+    if (!existing) {
+      decisionDeduped.set(key, entry);
+    } else if (chooseBetterMemory(entry, existing) === entry) {
+      decisionDeduped.set(key, entry);
+    }
+  }
+
+  // Merge deduped entries
+  const phaseFinal = new Map<string, LongTermMemoryEntry>();
+  for (const entry of [...entityDeduped.values(), ...decisionDeduped.values()]) {
+    phaseFinal.set(entry.id, entry);
+  }
+
+  // Phase 6: sort and trim
+  return [...phaseFinal.values()]
+    .sort((a, b) => {
+      const pA = priorityWithFreshness(a);
+      const pB = priorityWithFreshness(b);
+      if (pB !== pA) return pB - pA;
+      return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+    })
     .slice(0, LONG_TERM_LIMITS.maxEntries);
 }
 
@@ -113,6 +232,11 @@ function priority(entry: LongTermMemoryEntry): number {
 
   const sourceWeight = entry.source === "explicit" ? 1000 : 0;
   return sourceWeight + typeWeight + entry.confidence * 10;
+}
+
+/** Extended priority including freshness for tie-breaking */
+function priorityWithFreshness(entry: LongTermMemoryEntry): number {
+  return priority(entry);
 }
 
 function wouldFit(
