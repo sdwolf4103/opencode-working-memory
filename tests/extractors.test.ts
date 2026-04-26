@@ -217,3 +217,115 @@ Memory candidates:
   assert.equal(items[0].type, "decision");
   assert.equal(items[1].type, "project");
 });
+
+test("parseWorkspaceMemoryCandidates accepts bracketless candidate format", () => {
+  const summary = `
+Memory candidates:
+- project pathology-playground 後端健康改進計劃已完成 Phase 1-4
+- reference Scrypt 參數必須是 N=16384, r=8, p=1
+- feedback 端口 9473 可能被舊進程佔用，需殺掉後重啟
+- decision Use output.prompt to replace the default compaction template
+`;
+
+  const items = parseWorkspaceMemoryCandidates(summary);
+
+  assert.equal(items.length, 4, "Should parse all 4 bracketless candidates");
+  assert.deepEqual(items.map(i => i.type), [
+    "project",
+    "reference",
+    "feedback",
+    "decision",
+  ]);
+});
+
+test("parseWorkspaceMemoryCandidates rejects unknown bracketless candidate type", () => {
+  const summary = `
+Memory candidates:
+- note this should not be parsed as memory
+`;
+
+  const items = parseWorkspaceMemoryCandidates(summary);
+
+  assert.equal(items.length, 0);
+});
+
+test("parseWorkspaceMemoryCandidates rejects bracketless very short body", () => {
+  const summary = `
+Memory candidates:
+- project short
+`;
+
+  const items = parseWorkspaceMemoryCandidates(summary);
+  assert.equal(items.length, 0);
+});
+
+test("parseWorkspaceMemoryCandidates does not match bracketless type as substring", () => {
+  // "projectile" should NOT match "project"
+  const summary = `
+Memory candidates:
+- projectile launcher should not be parsed as a project memory
+`;
+
+  const items = parseWorkspaceMemoryCandidates(summary);
+  assert.equal(items.length, 0);
+});
+
+test("parseWorkspaceMemoryCandidates rejects exact test count snapshots", () => {
+  const summary = `
+Memory candidates:
+- project 1237 tests pass, 226 suites
+- project 500 tests pass today
+`;
+
+  const items = parseWorkspaceMemoryCandidates(summary);
+  assert.equal(items.length, 0, "Exact test counts are session snapshots, not durable memory");
+});
+
+test("parseWorkspaceMemoryCandidates rejects exact file count snapshots", () => {
+  const summary = `
+Memory candidates:
+- project USB 同步 37 個文件
+- project 42 files synced
+`;
+
+  const items = parseWorkspaceMemoryCandidates(summary);
+  assert.equal(items.length, 0, "Exact file counts are session snapshots");
+});
+
+test("parseWorkspaceMemoryCandidates rejects phase progress snapshots", () => {
+  const summary = `
+Memory candidates:
+- project Phase 1-4 已完成
+- project Phase 3 completed
+- project Completed phase 1
+`;
+
+  const items = parseWorkspaceMemoryCandidates(summary);
+  assert.equal(items.length, 0, "Phase progress is session snapshot, not durable milestone");
+});
+
+test("parseWorkspaceMemoryCandidates accepts durable project facts", () => {
+  const summary = `
+Memory candidates:
+- project Backend health improvements organized into phased milestones
+- project USB sync covers bundles, server, frontend, tests, and docs
+- project Test suite expected to pass before handoff
+`;
+
+  const items = parseWorkspaceMemoryCandidates(summary);
+  assert.equal(items.length, 3, "Durable project facts should pass");
+});
+
+test("parseWorkspaceMemoryCandidates accepts durable reference values with numbers", () => {
+  // Scrypt has sufficient length (>20 chars) and no paths - should pass quality gate
+  // Admin PIN too short (<20 chars) - intentionally omitted to isolate the test
+  const summary = `
+Memory candidates:
+- reference Scrypt 參數必須是 N=16384, r=8, p=1，必須嚴格遵守
+- reference Admin PIN 456123 是系統管理員的預設登入密碼
+`;
+
+  const items = parseWorkspaceMemoryCandidates(summary);
+  assert.equal(items.length, 2, "Both durable reference values with numbers should pass quality gate");
+  assert.deepEqual(items.map(i => i.type), ["reference", "reference"]);
+});

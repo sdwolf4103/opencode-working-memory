@@ -218,6 +218,19 @@ function shouldAcceptWorkspaceMemoryCandidate(entry: {
   const pathCount = (text.match(/\/[\w.-]+(\/[\w.-]+)+/g) || []).length;
   if (pathCount > 2) return false;
 
+  // Session-specific progress snapshots for project type
+  // Only reject when Phase/completed appears at/near START (not mid-description)
+  if (entry.type === "project") {
+    if (/\b\d+\s+tests?\s+pass(?:ed)?\b/i.test(text)) return false;
+    if (/\b\d+\s+suites?\b/i.test(text)) return false;
+    if (/\b\d+\s+(?:files?|文件)\b/i.test(text)) return false;
+    // Reject "Phase N completed" only when it appears early in the string (snapshot)
+    if (text.toLowerCase().indexOf("phase") < 25) {
+      if (/\bphase\s*\d+(?:\s*[-–]\s*\d+)?\s*(?:completed|done|finished)\b/i.test(text)) return false;
+      if (/已完成\s*Phase\s*\d+/i.test(text)) return false;
+    }
+  }
+
   return true;
 }
 
@@ -253,10 +266,13 @@ export function parseWorkspaceMemoryCandidates(summary: string): LongTermMemoryE
   const entries: LongTermMemoryEntry[] = [];
 
   for (const line of block.split("\n")) {
-    const item = line.trim().match(/^-\s*\[(feedback|project|decision|reference)\]\s*(.+)$/i);
+    // Accept both "- [type] text" (bracketed) and "- type text" (bracketless)
+    const item = line.trim().match(
+      /^-\s*(?:\[(feedback|project|decision|reference)\]|(feedback|project|decision|reference)\b)\s+(.+)$/i,
+    );
     if (!item) continue;
-    const type = item[1].toLowerCase() as LongTermType;
-    const body = item[2].trim();
+    const type = (item[1] ?? item[2]).toLowerCase() as LongTermType;
+    const body = item[3].trim();
     if (body.length < 12) continue;
 
     // Apply quality gate
