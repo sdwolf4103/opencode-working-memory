@@ -204,101 +204,91 @@ test("tool.execute.after: undefined exitCode does NOT create open error", async 
   // 1. Temp directory for isolated file I/O
   const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-test-"));
 
-  // 2. Mock client — root session, no user messages
-  const client = mockRootClient();
+  try {
+    // 2. Mock client — root session, no user messages
+    const client = mockRootClient();
 
-  // 3. Instantiate plugin
-  const plugin = await MemoryV2Plugin({ directory: tmpDir, client });
+    // 3. Instantiate plugin
+    const plugin = await MemoryV2Plugin({ directory: tmpDir, client });
 
-  // 4. Simulate bash output with NO exitCode, but output contains "errors"
-  await (plugin as Record<string, Function>)["tool.execute.after"](
-    {
-      tool: "bash",
-      sessionID: "test-session-1",
-      args: { command: "cd /repo && rtk git log --oneline -5" },
-    },
-    {
-      // exitCode deliberately absent
-      output: "4832b38 fix: silence memory load errors in working-memory\nabcd123 feat: add feature",
-    }
-  );
+    // 4. Simulate bash output with NO exitCode, but output contains TS error
+    //    This would create an open error if exitCode was non-zero
+    //    Using STRONG error signal to catch the bug where undefined !== 0
+    await (plugin as Record<string, Function>)["tool.execute.after"](
+      {
+        tool: "bash",
+        sessionID: "test-session-1",
+        args: { command: "npm run typecheck" },
+      },
+      {
+        // exitCode deliberately absent (undefined !== 0 is the bug we're testing)
+        output: "src/index.ts(10,3): error TS2345: Argument of type 'string' is not assignable to parameter of type 'number'",
+      }
+    );
 
-  // 5. Assert: session state has ZERO open errors
-  const state = await loadSessionState(tmpDir, "test-session-1");
-  assert.equal(state.openErrors.length, 0,
-    "exitCode === undefined must not create open errors");
+    // 5. Assert: session state has ZERO open errors
+    const state = await loadSessionState(tmpDir, "test-session-1");
+    assert.equal(state.openErrors.length, 0,
+      "exitCode === undefined must not create open errors even with strong error signal");
 
-  // Cleanup
-  await rm(tmpDir, { recursive: true, force: true });
+  } finally {
+    // Cleanup
+    await rm(tmpDir, { recursive: true, force: true });
+  }
 });
 
 test("tool.execute.after: undefined exitCode does NOT clear existing open error", async () => {
   // 1. Temp directory
   const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-test-"));
 
-  // 2. Pre-populate session state with a real open error
-  const preExistingError: OpenError = {
-    id: "err_critical_abc",
-    category: "typecheck",
-    summary: "TS2345: Argument of type 'string' is not assignable to parameter of type 'number'",
-    command: "npm run typecheck",
-    fingerprint: "ee7b3f9a1c2d",
-    status: "open",
-    firstSeen: Date.now() - 3600000,
-    lastSeen: Date.now() - 3600000,
-    seenCount: 3,
-  };
+  try {
+    // 2. Pre-populate session state with a real open error
+    const preExistingError: OpenError = {
+      id: "err_critical_abc",
+      category: "typecheck",
+      summary: "TS2345: Argument of type 'string' is not assignable to parameter of type 'number'",
+      command: "npm run typecheck",
+      fingerprint: "ee7b3f9a1c2d",
+      status: "open",
+      firstSeen: Date.now() - 3600000,
+      lastSeen: Date.now() - 3600000,
+      seenCount: 3,
+    };
 
-  await saveSessionState(tmpDir, createSessionWithError("test-session-2", preExistingError));
+    await saveSessionState(tmpDir, createSessionWithError("test-session-2", preExistingError));
 
-  // 3. Mock client
-  const client = mockRootClient();
+    // 3. Mock client
+    const client = mockRootClient();
 
-  // 4. Instantiate plugin
-  const plugin = await MemoryV2Plugin({ directory: tmpDir, client });
+    // 4. Instantiate plugin
+    const plugin = await MemoryV2Plugin({ directory: tmpDir, client });
 
-  // 5. Simulate bash output with NO exitCode (inspection command)
-  await (plugin as Record<string, Function>)["tool.execute.after"](
-    {
-      tool: "bash",
-      sessionID: "test-session-2",
-      args: { command: "rtk cat ~/.local/share/opencode-working-memory/session.json" },
-    },
-    {
-      // exitCode deliberately absent
-      output: '"openErrors": [{"id": "err_critical_abc", "status": "open"}]',
-    }
-  );
+    // 5. Simulate bash output with NO exitCode (inspection command)
+    //    Using STRONG error signal (TS error) to verify undefined exitCode doesn't clear
+    await (plugin as Record<string, Function>)["tool.execute.after"](
+      {
+        tool: "bash",
+        sessionID: "test-session-2",
+        args: { command: "rtk cat ~/.local/share/opencode-working-memory/session.json" },
+      },
+      {
+        // exitCode deliberately absent (undefined)
+        // Even with TS error in output, should NOT clear existing error
+        output: "src/other.ts(5,10): error TS2794: Expected 0 arguments, but got 1",
+      }
+    );
 
-  // 6. Assert: pre-existing open error is PRESERVED
-  const state = await loadSessionState(tmpDir, "test-session-2");
-  assert.equal(state.openErrors.length, 1,
-    "exitCode === undefined must not clear pre-existing open errors");
-  assert.equal(state.openErrors[0].fingerprint, "ee7b3f9a1c2d",
-    "The original open error must remain intact");
+    // 6. Assert: pre-existing open error is PRESERVED
+    const state = await loadSessionState(tmpDir, "test-session-2");
+    assert.equal(state.openErrors.length, 1,
+      "exitCode === undefined must not clear pre-existing open errors");
+    assert.equal(state.openErrors[0].fingerprint, "ee7b3f9a1c2d",
+      "The original open error must remain intact");
 
-  // Cleanup
-  await rm(tmpDir, { recursive: true, force: true });
-});
-```
-
-**新增 `tests/plugin.test.ts`** - Plugin hook regression test：
-
-```ts
-import test from "node:test";
-import assert from "node:assert/strict";
-
-// 這個 test 需要 mock plugin hook 環境
-// 確保 exitCode === undefined 不會產生 open error
-
-test("plugin hook with undefined exitCode does not create open error", async () => {
-  // 模擬 tool.execute.after hook
-  // hookOutput 沒有 exitCode
-  // output 包含 "errors" 字樣
-  // assert session state 沒有新增 open error
-  
-  // 這是 integration test，需要完整的 plugin test harness
-  // 目前先用 unit test 覆蓋 extractor，後續補 integration test
+  } finally {
+    // Cleanup
+    await rm(tmpDir, { recursive: true, force: true });
+  }
 });
 ```
 
@@ -848,13 +838,12 @@ test("extractExplicitMemories captures multiple memories in same message", () =>
 
 #### 檔案
 
-- `src/extractors.ts` - 新增 `shouldAcceptWorkspaceMemoryCandidate`
-- `src/plugin.ts` - 在 `parseWorkspaceMemoryCandidates` push 前套用
-- `tests/extractors.test.ts` - 新增 quality gate 測試
+- `src/extractors.ts` - 在 `parseWorkspaceMemoryCandidates()` 內部套用 `shouldAcceptWorkspaceMemoryCandidate()`
+- `tests/extractors.test.ts` - 透過 `parseWorkspaceMemoryCandidates()` 驗證 reject/accept 行為
 
 #### 實作要點
 
-**1. 明確的 predicate**：
+**1. 明確的 predicate（放在 extractors.ts 內部）**：
 
 ```ts
 function shouldAcceptWorkspaceMemoryCandidate(entry: {
