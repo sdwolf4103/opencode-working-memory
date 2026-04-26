@@ -261,23 +261,25 @@ export default {
 
 ## Plugin Hooks
 
-### `prompt:before`
+### `experimental.chat.system.transform`
 
 Injects workspace memory and hot session state into system prompt.
 
-### `tool.execute.before`
-
-Tracks active files (read, grep, edit, write actions).
-
 ### `tool.execute.after`
 
+- Tracks active files (read, grep, edit, write actions)
 - Tracks open errors from failed commands
 - Clears errors when commands succeed
 - Ignores `exitCode === undefined`
 
-### `compaction:before`
+### `experimental.session.compacting`
 
 Extracts workspace memory candidates from conversation, applies quality gate and deduplication.
+
+### `event`
+
+- `session.compacted`: Promote session decisions to workspace memory
+- `session.deleted`: Clean up session state files
 
 ## Debugging & Testing
 

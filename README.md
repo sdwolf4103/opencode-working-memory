@@ -93,21 +93,19 @@ Automatically tracks current session context:
 Injected into system prompt:
 ```
 <workspace_memory>
-- [decision] Use npm cache for plugin loading...
+- [decision] Use npm cache for plugin loading, not npm link
+- [project] This repo uses opencode-agenthub plugin system
+- [reference] Storage: ~/.local/share/opencode-working-memory/workspaces/{hash}/
 </workspace_memory>
 
----
-<workspace_memory_candidates>
-- [project] This repo uses opencode-agenthub plugin system
-- [decision] Memory V2 uses three-layer architecture
-</workspace_memory_candidates>
-
-Active Files:
+<hot_session_state>
+active_files:
 - src/plugin.ts (edit, 18x)
 - tests/plugin.test.ts (edit, 5x)
 - src/extractors.ts (grep, 3x)
-
-Open Errors: (none)
+open_errors:
+- [typecheck] TS2345: Argument of type 'string' is not assignable...
+</hot_session_state>
 ```
 
 ## Quality Guarantees
