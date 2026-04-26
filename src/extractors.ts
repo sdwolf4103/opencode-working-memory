@@ -223,18 +223,22 @@ function shouldAcceptWorkspaceMemoryCandidate(entry: {
 
 /**
  * Extract candidate block from summary using multiple formats.
- * Supports: HTML comment, Markdown section, legacy XML.
+ * Supports: Plain text label, Markdown section, legacy XML.
  */
 function extractCandidateBlock(summary: string): string | null {
-  // 1. HTML comment block (preferred, hidden from user)
-  const commentMatch = summary.match(/<!--\s*workspace_memory_candidates\s*\n([\s\S]*?)-->/i);
-  if (commentMatch) return commentMatch[1];
+  // 1. Plain text label (primary format, no Markdown header)
+  const plainMatch = summary.match(/Memory candidates:\s*\n([\s\S]*?)(?:\n[A-Z][a-z]+ [a-z]+:|\n##\s|$)/i);
+  if (plainMatch) return plainMatch[1];
 
-  // 2. Markdown section (visible but clean)
-  const markdownMatch = summary.match(/##\s*Workspace Memory Candidates\s*\n([\s\S]*?)(?:\n##|$)/i);
+  // 2. Markdown section (legacy)
+  const markdownMatch = summary.match(/##\s*Memory Candidates\s*\n([\s\S]*?)(?:\n##\s|$)/i);
   if (markdownMatch) return markdownMatch[1];
 
-  // 3. Legacy XML block (backward compatible)
+  // 3. Legacy "Workspace Memory Candidates" section
+  const legacyMatch = summary.match(/##\s*Workspace Memory Candidates\s*\n([\s\S]*?)(?:\n##\s|$)/i);
+  if (legacyMatch) return legacyMatch[1];
+
+  // 4. Legacy XML block (backward compatible)
   const xmlMatch = summary.match(/<workspace_memory_candidates>([\s\S]*?)<\/workspace_memory_candidates>/i);
   if (xmlMatch) return xmlMatch[1];
 

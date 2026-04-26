@@ -21,7 +21,7 @@ function entry(id: string, text: string, type: LongTermMemoryEntry["type"] = "de
 // Task 2: renderWorkspaceMemory tests
 // ============================================
 
-test("renderWorkspaceMemory never truncates closing XML tag", () => {
+test("renderWorkspaceMemory respects budget and fits entries", () => {
   const entries = Array.from({ length: 28 }, (_, i) =>
     entry(`mem_${i}`, `Long durable memory entry ${i} `.repeat(20))
   );
@@ -36,8 +36,8 @@ test("renderWorkspaceMemory never truncates closing XML tag", () => {
 
   const rendered = renderWorkspaceMemory(store);
 
-  assert.ok(rendered.endsWith("</workspace_memory>"),
-    `Rendered memory must end with closing tag. Got: ...${rendered.slice(-50)}`);
+  assert.ok(!rendered.includes("<workspace_memory>"),
+    "Should not contain XML tags");
   assert.ok(rendered.length <= 700,
     `Rendered memory must not exceed maxChars. Got: ${rendered.length}`);
 });
@@ -56,7 +56,7 @@ test("renderWorkspaceMemory returns empty string when maxChars too small", () =>
     "When maxChars too small for even minimal envelope, return empty string");
 });
 
-test("renderWorkspaceMemory respects budget and fits entries", () => {
+test("renderWorkspaceMemory respects small budget", () => {
   // Create entries that would overflow a small budget
   const entries = [
     entry("a", "First memory entry that is reasonably long"),
@@ -74,8 +74,8 @@ test("renderWorkspaceMemory respects budget and fits entries", () => {
 
   const rendered = renderWorkspaceMemory(store);
 
-  assert.ok(rendered.endsWith("</workspace_memory>"),
-    "Must end with closing tag even when truncating entries");
+  assert.ok(!rendered.includes("<workspace_memory>"),
+    "Should not contain XML tags");
   assert.ok(rendered.length <= 200,
     `Must respect maxChars limit. Got: ${rendered.length}`);
 });

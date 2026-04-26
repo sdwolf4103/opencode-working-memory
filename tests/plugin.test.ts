@@ -235,13 +235,13 @@ test("experimental.session.compacting: context contains no XML tags for compacti
     assert.equal(contextText.includes("<pending_todos>"), false,
       "Context should not contain <pending_todos> tag");
 
-    // Verify: context should contain the private context header
-    assert.equal(contextText.includes("[PRIVATE COMPACTION CONTEXT - DO NOT OUTPUT]"), true,
-      "Context should contain private context header");
+    // Verify: context should NOT contain square bracket markers
+    assert.equal(contextText.includes("[PRIVATE COMPACTION CONTEXT"), false,
+      "Context should not contain square bracket markers");
 
-    // Verify: context should contain Markdown headers instead
-    assert.equal(contextText.includes("## Workspace Memory") || contextText.includes("## Hot Session State") || contextText.includes("## Pending Todos"), true,
-      "Context should use Markdown headers instead of XML tags");
+    // Verify: context should contain plain text headers
+    assert.equal(contextText.includes("Workspace memory") || contextText.includes("Hot session state") || contextText.includes("Pending todos"), true,
+      "Context should use plain text headers instead of XML tags");
 
   } finally {
     await rm(tmpDir, { recursive: true, force: true });
@@ -264,48 +264,34 @@ test("compactionContextHeader does not require XML output", async () => {
 
     const header = output.context[0] || "";
 
-    // Should instruct HTML comment format
-    assert.equal(header.includes("<!-- workspace_memory_candidates"), true,
-      "Header should instruct HTML comment format");
-
-    // Should NOT instruct legacy XML format as primary
-    // Note: We check that the instruction for HTML comments comes before any XML mention
-    const htmlCommentIndex = header.indexOf("<!-- workspace_memory_candidates");
-    const xmlTagIndex = header.indexOf("<workspace_memory_candidates>\n");
-    if (xmlTagIndex !== -1) {
-      assert.equal(htmlCommentIndex < xmlTagIndex, true,
-        "HTML comment format should be the primary instruction, not XML");
-    }
-
-    // Should explicitly forbid XML
-    assert.equal(header.includes("DO NOT use XML tags"), true,
-      "Header should forbid XML tags");
+    // Should instruct plain text label format (not Markdown headers)
+    assert.equal(header.includes("Memory candidates:"), true,
+      "Header should use plain text 'Memory candidates:' label");
 
   } finally {
     await rm(tmpDir, { recursive: true, force: true });
   }
 });
 
-test("parseWorkspaceMemoryCandidates accepts HTML comment format", async () => {
+test("parseWorkspaceMemoryCandidates accepts Markdown section format", async () => {
   const summary = `
 ## Summary
 Progress made on testing.
 
-<!-- workspace_memory_candidates
-- [decision] Use HTML comments for candidates
+## Memory Candidates
+- [decision] Use Markdown sections for candidates
 - [project] This repo uses Markdown for docs
--->
 
 Next steps: continue development.
 `;
 
   const candidates = parseWorkspaceMemoryCandidates(summary);
-  assert.equal(candidates.length, 2, "Should parse HTML comment format");
+  assert.equal(candidates.length, 2, "Should parse Markdown section format");
   assert.equal(candidates[0].type, "decision");
   assert.equal(candidates[1].type, "project");
 });
 
-test("parseWorkspaceMemoryCandidates accepts Markdown section format", async () => {
+test("parseWorkspaceMemoryCandidates accepts legacy Workspace Memory Candidates section", async () => {
   const summary = `
 ## Summary
 Progress made on testing.
@@ -318,7 +304,7 @@ Continue development.
 `;
 
   const candidates = parseWorkspaceMemoryCandidates(summary);
-  assert.equal(candidates.length, 1, "Should parse Markdown section format");
+  assert.equal(candidates.length, 1, "Should parse legacy section format");
   assert.equal(candidates[0].type, "reference");
 });
 

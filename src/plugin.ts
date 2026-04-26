@@ -46,45 +46,19 @@ import {
 } from "./opencode.ts";
 
 /**
- * Strip XML-like tags from text for Markdown-neutral rendering.
- * Converts `<workspace_memory>` blocks to plain "Workspace memory:" sections.
- */
-function stripXmlTags(text: string): string {
-  if (!text) return "";
-  
-  // Replace XML tag pairs with Markdown headers
-  return text
-    .replace(/<workspace_memory>\n?/gi, "## Workspace Memory\n")
-    .replace(/<\/workspace_memory>\n?/gi, "")
-    .replace(/<hot_session_state>\n?/gi, "## Hot Session State\n")
-    .replace(/<\/hot_session_state>\n?/gi, "")
-    .replace(/<pending_todos>\n?/gi, "## Pending Todos\n")
-    .replace(/<\/pending_todos>\n?/gi, "");
-}
-
-/**
  * Generate instructions for the compaction model.
- * IMPORTANT: These instructions make clear what should NOT be in the final output.
  */
 function compactionContextHeader(): string {
   return `
-[PRIVATE COMPACTION CONTEXT - DO NOT OUTPUT]
-The following sections are PRIVATE INPUT for updating the compaction summary.
-DO NOT copy these sections, their headings, or their contents verbatim.
-Use the facts only to update the normal summary sections (Goal, Progress, etc.).
+Background context for memory extraction (do not output verbatim):
+- Use facts to update Goal/Progress/Key Decisions/Next Steps sections
+- At the end, emit durable future-session memories in this format:
 
-At the VERY END of your summary, if there are durable memory candidates, include this hidden block:
-
-<!-- workspace_memory_candidates
-- [type] content (types: feedback, project, decision, reference)
--->
-
-Only include truly durable information useful across FUTURE sessions.
-If nothing qualifies, omit the block entirely.
-DO NOT use XML tags like <workspace_memory_candidates>.
-DO NOT start with "---" frontmatter delimiters.
-
-[END PRIVATE COMPACTION CONTEXT]
+Memory candidates:
+- [feedback] content
+- [project] content
+- [decision] content
+- [reference] content
 `.trim();
 }
 
@@ -97,11 +71,11 @@ function memoryCandidateInstruction(): string {
 }
 
 /**
- * Render todos for compaction context (Markdown-neutral format).
+ * Render todos for compaction context (plain text format, no Markdown headers).
  */
 function renderTodosForCompaction(todos: Array<{ content: string; status: string; priority?: string }>): string {
   if (todos.length === 0) return "";
-  const lines = ["## Pending Todos"];
+  const lines = ["Pending todos:"];
   for (const todo of todos) {
     const priority = todo.priority ? ` [${todo.priority}]` : "";
     const status = todo.status === "completed" ? "✓" : todo.status === "in_progress" ? "→" : "○";
@@ -329,22 +303,22 @@ export const MemoryV2Plugin: Plugin = async (input) => {
       // Sub-agents don't need compaction support
       if (await isSubAgent(sessionID)) return;
 
-      // Build private context with Markdown-neutral format
-      const contextParts: string[] = [];
+// Build private context with Markdown-neutral format
+const contextParts: string[] = [];
 
-      // 1. Frozen workspace memory (strip XML tags for compaction context)
-      const workspaceMemory = await getFrozenWorkspaceMemory(directory, sessionID);
-      const workspacePrompt = renderWorkspaceMemory(workspaceMemory);
-      if (workspacePrompt) {
-        contextParts.push(stripXmlTags(workspacePrompt));
-      }
+// 1. Frozen workspace memory
+const workspaceMemory = await getFrozenWorkspaceMemory(directory, sessionID);
+const workspacePrompt = renderWorkspaceMemory(workspaceMemory);
+if (workspacePrompt) {
+  contextParts.push(workspacePrompt);
+}
 
-      // 2. Hot session state (strip XML tags for compaction context)
-      const sessionState = await loadSessionState(directory, sessionID);
-      const hotPrompt = renderHotSessionState(sessionState, directory);
-      if (hotPrompt) {
-        contextParts.push(stripXmlTags(hotPrompt));
-      }
+// 2. Hot session state
+const sessionState = await loadSessionState(directory, sessionID);
+const hotPrompt = renderHotSessionState(sessionState, directory);
+if (hotPrompt) {
+  contextParts.push(hotPrompt);
+}
 
       // 3. Pending todos from OpenCode (Markdown-neutral format)
       const todos = await pendingTodos(client, sessionID);

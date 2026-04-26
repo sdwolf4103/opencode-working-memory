@@ -136,10 +136,8 @@ export function renderWorkspaceMemory(store: WorkspaceMemoryStore): string {
   // If maxChars smaller than minimum envelope, return empty string
   if (maxChars < MIN_ENVELOPE_LENGTH) return "";
 
-  const closing = "</workspace_memory>";
   const lines: string[] = [
-    "<workspace_memory>",
-    "Persistent workspace memory. Use as background; verify stale or code-related claims.",
+    "Workspace memory (cross-session, verify if stale):",
   ];
 
   for (const type of ["feedback", "project", "decision", "reference"] as const) {
@@ -150,17 +148,16 @@ export function renderWorkspaceMemory(store: WorkspaceMemoryStore): string {
 
     for (const item of items) {
       const line = `- ${renderEntry(item)}`;
-      if (wouldFit([...lines, ...sectionLines], line, closing, maxChars)) {
+      if ([...lines, ...sectionLines, line].join("\n").length <= maxChars) {
         sectionLines.push(line);
       }
     }
 
-    if (sectionLines.length > 1 && wouldFit(lines, sectionLines[0], closing, maxChars)) {
+    if (sectionLines.length > 1) {
       lines.push(...sectionLines);
     }
   }
 
-  lines.push(closing);
   return lines.join("\n");
 }
 

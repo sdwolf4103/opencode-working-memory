@@ -180,7 +180,7 @@ export function renderHotSessionState(state: SessionState, workspaceRoot: string
 
   if (activeFiles.length === 0 && openErrors.length === 0 && decisions.length === 0) return "";
 
-  const lines: string[] = ["<hot_session_state>"];
+  const lines: string[] = ["Hot session state (current session):"];
 
   if (activeFiles.length > 0) {
     lines.push("active_files:");
@@ -204,7 +204,6 @@ export function renderHotSessionState(state: SessionState, workspaceRoot: string
     }
   }
 
-  lines.push("</hot_session_state>");
   return lines.join("\n").slice(0, HOT_STATE_LIMITS.maxRenderedChars);
 }
 

@@ -133,9 +133,8 @@ import { parseWorkspaceMemoryCandidates } from "../src/extractors.ts";
 
 test("parseWorkspaceMemoryCandidates rejects short text", () => {
   const summary = `
-<workspace_memory_candidates>
+## Memory Candidates
 - [decision] short text
-</workspace_memory_candidates>
 `;
   const items = parseWorkspaceMemoryCandidates(summary);
   assert.equal(items.length, 0);
@@ -143,9 +142,8 @@ test("parseWorkspaceMemoryCandidates rejects short text", () => {
 
 test("parseWorkspaceMemoryCandidates rejects git commit hash", () => {
   const summary = `
-<workspace_memory_candidates>
+## Memory Candidates
 - [project] abc123def456 is the commit hash
-</workspace_memory_candidates>
 `;
   const items = parseWorkspaceMemoryCandidates(summary);
   assert.equal(items.length, 0);
@@ -153,9 +151,8 @@ test("parseWorkspaceMemoryCandidates rejects git commit hash", () => {
 
 test("parseWorkspaceMemoryCandidates rejects raw error", () => {
   const summary = `
-<workspace_memory_candidates>
+## Memory Candidates
 - [feedback] TypeError: Cannot read property 'x' of undefined
-</workspace_memory_candidates>
 `;
   const items = parseWorkspaceMemoryCandidates(summary);
   assert.equal(items.length, 0);
@@ -163,9 +160,8 @@ test("parseWorkspaceMemoryCandidates rejects raw error", () => {
 
 test("parseWorkspaceMemoryCandidates rejects stack trace", () => {
   const summary = `
-<workspace_memory_candidates>
+## Memory Candidates
 - [reference] at foo (bar.ts:10:5)
-</workspace_memory_candidates>
 `;
   const items = parseWorkspaceMemoryCandidates(summary);
   assert.equal(items.length, 0);
@@ -173,9 +169,8 @@ test("parseWorkspaceMemoryCandidates rejects stack trace", () => {
 
 test("parseWorkspaceMemoryCandidates rejects commit prefix", () => {
   const summary = `
-<workspace_memory_candidates>
+## Memory Candidates
 - [project] fix: add new feature
-</workspace_memory_candidates>
 `;
   const items = parseWorkspaceMemoryCandidates(summary);
   assert.equal(items.length, 0);
@@ -183,9 +178,8 @@ test("parseWorkspaceMemoryCandidates rejects commit prefix", () => {
 
 test("parseWorkspaceMemoryCandidates rejects path-heavy facts", () => {
   const summary = `
-<workspace_memory_candidates>
+## Memory Candidates
 - [project] files at /src/a.ts /src/b.ts /src/c.ts are important
-</workspace_memory_candidates>
 `;
   const items = parseWorkspaceMemoryCandidates(summary);
   assert.equal(items.length, 0);
@@ -193,9 +187,8 @@ test("parseWorkspaceMemoryCandidates rejects path-heavy facts", () => {
 
 test("parseWorkspaceMemoryCandidates accepts valid decision", () => {
   const summary = `
-<workspace_memory_candidates>
+## Memory Candidates
 - [decision] Use pnpm instead of npm for package management
-</workspace_memory_candidates>
 `;
   const items = parseWorkspaceMemoryCandidates(summary);
   assert.equal(items.length, 1);
@@ -205,11 +198,22 @@ test("parseWorkspaceMemoryCandidates accepts valid decision", () => {
 
 test("parseWorkspaceMemoryCandidates accepts valid project info", () => {
   const summary = `
-<workspace_memory_candidates>
+## Memory Candidates
 - [project] This project uses TypeScript for all source files
-</workspace_memory_candidates>
 `;
   const items = parseWorkspaceMemoryCandidates(summary);
   assert.equal(items.length, 1);
   assert.equal(items[0].type, "project");
+});
+
+test("parseWorkspaceMemoryCandidates accepts plain text label format (no Markdown)", () => {
+  const summary = `
+Memory candidates:
+- [decision] Use plain text labels to avoid purple Markdown headers
+- [project] This repo uses pnpm for package management
+`;
+  const items = parseWorkspaceMemoryCandidates(summary);
+  assert.equal(items.length, 2);
+  assert.equal(items[0].type, "decision");
+  assert.equal(items[1].type, "project");
 });
