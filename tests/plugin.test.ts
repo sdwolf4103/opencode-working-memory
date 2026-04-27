@@ -9,6 +9,7 @@ import { parseWorkspaceMemoryCandidates } from "../src/extractors.ts";
 import type { OpenError } from "../src/types.ts";
 import { workspaceMemoryPath, workspacePendingJournalPath } from "../src/paths.ts";
 import { loadPendingJournal, savePendingJournal } from "../src/pending-journal.ts";
+import { updateWorkspaceMemory } from "../src/workspace-memory.ts";
 
 // Mock client for root session (not a sub-agent)
 function mockRootClient() {
@@ -548,6 +549,152 @@ test("session.compacted promotes pending memories to workspace memory and clears
 
     const workspacePrompt = after.system.find((part: string) => part.startsWith("Workspace memory"));
     assert.match(workspacePrompt ?? "", /Use frozen rendered snapshots for cache stability/);
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("same-session explicit memory does not mutate frozen system[1]", async () => {
+  const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-test-"));
+
+  try {
+    // 1. Seed workspace memory so system[1] exists before explicit memory is added.
+    const now = new Date().toISOString();
+    await updateWorkspaceMemory(tmpDir, store => {
+      store.entries.push({
+        id: "mem_existing_stable",
+        type: "project",
+        text: "Existing stable workspace memory.",
+        source: "compaction",
+        confidence: 0.9,
+        status: "active",
+        createdAt: now,
+        updatedAt: now,
+      });
+      return store;
+    });
+
+    // 2. Use one plugin instance with a mutable mock client so the in-memory
+    // frozen cache is preserved across turns while the latest user message changes.
+    let latestMessages: Array<Record<string, unknown>> = [];
+    const client = {
+      session: {
+        get: async () => ({ data: { parentID: null } }),
+        messages: async () => ({ data: latestMessages }),
+        todo: async () => ({ data: [] }),
+      },
+    };
+    const plugin = await MemoryV2Plugin({ directory: tmpDir, client });
+
+    const output1 = { system: ["base header"] };
+    await (plugin as Record<string, Function>)["experimental.chat.system.transform"](
+      { sessionID: "frozen-cache-session", model: {} },
+      output1,
+    );
+
+    const firstSystem1 = output1.system.find((part: string) => part.startsWith("Workspace memory"));
+    assert.match(firstSystem1 ?? "", /Existing stable workspace memory/,
+      "first transform should create a frozen workspace memory system[1]");
+
+    // 3. User says "remember X" in the same session.
+    latestMessages = [{
+      info: { role: "user", id: "msg-explicit-1" },
+      parts: [{ type: "text", text: "remember this: Same-session memory stays ephemeral." }],
+    }];
+
+    const output2 = { system: ["base header"] };
+    await (plugin as Record<string, Function>)["experimental.chat.system.transform"](
+      { sessionID: "frozen-cache-session", model: {} },
+      output2,
+    );
+
+    // 4. Assert: workspace system[1] unchanged (frozen snapshot).
+    const secondSystem1 = output2.system.find((part: string) => part.startsWith("Workspace memory"));
+    assert.equal(secondSystem1, firstSystem1,
+      "frozen system[1] must not change after explicit memory in same session");
+
+    // 5. Assert: hot state (system[2+]) contains the pending memory.
+    const hotState = output2.system.find((part: string) => part.includes("Hot session state"));
+    assert.ok(hotState, "hot session state should be rendered");
+    assert.match(hotState, /pending_memories:/,
+      "hot state should contain pending_memories section");
+    assert.match(hotState, /Same-session memory stays ephemeral/,
+      "hot state should contain the explicit memory text");
+
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("compaction intentionally refreshes frozen system[1] with promoted memories", async () => {
+  const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-test-"));
+
+  try {
+    // 1. First transform creates frozen system[1]
+    const client = mockRootClient();
+    const plugin = await MemoryV2Plugin({ directory: tmpDir, client });
+
+    const output1 = { system: ["base header"] };
+    await (plugin as Record<string, Function>)["experimental.chat.system.transform"](
+      { sessionID: "compaction-refresh-session", model: {} },
+      output1,
+    );
+
+    const firstSystem1 = output1.system[1]; // workspace memory snapshot
+
+    // 2. Add pending memory to session state
+    await saveSessionState(tmpDir, {
+      version: 1,
+      sessionID: "compaction-refresh-session",
+      turn: 1,
+      updatedAt: new Date().toISOString(),
+      activeFiles: [],
+      openErrors: [],
+      recentDecisions: [],
+      pendingMemories: [{
+        id: "mem_compaction_test",
+        type: "decision",
+        text: "Compaction refreshes frozen snapshot.",
+        source: "explicit",
+        confidence: 1,
+        status: "active",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      }],
+    });
+
+    // 3. Fire session.compacted event
+    await (plugin as Record<string, Function>)["event"]({
+      event: {
+        type: "session.compacted",
+        properties: { sessionID: "compaction-refresh-session" },
+      },
+    });
+
+    // 4. Next transform same session - system[1] should be refreshed
+    const output2 = { system: ["base header"] };
+    await (plugin as Record<string, Function>)["experimental.chat.system.transform"](
+      { sessionID: "compaction-refresh-session", model: {} },
+      output2,
+    );
+
+    const secondSystem1 = output2.system[1];
+
+    // 5. Assert: system[1] changed (compaction started new cache epoch)
+    assert.notEqual(secondSystem1, firstSystem1,
+      "frozen system[1] should change after compaction (new cache epoch)");
+
+    // 6. Assert: promoted memory is now in system[1]
+    assert.match(secondSystem1 ?? "", /Compaction refreshes frozen snapshot/,
+      "promoted memory should appear in refreshed system[1]");
+
+    // 7. Assert: pending memory cleared from hot state
+    const hotState = output2.system.find((part: string) => part.includes("Hot session state"));
+    if (hotState) {
+      assert.equal(hotState.includes("pending_memories:"), false,
+        "pending_memories should be cleared after promotion");
+    }
+
   } finally {
     await rm(tmpDir, { recursive: true, force: true });
   }

@@ -2,9 +2,17 @@
  * Memory V2 Plugin for OpenCode
  *
  * Architecture:
- * - Layer 1: Stable Workspace Memory (frozen per session, refreshed at compaction)
- * - Layer 2: Hot Session State (active files, open errors, recent decisions)
+ * - Layer 1: Stable Workspace Memory (frozen per session cache epoch, refreshed at compaction)
+ * - Layer 2: Hot Session State (active files, open errors, recent decisions, pending memories)
  * - Layer 3: Native OpenCode State (todos owned by OpenCode, read during compaction)
+ *
+ * Cache Epoch Model:
+ * - Each session creates a frozen workspace memory snapshot on first transform.
+ * - Normal turns reuse the exact rendered string (system[1] remains stable).
+ * - Compaction starts a new cache epoch: pending memories are promoted, the cache is cleared,
+ *   and the next transform re-renders workspace memory.
+ * - Explicit memory ("remember X") goes to SessionState.pendingMemories + durable journal,
+ *   visible in ephemeral system[2+] for the current epoch, promoted to system[1] after compaction.
  *
  * This plugin:
  * - Caches frozen workspace memory per sessionID
@@ -286,7 +294,9 @@ export const MemoryV2Plugin: Plugin = async (input) => {
     const now = Date.now();
     const cached = frozenWorkspaceMemoryCache.get(sessionID);
 
-    // Cache is valid for the session lifetime
+    // Cache is valid for the current session cache epoch.
+    // It is intentionally invalidated after compaction so promoted memories
+    // become visible in the next compacted context (new epoch starts).
     if (cached) {
       return { store: cached.store, renderedPrompt: cached.renderedPrompt };
     }
