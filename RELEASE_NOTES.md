@@ -1,5 +1,15 @@
 # Release Notes
 
+## 1.3.2 (2026-04-27)
+
+### CI Compatibility Patch
+
+- Fixed the compatibility workflow so dependency installation works without a committed lockfile.
+- Moved compatibility CI to Node 24 so TypeScript-stripping tests run correctly.
+- No runtime or storage changes.
+
+---
+
 ## 1.3.1 (2026-04-27)
 
 ### Security and Reliability Patch
