@@ -1,10 +1,53 @@
 # Release Notes
 
+## 1.3.0 (2026-04-27)
+
+### Better Memory Consolidation
+
+This release makes OpenCode Working Memory smarter about what happens to saved memories after compaction. Instead of treating every pending memory as simply "kept" or "not kept", it now understands four outcomes:
+
+- **Promoted** — a new memory was saved to workspace memory.
+- **Absorbed** — the memory was a duplicate of something already remembered.
+- **Superseded** — a newer same-topic decision or preference replaced an older one.
+- **Rejected** — the memory was stale, noisy, or over the workspace memory limit.
+
+### What This Improves
+
+- **Fewer repeated pending memories**: duplicate or superseded memories no longer keep coming back for promotion.
+- **Cleaner long-term memory**: old same-topic decisions are replaced more predictably.
+- **Safer promotion accounting**: pending memories are only cleared when the final normalized workspace memory confirms what happened to them.
+- **More useful compaction output**: the compaction prompt now includes clearer examples of what should and should not become durable memory.
+
+### Also Included
+
+- Memory quality regression fixtures: 5 examples that should be kept and 7 noisy examples that should be rejected.
+- Fix for `session.deleted` session ID extraction so cleanup and promotion use the same event parsing path.
+- Fix for active-vs-superseded promotion behavior: archived superseded entries no longer block a fresh active memory.
+- README and architecture documentation updates.
+
+### Upgrade Notes
+
+- No user migration is required.
+- Existing workspace memory files remain compatible.
+- The OpenCode config entry stays the same:
+
+```json
+{
+  "plugin": ["opencode-working-memory"]
+}
+```
+
+### Tests
+
+- **135 tests pass**.
+
+---
+
 ## 1.2.3 (2026-04-27)
 
 ### Prompt Cache Optimization — Frozen Snapshot + Ephemeral Delta
 
-This release optimizes the plugin's impact on OpenCode's prompt cache, following Hermes-style architecture patterns.
+This release optimizes OpenCode Working Memory's impact on OpenCode's prompt cache, following Hermes-style architecture patterns.
 
 ### Key Features
 

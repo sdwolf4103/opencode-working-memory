@@ -10,7 +10,7 @@ Add to your `~/.config/opencode/opencode.json`:
 }
 ```
 
-Restart OpenCode. The plugin activates automatically — no manual setup needed.
+Restart OpenCode. OpenCode Working Memory activates automatically — no manual setup needed.
 
 > **Note**: The correct key is `plugin` (singular), not `plugins`.
 
@@ -25,22 +25,22 @@ Restart OpenCode. The plugin activates automatically — no manual setup needed.
 After restarting OpenCode, memory context appears automatically in system prompts. You'll see:
 
 ```
-<workspace_memory>
-- [decision] ... (if any long-term memories exist)
-</workspace_memory>
+Workspace memory (cross-session, verify if stale):
+decision:
+- ... (if any long-term memories exist)
 
 ---
-<workspace_memory_candidates>
+Memory candidates:
 - [project] ... (candidates for long-term memory)
-</workspace_memory_candidates>
 
-Active Files:
+Hot session state (current session):
+active_files:
 - path/to/file.ts (action, count)
 
-Open Errors: (none, or listed)
+open_errors: (none, or listed)
 ```
 
-**No tools to call**. The plugin works automatically via hooks.
+**No tools to call**. OpenCode Working Memory works automatically via hooks.
 
 ## How Memory Works
 
@@ -72,8 +72,8 @@ Tracks current session:
 
 **Solution**:
 1. Ensure OpenCode has write permissions in home directory
-2. Trigger memory operations by working normally (plugin creates files on-demand)
-3. Check that plugin is listed in config
+2. Trigger memory operations by working normally (memory files are created on-demand)
+3. Check that `opencode-working-memory` is listed in config
 
 ### Memory Not Persisting
 
@@ -81,7 +81,7 @@ Tracks current session:
 
 **Solution**:
 1. Verify you're in the same workspace (different workspace = different memory)
-2. Ensure `<workspace_memory_candidates>` were captured during compaction
+2. Ensure `Memory candidates:` were captured during compaction
 3. Check `workspace-memory.json` exists
 
 ### Type Errors During Development

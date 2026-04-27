@@ -2,7 +2,7 @@
 
 ## Overview
 
-The Working Memory Plugin works out-of-the-box with sensible defaults. Configuration is defined in `src/types.ts` as constants.
+OpenCode Working Memory works out-of-the-box with sensible defaults. Configuration is defined in `src/types.ts` as constants.
 
 ## Workspace Memory Limits
 
@@ -192,17 +192,17 @@ rm ~/.local/share/opencode-working-memory/workspaces/*/sessions/*.json
 ## Best Practices
 
 1. **Workspace Memory Hygiene**:
-   - Let the plugin extract memories automatically
+   - Let OpenCode Working Memory extract memories automatically
    - Use explicit "remember this" for important information
    - Don't manually edit memory files unless testing
 
 2. **Session State**:
-   - Let the plugin track active files automatically
+   - Let OpenCode Working Memory track active files automatically
    - Errors are cleared when commands succeed
    - No manual intervention needed
 
 3. **Memory Extraction**:
-   - Use `<workspace_memory_candidates>` during compaction
+   - Use `Memory candidates:` during compaction
    - Follow the pattern: `- [type] text`
    - Quality gate rejects invalid candidates
 
