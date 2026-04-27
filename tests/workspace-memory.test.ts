@@ -702,6 +702,20 @@ test("redactCredentials handles generic API keys and tokens", () => {
   assert.equal(redactCredentials("auth: abc123def"), "auth: [REDACTED]");
 });
 
+test("redactCredentials does not redact benign security-related wording", () => {
+  assert.equal(redactCredentials("token budget is 5200 characters"), "token budget is 5200 characters");
+  assert.equal(redactCredentials("auth config uses OAuth"), "auth config uses OAuth");
+  assert.equal(redactCredentials("secret manager is not supported"), "secret manager is not supported");
+  assert.equal(redactCredentials("private key handling is out of scope"), "private key handling is out of scope");
+});
+
+test("redactCredentials redacts common sensitive key delimiters", () => {
+  assert.equal(redactCredentials("token=ghp_abc123"), "token=[REDACTED]");
+  assert.equal(redactCredentials("private_key: -----BEGIN"), "private_key: [REDACTED]");
+  assert.equal(redactCredentials("credential：abc123"), "credential：[REDACTED]");
+  assert.equal(redactCredentials("api-key: sk-live-123"), "api-key: [REDACTED]");
+});
+
 test("redactCredentials is idempotent and also redacts rationale text", () => {
   assert.equal(redactCredentials("password: [REDACTED]"), "password: [REDACTED]");
 
