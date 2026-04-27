@@ -275,6 +275,14 @@ test("compaction hook sets output.prompt with ---free template", async () => {
     // Should contain Memory candidates format
     assert.equal(prompt!.includes("Memory candidates:"), true,
       "Prompt should include Memory candidates: label");
+    assert.equal(prompt!.includes("Good memory examples:"), true,
+      "Prompt should include concrete positive memory examples");
+    assert.equal(prompt!.includes("Bad memory examples to skip:"), true,
+      "Prompt should include concrete negative memory examples");
+    assert.equal(prompt!.includes("42 tests passed"), true,
+      "Prompt should explicitly reject test-count snapshots");
+    assert.equal(prompt!.includes("commit 4309cb8"), true,
+      "Prompt should explicitly reject commit-hash snapshots");
 
     // Should contain our context data (hot session state)
     assert.equal(prompt!.includes("Hot session state"), true,
