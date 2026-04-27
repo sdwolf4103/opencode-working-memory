@@ -1,5 +1,42 @@
 # Release Notes
 
+## 1.3.1 (2026-04-27)
+
+### Security and Reliability Patch
+
+This patch release keeps the v1.3 memory-consolidation model intact while tightening storage safety, compatibility checks, and repository-agnostic dedupe behavior.
+
+### What Changed
+
+- **Bounded pending journal**: pending memories are capped at 50 entries and pruned after 30 days.
+- **Security hardening**: workspace memory candidates now reject indirect prompt-injection attempts, and redaction covers broader token, secret, credential, auth, and private-key labels.
+- **Compatibility coverage**: plugin capability tests and weekly OpenCode plugin API compatibility CI help catch hook drift before release.
+- **Repo-agnostic dedupe**: long-term memory dedupe no longer depends on hardcoded project-specific topic rules; project/reference memories use generic URL/path identity plus exact canonical matching.
+- **Clearer limitations**: README and changelog now document compatibility, best-effort secret redaction, working-memory scope, plugin ordering, and multi-process write boundaries.
+
+### Thanks
+
+- Thanks @StevenChoo for the security hardening contribution in #3.
+
+### Upgrade Notes
+
+- No user migration is required.
+- Existing workspace memory and pending journal files remain compatible.
+- The OpenCode config entry stays the same:
+
+```json
+{
+  "plugin": ["opencode-working-memory"]
+}
+```
+
+### Validation
+
+- `npm test`
+- `npm run typecheck`
+
+---
+
 ## 1.3.0 (2026-04-27)
 
 ### Better Memory Consolidation
