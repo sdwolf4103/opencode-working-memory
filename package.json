@@ -16,7 +16,8 @@
   "scripts": {
     "build": "node -e \"console.log('No build step required: OpenCode loads index.ts directly')\"",
     "typecheck": "tsc --noEmit",
-    "test": "node --test --experimental-strip-types tests/*.test.ts"
+    "test": "node --test --experimental-strip-types tests/*.test.ts",
+    "check:compat": "npm install --no-save @opencode-ai/plugin@latest && npm run typecheck && npm test"
   },
   "keywords": [
     "opencode",
@@ -37,7 +38,7 @@
   },
   "homepage": "https://github.com/sdwolf4103/opencode-working-memory#readme",
   "peerDependencies": {
-    "@opencode-ai/plugin": "^1.2.0"
+    "@opencode-ai/plugin": ">=1.2.0 <2.0.0"
   },
   "devDependencies": {
     "@types/node": "^24.3.0",
