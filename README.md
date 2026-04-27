@@ -3,29 +3,38 @@
 [![npm version](https://img.shields.io/npm/v/opencode-working-memory.svg)](https://www.npmjs.com/package/opencode-working-memory)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-**Automatic memory system that keeps your AI agent context-aware across compactions.**
+Automatic memory for OpenCode agents.
 
-Stop losing context when OpenCode compacts your conversation. This plugin automatically tracks what matters — decisions, active files, open errors — and preserves it across sessions.
+This plugin helps your agent keep useful context across compactions and sessions: project decisions, preferences, important references, active files, and unresolved errors.
 
-## What You Get
+It works automatically, without manual memory tools or extra LLM/API calls.
 
-**Three-layer memory, zero extra API calls:**
+## Why This Exists
 
-| Layer | Scope | What It Tracks | Persists? |
-|-------|-------|----------------|-----------|
-| **Workspace Memory** | Cross-session | Decisions, project info, references | ✅ Yes |
-| **Hot Session State** | Per-session | Active files, open errors | ❌ Resets |
-| **Native OpenCode** | Per-session | Todos | ✅ Built-in |
+OpenCode compaction keeps conversations manageable, but important context can still get lost over time.
 
-**Key benefits:**
-- 🧠 **Remembers across sessions** — Workspace memory survives restarts
-- 🔌 **No extra API calls** — Piggybacks on existing compaction
-- 📡 **Zero configuration** — Works out of the box
-- 🔧 **Zero tools** — No manual memory management needed
+This plugin adds a workspace-aware memory layer so your agent can remember durable facts while keeping short-term session state fresh and lightweight.
+
+Use it when you want your agent to remember things like:
+
+- Project conventions
+- User preferences
+- Architecture decisions
+- Important file paths or references
+- Current active files and unresolved errors
+
+## Features
+
+- **Workspace memory** — durable project facts, preferences, decisions, and references across sessions.
+- **Hot session state** — active files, open errors, and current working context for the current session.
+- **Explicit memory triggers** — users can say “remember this”, “記住”, “覚えて”, or “기억해” to save durable facts.
+- **Compaction-based extraction** — memory extraction piggybacks on OpenCode’s existing compaction flow.
+- **No manual tools** — memory is injected automatically into the system prompt.
+- **Quality guards** — filters noisy memories, temporary progress snapshots, stack traces, raw errors, and credentials.
 
 ## Installation
 
-Add to your `~/.config/opencode/opencode.json`:
+Add the plugin to your OpenCode config:
 
 ```json
 {
@@ -33,206 +42,164 @@ Add to your `~/.config/opencode/opencode.json`:
 }
 ```
 
-Restart OpenCode. The plugin activates automatically — no manual setup needed.
+Then restart OpenCode. The plugin activates automatically.
 
 ## How It Works
 
-**Three layers, zero API calls, automatic persistence:**
+OpenCode Working Memory adds durable memory without making extra LLM/API calls.
 
-```
-┌──────────────────────────────────────────────────────────────────┐
-│  LAYER 1: WORKSPACE MEMORY                                       │
-│  ┌────────────────────────────────────────────────────────────┐  │
-│  │  📦 Persists across sessions (in same workspace)           │  │
-│  │  📦 Survives compaction & restart                          │  │
-│  │                                                            │  │
-│  │  Stored in: ~/.local/share/.../workspace-memory.json       │  │
-│  │  Contains: decisions • project info • references           │  │
-│  │  Written: during compaction (no extra LLM call!)           │  │
-│  └────────────────────────────────────────────────────────────┘  │
-└──────────────────────────────────────────────────────────────────┘
-          ↑ extracted during compaction (piggyback, no API call)
-          │
-┌──────────────────────────────────────────────────────────────────┐
-│  LAYER 2: HOT SESSION STATE                                      │
-│  ┌────────────────────────────────────────────────────────────┐  │
-│  │  🔥 Per-session, auto-tracked, resets on new session       │  │
-│  │                                                            │  │
-│  │  Active files (what you're editing)                        │  │
-│  │  Open errors (typecheck, test, lint failures)              │  │
-│  │  Recent decisions (candidates for Layer 1)                 │  │
-│  └────────────────────────────────────────────────────────────┘  │
-└──────────────────────────────────────────────────────────────────┘
-          ↑ harvested during compaction → promoted to Layer 1
-          │
-┌──────────────────────────────────────────────────────────────────┐
-│  LAYER 3: NATIVE OPENCODE STATE                                  │
-│  ┌────────────────────────────────────────────────────────────┐  │
-│  │  ✅ Uses OpenCode's built-in todos                         │  │
-│  │  ✅ No plugin storage needed                               │  │
-│  │  ✅ Delegates to native features                           │  │
-│  └────────────────────────────────────────────────────────────┘  │
-└──────────────────────────────────────────────────────────────────┘
-
-KEY INSIGHT: Layer 1 memories are extracted during OpenCode's
-             built-in compaction summary — NO additional LLM call!
-```
-
-### The Compaction Flow (No Extra API Call)
-
-```
-User Message ───────────────┐
-                            │
-Agent Response ─────────────┤
-                            │  normal conversation
-... more turns ... ─────────┤
-                            │
-                            ▼
-              ╔═══════════════════════════════════════════╗
-              ║     COMPACTION (OpenCode built-in)        ║
-              ║                                           ║
-              ║  OpenCode already calls LLM to summarize  ║
-              ║  ──────────────────────────────────────── ║
-              ║  Plugin piggybacks on THIS call           ║
-              ║  to extract workspace memory candidates   ║
-              ║                                           ║
-              ║  Output includes:                         ║
-              ║  <workspace_memory_candidates>            ║
-              ║  - [decision] Use npm cache for plugins   ║
-              ║  - [project] React 18 with TypeScript     ║
-              ║  </workspace_memory_candidates>           ║
-              ╚═══════════════════════════════════════════╝
-                            │
-                            ▼
-              ┌─────────────────────────────────┐
-              │  Workspace Memory Updated       │
-              │  (persists across sessions)     │
-              └─────────────────────────────────┘
+```text
+┌──────────────────────────────────────┐
+│ 🧭 Conversation Events               │
+│ edits, commands, errors, remembers   │
+└──────────────────┬───────────────────┘
+                   ▼
+┌──────────────────────────────────────┐
+│ 🔥 Hot Session State                 │
+│ active files, open errors, pending   │
+│                                      │
+│ ~/.local/share/opencode-working-     │
+│ memory/workspaces/{hash}/sessions/   │
+│ {sessionID}.json                     │
+└──────────────────┬───────────────────┘
+                   │ when OpenCode compacts
+                   ▼
+┌──────────────────────────────────────┐
+│ 🧠 OpenCode Compaction               │
+│ existing LLM/API call                │
+│ + memory extraction instructions     │
+│                                      │
+│ zero extra API calls                 │
+└──────────────────┬───────────────────┘
+                   │ filter, redact, dedupe
+                   ▼
+┌──────────────────────────────────────┐
+│ 📦 Workspace Memory                  │
+│ decisions, preferences, refs         │
+│                                      │
+│ ~/.local/share/opencode-working-     │
+│ memory/workspaces/{hash}/            │
+│ workspace-memory.json                │
+└──────────────────┬───────────────────┘
+                   ▼
+┌──────────────────────────────────────┐
+│ ⚡ Prompt Context                    │
+│ system[1]: frozen workspace memory   │
+│ system[2+]: hot session state        │
+└──────────────────────────────────────┘
 ```
 
-### Workspace Memory (Long-term)
+**Zero extra API calls:** the plugin does not call the model on its own. Memory extraction is folded into OpenCode's built-in compaction request.
 
-Persists across sessions within the same workspace. Automatically extracted during compaction when the agent marks something with "remember" or "note":
+**Cache-friendly layout:** durable workspace memory is rendered as a stable frozen snapshot for the session, while fast-changing hot session state is appended separately. Compaction starts a new cache epoch, refreshing the workspace snapshot after pending memories are promoted.
 
-```
-<workspace_memory>
-- [decision] Use npm cache for plugin loading, not npm link
-- [project] This repo uses opencode-agenthub plugin system
-- [reference] Storage: ~/.local/share/opencode-working-memory/...
-</workspace_memory>
-```
+The runtime context has three layers:
 
-**Memory types:**
-- `feedback` - User preferences for this workspace
-- `project` - Project-level information
-- `decision` - Important decisions made
-- `reference` - Key references (paths, patterns)
+| Layer | Purpose | Lifetime |
+|---|---|---|
+| Workspace Memory | Durable decisions, preferences, project facts, references | Cross-session |
+| Hot Session State | Active files, open errors, recent context | Current session |
+| Native OpenCode State | Todos and built-in state | OpenCode-managed |
 
-**Sources:**
-- `explicit` - User explicitly said "remember this" (confidence: 1.0)
-- `compaction` - Extracted during compaction (confidence: 0.75)
-- `manual` - Added programmatically (confidence: varies)
+## Workspace Memory
 
-### Explicit Memory Triggers
+Workspace memory is for durable information that should help future sessions.
 
-Workspace memory is automatic, but you can also explicitly ask the agent to remember durable facts for future sessions.
+Examples:
 
-Use memory triggers for preferences, decisions, project conventions, and stable references — not temporary progress updates or secrets.
-
-| Language | Example trigger phrases |
-|----------|--------------------------|
-| English | `remember this`, `save to memory`, `commit to memory`, `from now on`, `my preference` |
-| Chinese | `记住`, `記住`, `记得`, `記得`, `请帮我记住`, `幫我記住` |
-| Japanese | `覚えて`, `覚えておいて`, `忘れないで`, `メモして` |
-| Korean | `기억해`, `기억해줘`, `잊지 마`, `메모해줘` |
-
-Negative requests are respected too, such as "don't remember this", `不要記住`, `覚えないで`, or `기억하지 마`.
-
-**Good examples:**
-- "Remember this: we prefer Vitest for new unit tests."
-- "覚えておいて: API clients should use the shared retry helper."
-- "기억해줘: this project uses pnpm, not npm."
-
-**Avoid:**
-- "Remember my password is hunter2." — credentials are redacted.
-- "Remember Sprint 3 is 40% done." — temporary progress snapshots are filtered.
-- "Remember the last command output." — session-specific details usually are not durable.
-
-### Hot Session State (Short-term)
-
-Automatically tracks current session context:
-
-- **Active Files**: What files you're working on (ranked by recency and action type)
-- **Open Errors**: Errors that haven't been fixed yet (typecheck, test failures, etc.)
-- **Recent Decisions**: Decisions made this session (candidates for long-term promotion)
-
-Injected into system prompt:
-```
-<workspace_memory>
-- [decision] Use npm cache for plugin loading, not npm link
-- [project] This repo uses opencode-agenthub plugin system
-- [reference] Storage: ~/.local/share/opencode-working-memory/workspaces/{hash}/
-</workspace_memory>
-
-<hot_session_state>
-active_files:
-- src/plugin.ts (edit, 18x)
-- tests/plugin.test.ts (edit, 5x)
-- src/extractors.ts (grep, 3x)
-open_errors:
-- [typecheck] TS2345: Argument of type 'string' is not assignable...
-</hot_session_state>
+```md
+- [decision] Use npm cache for plugin loading, not npm link.
+- [project] This repo uses TypeScript and Node.js test runner.
+- [feedback] User prefers concise implementation summaries.
+- [reference] Storage lives under ~/.local/share/opencode-working-memory/.
 ```
 
-## Quality Guarantees
+Memory types:
 
-The plugin includes several quality guards:
+- `feedback` — user preferences or recurring feedback
+- `project` — stable project-level facts
+- `decision` — important implementation or architecture decisions
+- `reference` — useful paths, commands, or configuration references
 
-- **No false positive errors**: Bash commands like `git log` or `cat` with "error" in output are not misidentified
-- **Negative memory filtering**: "Don't remember this" is correctly interpreted
-- **Compaction quality gate**: Rejects git hashes, stack traces, path-heavy facts from becoming long-term memories
-- **Canonical deduplication**: Memories are deduplicated with case/punctuation normalization
+## Explicit Memory Triggers
 
-## No Tools Required
+You can explicitly ask the agent to remember durable facts.
 
-Unlike other memory plugins, **this plugin has no manual tools**. Everything is automatic:
+Examples:
 
-- No `core_memory_update` — memory is extracted automatically
-- No `core_memory_read` — memory is injected into system prompt
-- No `working_memory_add` — active files are tracked automatically
+```md
+Remember this: we prefer Vitest for new frontend tests.
+記住：這個 repo 發 release 前要先跑 npm test。
+覚えておいて: API clients should use the shared retry helper.
+기억해줘: this project uses pnpm, not npm.
+```
 
-Just install and let it run. The plugin hooks into OpenCode's lifecycle events and does the right thing.
+Supported trigger languages include:
+
+| Language | Examples |
+|---|---|
+| English | `remember this`, `save to memory`, `from now on`, `my preference` |
+| Chinese | `記住`, `记住`, `記得`, `请帮我记住` |
+| Japanese | `覚えて`, `覚えておいて`, `メモして` |
+| Korean | `기억해`, `기억해줘`, `메모해줘` |
+
+Negative requests are respected too:
+
+```md
+Don't remember this.
+不要記住這個。
+覚えないで。
+기억하지 마.
+```
+
+Avoid saving:
+
+- Secrets, passwords, tokens, or credentials
+- Temporary progress updates
+- Raw command output
+- Short-lived session details
+
+## Quality Guards
+
+The plugin tries to keep memory useful and low-noise.
+
+It includes guards for:
+
+- Credential redaction
+- Duplicate memory cleanup
+- Superseding older decisions with newer ones
+- Filtering stack traces, git hashes, raw errors, and noisy path-heavy facts
+- Rejecting temporary project progress snapshots
+
+The goal is to remember durable facts, not every detail.
 
 ## Configuration
 
-The plugin works out of the box with sensible defaults:
+The plugin works out of the box.
 
-- **Workspace Memory**: 5200 chars, 28 entries max
-- **Hot State**: 1200 chars rendered, 8 active files, 3 errors shown
-- **Storage**: `~/.local/share/opencode-working-memory/workspaces/{hash}/`
+Default behavior:
 
-See [Configuration Guide](docs/configuration.md) for customization options.
+- Workspace memory budget: 5200 characters
+- Workspace memory limit: 28 entries
+- Hot session state budget: 1200 characters
+- Active files shown: 8
+- Open errors shown: 3
 
-## For AI Agents
+See [Configuration](docs/configuration.md) for customization options.
 
-When using this plugin, the memory context appears in your system prompt. You can:
+## Ongoing Work
 
-1. **Tell users about memories**: "I remember you decided to use npm cache for plugins"
-2. **Ask about preferences**: "Should I add this to my memory for this workspace?"
-3. **Note important decisions**: These will be extracted during compaction
+Current focus:
 
-To add something to long-term memory explicitly:
-```
-Remember this: [your note here]
-```
-
-The plugin captures this during compaction.
+- Improve memory recording quality so only durable, useful facts are kept.
+- Strengthen deduplication and supersession so stale memories do not pile up.
+- Add better forgetting behavior for obsolete decisions, preferences, and project facts.
 
 ## Documentation
 
-- [Architecture Overview](docs/architecture.md) - How the three layers work
-- [Configuration](docs/configuration.md) - Customization options
-- [Installation Guide](docs/installation.md) - Step-by-step setup
+- [Architecture Overview](docs/architecture.md)
+- [Configuration](docs/configuration.md)
+- [Installation Guide](docs/installation.md)
 
 ## Development
 
@@ -251,13 +218,13 @@ npm run typecheck
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) file for details.
+MIT License. See [LICENSE](LICENSE) for details.
 
 ## Support
 
-- 📖 [Documentation](docs/)
-- 🐛 [Report Issues](https://github.com/sdwolf4103/opencode-working-memory/issues)
+- [Documentation](docs/)
+- [Report Issues](https://github.com/sdwolf4103/opencode-working-memory/issues)
 
 ---
 
-**Made with ❤️ for the OpenCode community**
+Made with ❤️ for the OpenCode community.
