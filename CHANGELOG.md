@@ -19,6 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Pending journal retention: max 50 entries, 30-day TTL, automatic pruning on save.
 - Plugin capability test to catch missing OpenCode hooks before release.
 - CI workflow for weekly OpenCode plugin API compatibility testing.
+- Indirect prompt-injection filtering for workspace memory candidates.
+- Expanded credential redaction for common API key, token, secret, credential, auth, and private-key labels.
 
 ### Fixed
 
