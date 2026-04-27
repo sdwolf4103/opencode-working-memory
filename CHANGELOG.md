@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.1] - 2026-04-27
+
+### Added
+
+- Pending journal retention: max 50 entries, 30-day TTL, automatic pruning on save.
+- Plugin capability test to catch missing OpenCode hooks before release.
+- CI workflow for weekly OpenCode plugin API compatibility testing.
+- Indirect prompt-injection filtering for workspace memory candidates.
+- Expanded credential redaction for common API key, token, secret, credential, auth, and private-key labels.
+
+### Fixed
+
+- Pending memory journal entries are now bounded and pruned instead of growing indefinitely.
+- Adversarial memory candidates that try to override system instructions are rejected before storage.
+- Broader credential-like labels are redacted from workspace memory text.
+
+### Changed
+
+- Memory dedupe is now repo-agnostic: project/reference entries use exact canonical text plus generic URL/path identity, while decision/feedback entries no longer use repository-specific topic heuristics.
+- OpenCode plugin compatibility is documented and declared as `>=1.2.0 <2.0.0`.
+- README limitations now concisely document compatibility, secret handling, semantic-memory scope, plugin ordering, and multi-process write boundaries.
+
+### Known Limitations
+
+- Compatibility is tested against OpenCode plugin API `>=1.2.0 <2.0.0`.
+- Credential redaction is best-effort; do not store secrets.
+- This is working memory, not semantic search.
+- Other prompt or compaction plugins may conflict depending on plugin order.
+- Multi-process writes to the same workspace are not fully serialized.
+
 ## [1.3.0] - 2026-04-27
 
 ### Added
@@ -16,11 +46,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Remove absorbed/superseded keys from rejected set to avoid duplicate rejection tracking.
 - Memory quality evaluation fixtures covering accepted durable facts and rejected noisy facts.
 - Sharper compaction memory extraction prompt with concrete good/bad memory examples.
-- Pending journal retention: max 50 entries, 30-day TTL, automatic pruning on save.
-- Plugin capability test to catch missing OpenCode hooks before release.
-- CI workflow for weekly OpenCode plugin API compatibility testing.
-- Indirect prompt-injection filtering for workspace memory candidates.
-- Expanded credential redaction for common API key, token, secret, credential, auth, and private-key labels.
 
 ### Fixed
 
@@ -32,17 +57,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Deferred pending journal safety cap implementation (see TODO in `src/pending-journal.ts`).
 - Clarified superseded accounting semantics: P0 emits events only, does not archive newly superseded records.
 - README structure was streamlined around the automatic memory flow and ongoing memory-quality work.
 - Architecture docs now describe `Memory candidates:` as the primary extraction format and XML candidate blocks as legacy.
 - Superpowers implementation plans are no longer tracked in git.
-
-### Known Limitations
-
-- Compatibility is tested against OpenCode plugin API `>=1.2.0 <2.0.0`.
-- Credential redaction is best-effort; do not store secrets.
-- This is working memory, not semantic search.
-- Multi-process writes to the same workspace are not fully serialized.
 
 ## [1.2.3] - 2026-04-26
 
