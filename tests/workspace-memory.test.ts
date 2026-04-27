@@ -9,11 +9,16 @@ import { workspaceMemoryPath } from "../src/paths.ts";
 import {
   renderWorkspaceMemory,
   enforceLongTermLimits,
+  dedupeLongTermEntriesWithAccounting,
+  enforceLongTermLimitsWithAccounting,
+  normalizeWorkspaceMemoryWithAccounting,
+  workspaceMemoryExactKey,
   redactCredentials,
   isProjectSnapshotViolation,
   runMigrationP0Cleanup,
   loadWorkspaceMemory,
   saveWorkspaceMemory,
+  updateWorkspaceMemoryWithAccounting,
 } from "../src/workspace-memory.ts";
 
 function entry(id: string, text: string, type: LongTermMemoryEntry["type"] = "decision"): LongTermMemoryEntry {
@@ -241,6 +246,241 @@ test("enforceLongTermLimits respects maxEntries limit", () => {
 
   const kept = enforceLongTermLimits(entries);
   assert.ok(kept.length <= 28, `Should respect maxEntries. Got: ${kept.length}`);
+});
+
+test("dedupeLongTermEntriesWithAccounting reports exact duplicates as absorbed", () => {
+  const now = new Date().toISOString();
+  const lower: LongTermMemoryEntry = {
+    id: "lower",
+    type: "decision",
+    text: "OpenCode uses NPM CACHE for plugin loading",
+    source: "compaction",
+    confidence: 0.7,
+    status: "active",
+    createdAt: now,
+    updatedAt: now,
+  };
+  const higher: LongTermMemoryEntry = {
+    id: "higher",
+    type: "decision",
+    text: "opencode uses npm cache for plugin loading!!!",
+    source: "compaction",
+    confidence: 0.8,
+    status: "active",
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  const result = dedupeLongTermEntriesWithAccounting([lower, higher]);
+
+  assert.equal(result.kept.length, 1);
+  assert.equal(result.kept[0].id, "higher");
+  assert.deepEqual(result.absorbed.map(event => event.reason), ["absorbed_exact"]);
+  assert.equal(result.absorbed[0].memory.id, "lower");
+});
+
+test("dedupeLongTermEntriesWithAccounting reports identity duplicates as absorbed", () => {
+  const older = agedEntry(
+    "older",
+    "This repo uses opencode-agenthub plugin system at /Users/sd_wo/work/opencode-working-memory/",
+    "project",
+    { daysAgo: 5 },
+  );
+  const newer = agedEntry(
+    "newer",
+    "此 repo 在開發時使用 opencode-agenthub 插件系統，目錄位於 /Users/sd_wo/work/opencode-working-memory/.opencode-agenthub/",
+    "project",
+    { daysAgo: 0 },
+  );
+
+  const result = dedupeLongTermEntriesWithAccounting([older, newer]);
+
+  assert.equal(result.kept.length, 1);
+  assert.equal(result.absorbed.length, 1);
+  assert.equal(result.absorbed[0].reason, "absorbed_identity");
+  assert.equal(result.absorbed[0].retainedId, result.kept[0].id);
+});
+
+test("dedupeLongTermEntriesWithAccounting reports topic duplicates as superseded", () => {
+  const older = agedEntry(
+    "older",
+    "Parser supports 3 formats: HTML comment, Markdown section, legacy XML",
+    "decision",
+    { daysAgo: 5 },
+  );
+  const newer = agedEntry(
+    "newer",
+    "Parser supports 4 formats: plain text label, Markdown section, legacy section name, legacy XML",
+    "decision",
+    { daysAgo: 0 },
+  );
+
+  const result = dedupeLongTermEntriesWithAccounting([older, newer]);
+
+  assert.equal(result.kept.length, 1);
+  assert.equal(result.kept[0].id, "newer");
+  assert.equal(result.superseded.length, 1);
+  assert.equal(result.superseded[0].reason, "superseded_existing");
+  assert.equal(result.superseded[0].supersededId, "older");
+  assert.equal(result.superseded[0].retainedId, "newer");
+});
+
+test("enforceLongTermLimitsWithAccounting reports capacity drops", () => {
+  const now = new Date().toISOString();
+  const entries = Array.from({ length: LONG_TERM_LIMITS.maxEntries + 2 }, (_, i) => ({
+    id: `mem_${i}`,
+    type: "reference" as const,
+    text: `Unique low priority reference ${i}`,
+    source: "compaction" as const,
+    confidence: i < LONG_TERM_LIMITS.maxEntries ? 0.8 : 0.1,
+    status: "active" as const,
+    createdAt: now,
+    updatedAt: now,
+  }));
+
+  const result = enforceLongTermLimitsWithAccounting(entries);
+
+  assert.equal(result.kept.length, LONG_TERM_LIMITS.maxEntries);
+  assert.equal(result.dropped.filter(event => event.reason === "rejected_capacity").length, 2);
+  assert.ok(result.dropped.every(event => event.memory.source === "compaction"));
+});
+
+test("workspaceMemoryExactKey uses pending-compatible canonical semantics", () => {
+  const now = new Date().toISOString();
+  const entry: LongTermMemoryEntry = {
+    id: "key_alignment",
+    type: "decision",
+    text: "OpenCode uses NPM CACHE for plugin loading!!!",
+    source: "compaction",
+    confidence: 0.75,
+    status: "active",
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  assert.equal(workspaceMemoryExactKey(entry), "decision:opencode uses npm cache for plugin loading");
+});
+
+test("normalizeWorkspaceMemoryWithAccounting redacts credentials before accounting", async () => {
+  const root = "/repo";
+  const now = new Date().toISOString();
+  const store: WorkspaceMemoryStore = {
+    version: 1,
+    workspace: { root, key: "abc" },
+    limits: { maxRenderedChars: LONG_TERM_LIMITS.maxRenderedChars, maxEntries: LONG_TERM_LIMITS.maxEntries },
+    migrations: ["2026-04-26-p0-cleanup"],
+    entries: [{
+      id: "cred",
+      type: "reference",
+      text: "Admin PIN 是 456123",
+      rationale: "password: sushi",
+      source: "explicit",
+      confidence: 1,
+      status: "active",
+      createdAt: now,
+      updatedAt: now,
+    }],
+    updatedAt: now,
+  };
+
+  const result = await normalizeWorkspaceMemoryWithAccounting(root, store);
+
+  assert.equal(result.kept.length, 1);
+  assert.equal(result.kept[0].text, "Admin PIN 是 [REDACTED]");
+  assert.equal(result.kept[0].rationale, "password: [REDACTED]");
+  assert.equal(result.store.entries[0].text, "Admin PIN 是 [REDACTED]");
+});
+
+test("normalizeWorkspaceMemoryWithAccounting reports overflow capacity drops", async () => {
+  const root = "/repo";
+  const now = new Date().toISOString();
+  const store: WorkspaceMemoryStore = {
+    version: 1,
+    workspace: { root, key: "abc" },
+    limits: { maxRenderedChars: LONG_TERM_LIMITS.maxRenderedChars, maxEntries: LONG_TERM_LIMITS.maxEntries },
+    migrations: ["2026-04-26-p0-cleanup"],
+    entries: Array.from({ length: LONG_TERM_LIMITS.maxEntries + 1 }, (_, i) => ({
+      id: `overflow_${i}`,
+      type: "reference" as const,
+      text: `Overflow reference ${i}`,
+      source: "compaction" as const,
+      confidence: i < LONG_TERM_LIMITS.maxEntries ? 0.8 : 0.1,
+      status: "active" as const,
+      createdAt: now,
+      updatedAt: now,
+    })),
+    updatedAt: now,
+  };
+
+  const result = await normalizeWorkspaceMemoryWithAccounting(root, store);
+
+  assert.equal(result.kept.length, LONG_TERM_LIMITS.maxEntries);
+  assert.equal(result.store.entries.filter(entry => entry.status === "active").length, LONG_TERM_LIMITS.maxEntries);
+  assert.equal(result.dropped.filter(event => event.reason === "rejected_capacity").length, 1);
+});
+
+test("normalizeWorkspaceMemoryWithAccounting reports stale entry removal", async () => {
+  const root = "/repo";
+  const now = new Date().toISOString();
+  const stale = agedEntry(
+    "stale_normalize",
+    "Old compaction decision should be removed by normalization accounting",
+    "decision",
+    { daysAgo: 90, staleAfterDays: 1 },
+  );
+  const store: WorkspaceMemoryStore = {
+    version: 1,
+    workspace: { root, key: "abc" },
+    limits: { maxRenderedChars: LONG_TERM_LIMITS.maxRenderedChars, maxEntries: LONG_TERM_LIMITS.maxEntries },
+    migrations: ["2026-04-26-p0-cleanup"],
+    entries: [stale],
+    updatedAt: now,
+  };
+
+  const result = await normalizeWorkspaceMemoryWithAccounting(root, store);
+
+  assert.equal(result.kept.length, 0);
+  assert.equal(result.store.entries.length, 0);
+  assert.deepEqual(result.dropped.map(event => event.reason), ["rejected_stale"]);
+  assert.equal(result.dropped[0].memory.id, "stale_normalize");
+});
+
+test("updateWorkspaceMemoryWithAccounting emits accounting events for persisted updates", async () => {
+  const sandbox = await mkdtemp(join(tmpdir(), "wm-accounting-update-"));
+  const dataHome = join(sandbox, "xdg-data-home");
+  const root = join(sandbox, "workspace");
+  const previousXdgDataHome = process.env.XDG_DATA_HOME;
+  process.env.XDG_DATA_HOME = dataHome;
+
+  try {
+    const now = new Date().toISOString();
+    const result = await updateWorkspaceMemoryWithAccounting(root, store => {
+      store.entries.push(...Array.from({ length: LONG_TERM_LIMITS.maxEntries + 1 }, (_, i) => ({
+        id: `persisted_${i}`,
+        type: "reference" as const,
+        text: `Persisted accounting reference ${i}`,
+        source: "compaction" as const,
+        confidence: i < LONG_TERM_LIMITS.maxEntries ? 0.8 : 0.1,
+        status: "active" as const,
+        createdAt: now,
+        updatedAt: now,
+      })));
+      return store;
+    });
+
+    assert.equal(result.store.entries.filter(entry => entry.status === "active").length, LONG_TERM_LIMITS.maxEntries);
+    assert.equal(result.events.filter(event => event.reason === "rejected_capacity").length, 1);
+
+    const persisted = await loadWorkspaceMemory(root);
+    assert.equal(persisted.entries.filter(entry => entry.status === "active").length, LONG_TERM_LIMITS.maxEntries);
+  } finally {
+    if (previousXdgDataHome === undefined) {
+      delete process.env.XDG_DATA_HOME;
+    } else {
+      process.env.XDG_DATA_HOME = previousXdgDataHome;
+    }
+    await rm(sandbox, { recursive: true, force: true });
+  }
 });
 
 // ============================================

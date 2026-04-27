@@ -16,6 +16,35 @@ const PIN_PREFIX = String.raw`(\bPIN\b(?:\s*(?:是|=|:|：)\s*|\s+(?![是=:：])
 const PASSWORD_PREFIX = String.raw`((?:${PASSWORD_LABELS.source})(?:\s*(?:是|=|:|：)\s*|\s+(?![是=:：])))`;
 const USERNAME_PREFIX = String.raw`((?:${USERNAME_LABELS.source})(?:\s*(?:是|=|:|：)\s*|\s+(?![是=:：])))`;
 
+export type MemoryConsolidationReason =
+  | "promoted"
+  | "absorbed_exact"
+  | "absorbed_identity"
+  | "superseded_existing"
+  | "rejected_capacity"
+  | "rejected_stale";
+
+export type MemoryConsolidationEvent = {
+  memoryKey: string;
+  identityKey: string;
+  memory: LongTermMemoryEntry;
+  reason: MemoryConsolidationReason;
+  retainedId?: string;
+  supersededId?: string;
+};
+
+export type LongTermLimitResult = {
+  kept: LongTermMemoryEntry[];
+  dropped: MemoryConsolidationEvent[];
+  absorbed: MemoryConsolidationEvent[];
+  superseded: MemoryConsolidationEvent[];
+};
+
+export type WorkspaceMemoryNormalizationResult = LongTermLimitResult & {
+  store: WorkspaceMemoryStore;
+  events: MemoryConsolidationEvent[];
+};
+
 export async function emptyWorkspaceMemory(root: string): Promise<WorkspaceMemoryStore> {
   return {
     version: 1,
@@ -83,18 +112,43 @@ export async function updateWorkspaceMemory(
   root: string,
   updater: (store: WorkspaceMemoryStore) => WorkspaceMemoryStore | Promise<WorkspaceMemoryStore>,
 ): Promise<WorkspaceMemoryStore> {
-  const path = await workspaceMemoryPath(root);
-  const fallback = await emptyWorkspaceMemory(root);
-  return updateJSON(path, () => fallback, async current => {
-    const normalized = await normalizeWorkspaceMemory(root, current);
-    return normalizeWorkspaceMemory(root, await updater(normalized));
-  });
+  return (await updateWorkspaceMemoryWithAccounting(root, updater)).store;
 }
 
-async function normalizeWorkspaceMemory(
+export async function updateWorkspaceMemoryWithAccounting(
+  root: string,
+  updater: (store: WorkspaceMemoryStore) => WorkspaceMemoryStore | Promise<WorkspaceMemoryStore>,
+): Promise<WorkspaceMemoryNormalizationResult> {
+  const path = await workspaceMemoryPath(root);
+  const fallback = await emptyWorkspaceMemory(root);
+  let finalResult: WorkspaceMemoryNormalizationResult | undefined;
+  const store = await updateJSON(path, () => fallback, async current => {
+    const normalized = await normalizeWorkspaceMemory(root, current);
+    finalResult = await normalizeWorkspaceMemoryWithAccounting(root, await updater(normalized));
+    return finalResult.store;
+  });
+
+  return finalResult ?? {
+    store,
+    kept: store.entries.filter(entry => entry.status !== "superseded"),
+    dropped: [],
+    absorbed: [],
+    superseded: [],
+    events: [],
+  };
+}
+
+export async function normalizeWorkspaceMemory(
   root: string,
   store: WorkspaceMemoryStore,
 ): Promise<WorkspaceMemoryStore> {
+  return (await normalizeWorkspaceMemoryWithAccounting(root, store)).store;
+}
+
+export async function normalizeWorkspaceMemoryWithAccounting(
+  root: string,
+  store: WorkspaceMemoryStore,
+): Promise<WorkspaceMemoryNormalizationResult> {
   const nowIso = new Date().toISOString();
 
   let result: WorkspaceMemoryStore = {
@@ -129,15 +183,27 @@ async function normalizeWorkspaceMemory(
   // One-time migration for legacy snapshot violations
   result = runMigrationP0Cleanup(result, nowIso);
 
-  // Enforce limits on active entries while preserving superseded entries in storage
+  // P0 accounting only considers active entries. Entries that were already
+  // superseded before this normalization are preserved in storage; entries that
+  // lose during this enforcement are reported via accounting events but are not
+  // archived as superseded records in this wave.
   const activeEntries = result.entries.filter(entry => entry.status !== "superseded");
   const supersededEntries = result.entries.filter(entry => entry.status === "superseded");
-  const processedActive = enforceLongTermLimits(activeEntries);
+  const accounting = enforceLongTermLimitsWithAccounting(activeEntries);
+
+  const normalizedStore = {
+    ...result,
+    entries: [...accounting.kept, ...supersededEntries],
+    updatedAt: nowIso,
+  };
 
   return {
-    ...result,
-    entries: [...processedActive, ...supersededEntries],
-    updatedAt: nowIso,
+    store: normalizedStore,
+    kept: accounting.kept,
+    dropped: accounting.dropped,
+    absorbed: accounting.absorbed,
+    superseded: accounting.superseded,
+    events: [...accounting.dropped, ...accounting.absorbed, ...accounting.superseded],
   };
 }
 
@@ -235,6 +301,10 @@ function canonicalMemoryText(text: string): string {
     .trim();
 }
 
+export function workspaceMemoryExactKey(entry: Pick<LongTermMemoryEntry, "type" | "text">): string {
+  return `${entry.type}:${canonicalMemoryText(entry.text)}`;
+}
+
 /** Extract entity/destination keys for project and reference dedup */
 function extractEntityKey(text: string): string | null {
   const normalized = canonicalMemoryText(text);
@@ -303,6 +373,21 @@ export function workspaceMemoryIdentityKey(entry: Pick<LongTermMemoryEntry, "typ
   return `decision:${decisionTopicKey(entry.text) ?? canonicalMemoryText(entry.text)}`;
 }
 
+function consolidationEvent(
+  memory: LongTermMemoryEntry,
+  reason: MemoryConsolidationReason,
+  retained?: LongTermMemoryEntry,
+): MemoryConsolidationEvent {
+  return {
+    memoryKey: workspaceMemoryExactKey(memory),
+    identityKey: workspaceMemoryIdentityKey(memory),
+    memory,
+    reason,
+    retainedId: retained?.id,
+    supersededId: reason === "superseded_existing" ? memory.id : undefined,
+  };
+}
+
 /** Check if entry should be pruned by age (for compaction/manual entries only) */
 function isPrunableByAge(entry: LongTermMemoryEntry, now: number): boolean {
   // Never prune feedback or explicit entries
@@ -348,22 +433,52 @@ function chooseBetterMemory(
 }
 
 export function enforceLongTermLimits(entries: LongTermMemoryEntry[]): LongTermMemoryEntry[] {
+  return enforceLongTermLimitsWithAccounting(entries).kept;
+}
+
+export function enforceLongTermLimitsWithAccounting(entries: LongTermMemoryEntry[]): LongTermLimitResult {
   const now = Date.now();
+  const staleDropped: MemoryConsolidationEvent[] = [];
 
   // Phase 1: filter active, prune by age
-  const phase1 = entries
-    .filter(entry => entry.status !== "superseded")
-    .filter(entry => !isPrunableByAge(entry, now))
-    .map(entry => ({ ...entry, text: entry.text.slice(0, LONG_TERM_LIMITS.maxEntryTextChars) }));
+  const phase1: LongTermMemoryEntry[] = [];
+  for (const entry of entries) {
+    if (entry.status === "superseded") continue;
+    if (isPrunableByAge(entry, now)) {
+      staleDropped.push(consolidationEvent(entry, "rejected_stale"));
+      continue;
+    }
+    phase1.push({ ...entry, text: entry.text.slice(0, LONG_TERM_LIMITS.maxEntryTextChars) });
+  }
+
+  const dedupeResult = dedupeLongTermEntriesWithAccounting(phase1);
+  const sorted = [...dedupeResult.kept].sort(compareLongTermMemoryForRetention);
+  const kept = sorted.slice(0, LONG_TERM_LIMITS.maxEntries);
+  const keptIds = new Set(kept.map(entry => entry.id));
+  const capacityDropped = sorted
+    .filter(entry => !keptIds.has(entry.id))
+    .map(entry => consolidationEvent(entry, "rejected_capacity"));
+
+  return {
+    kept,
+    dropped: [...staleDropped, ...dedupeResult.dropped, ...capacityDropped],
+    absorbed: dedupeResult.absorbed,
+    superseded: dedupeResult.superseded,
+  };
+}
+
+export function dedupeLongTermEntriesWithAccounting(entries: LongTermMemoryEntry[]): LongTermLimitResult {
+  const absorbed: MemoryConsolidationEvent[] = [];
+  const superseded: MemoryConsolidationEvent[] = [];
 
   // For project/reference/feedback: detect entity keys FIRST, then dedupe by entity OR canonical
-  const projectRefEntries = phase1.filter(e => e.type === "project" || e.type === "reference" || e.type === "feedback");
+  const projectRefEntries = entries.filter(e => e.type === "project" || e.type === "reference" || e.type === "feedback");
 
   // Build entity key dedup for project/reference/feedback
   const entityDeduped = new Map<string, LongTermMemoryEntry>();
   for (const entry of projectRefEntries) {
     const key = workspaceMemoryIdentityKey(entry);
-    const hasTopicIdentity = key !== `${entry.type}:${canonicalMemoryText(entry.text)}`;
+    const hasTopicIdentity = key !== workspaceMemoryExactKey(entry);
 
     const existing = entityDeduped.get(key);
     if (!existing) {
@@ -371,14 +486,28 @@ export function enforceLongTermLimits(entries: LongTermMemoryEntry[]): LongTermM
     } else {
       // Feedback topic conflicts use supersession mode (newer beats longer)
       const mode = entry.type === "feedback" && hasTopicIdentity ? "supersession" as const : "entity" as const;
-      if (chooseBetterMemory(entry, existing, mode) === entry) {
+      const retained = chooseBetterMemory(entry, existing, mode);
+      const dropped = retained === entry ? existing : entry;
+      const reason = workspaceMemoryExactKey(entry) === workspaceMemoryExactKey(existing)
+        ? "absorbed_exact" as const
+        : mode === "supersession"
+          ? "superseded_existing" as const
+          : "absorbed_identity" as const;
+
+      if (reason === "superseded_existing") {
+        superseded.push(consolidationEvent(dropped, reason, retained));
+      } else {
+        absorbed.push(consolidationEvent(dropped, reason, retained));
+      }
+
+      if (retained === entry) {
         entityDeduped.set(key, entry);
       }
     }
   }
 
   // For decisions: detect topic keys for supersession, or use canonical
-  const decisionEntries = phase1.filter(e => e.type === "decision");
+  const decisionEntries = entries.filter(e => e.type === "decision");
   const decisionDeduped = new Map<string, LongTermMemoryEntry>();
   for (const entry of decisionEntries) {
     const key = workspaceMemoryIdentityKey(entry);
@@ -386,8 +515,22 @@ export function enforceLongTermLimits(entries: LongTermMemoryEntry[]): LongTermM
     const existing = decisionDeduped.get(key);
     if (!existing) {
       decisionDeduped.set(key, entry);
-    } else if (chooseBetterMemory(entry, existing, "supersession") === entry) {
-      decisionDeduped.set(key, entry);
+    } else {
+      const retained = chooseBetterMemory(entry, existing, "supersession");
+      const dropped = retained === entry ? existing : entry;
+      const reason = workspaceMemoryExactKey(entry) === workspaceMemoryExactKey(existing)
+        ? "absorbed_exact" as const
+        : "superseded_existing" as const;
+
+      if (reason === "superseded_existing") {
+        superseded.push(consolidationEvent(dropped, reason, retained));
+      } else {
+        absorbed.push(consolidationEvent(dropped, reason, retained));
+      }
+
+      if (retained === entry) {
+        decisionDeduped.set(key, entry);
+      }
     }
   }
 
@@ -397,17 +540,21 @@ export function enforceLongTermLimits(entries: LongTermMemoryEntry[]): LongTermM
     phaseFinal.set(entry.id, entry);
   }
 
-  // Phase 6: sort and trim
-  return [...phaseFinal.values()]
-    .sort((a, b) => {
-      const pA = priorityWithFreshness(a);
-      const pB = priorityWithFreshness(b);
-      if (pB !== pA) return pB - pA;
-      const sourceDiff = sourcePriority(b.source) - sourcePriority(a.source);
-      if (sourceDiff !== 0) return sourceDiff;
-      return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
-    })
-    .slice(0, LONG_TERM_LIMITS.maxEntries);
+  return {
+    kept: [...phaseFinal.values()],
+    dropped: [],
+    absorbed,
+    superseded,
+  };
+}
+
+function compareLongTermMemoryForRetention(a: LongTermMemoryEntry, b: LongTermMemoryEntry): number {
+  const pA = priorityWithFreshness(a);
+  const pB = priorityWithFreshness(b);
+  if (pB !== pA) return pB - pA;
+  const sourceDiff = sourcePriority(b.source) - sourcePriority(a.source);
+  if (sourceDiff !== 0) return sourceDiff;
+  return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
 }
 
 function priority(entry: LongTermMemoryEntry): number {

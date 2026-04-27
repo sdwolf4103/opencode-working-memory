@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import type { LongTermMemoryEntry } from "../src/types.ts";
 import { accountPendingPromotions } from "../src/promotion-accounting.ts";
 import { memoryKey } from "../src/pending-journal.ts";
+import type { MemoryConsolidationEvent } from "../src/workspace-memory.ts";
+import { workspaceMemoryExactKey, workspaceMemoryIdentityKey } from "../src/workspace-memory.ts";
 
 function mem(
   id: string,
@@ -23,6 +25,18 @@ function mem(
     rationale: opts.rationale,
     supersedes: opts.supersedes,
     tags: opts.tags,
+  };
+}
+
+function event(
+  memory: LongTermMemoryEntry,
+  reason: MemoryConsolidationEvent["reason"],
+): MemoryConsolidationEvent {
+  return {
+    memoryKey: workspaceMemoryExactKey(memory),
+    identityKey: workspaceMemoryIdentityKey(memory),
+    memory,
+    reason,
   };
 }
 
@@ -67,6 +81,24 @@ test("accountPendingPromotions marks same exact key present before promotion as 
   assert.equal(result.rejectedKeys.size, 0);
 });
 
+test("accountPendingPromotions ignores superseded exact keys when detecting existing absorption", () => {
+  const superseded = mem("superseded", "Revive this memory when it is remembered again.", {
+    source: "explicit",
+    status: "superseded",
+  });
+  const pending = [mem("pending", "Revive this memory when it is remembered again.", {
+    source: "explicit",
+  })];
+  const before = [superseded];
+  const after = [superseded, pending[0]];
+
+  const result = accountPendingPromotions({ pending, before, after });
+
+  assert.deepEqual([...result.promotedKeys], [memoryKey(pending[0])]);
+  assert.equal(result.absorbedKeys.size, 0);
+  assert.deepEqual([...result.clearableKeys], [memoryKey(pending[0])]);
+});
+
 test("accountPendingPromotions marks same-topic decision represented after normalization as absorbed", () => {
   const existing = mem("existing", "Parser supports 2 candidate formats.", {
     type: "decision",
@@ -106,4 +138,92 @@ test("accountPendingPromotions keeps pending memory rejected when no equivalent 
   assert.equal(result.absorbedKeys.size, 0);
   assert.deepEqual([...result.rejectedKeys], [memoryKey(pending[0])]);
   assert.equal(result.clearableKeys.size, 0);
+});
+
+test("accountPendingPromotions clears accounting absorbed identity events", () => {
+  const pending = [mem("pending_identity", "This repo uses opencode-agenthub plugin system", {
+    type: "project",
+    source: "compaction",
+  })];
+
+  const result = accountPendingPromotions({
+    pending,
+    before: [],
+    after: [],
+    events: [event(pending[0], "absorbed_identity")],
+  });
+
+  assert.deepEqual([...result.absorbedKeys], [memoryKey(pending[0])]);
+  assert.deepEqual([...result.clearableKeys], [memoryKey(pending[0])]);
+  assert.equal(result.rejectedKeys.size, 0);
+});
+
+test("accountPendingPromotions separates accounting superseded events", () => {
+  const pending = [mem("pending_topic", "Parser supports 3 candidate formats.", {
+    type: "decision",
+    source: "compaction",
+  })];
+
+  const result = accountPendingPromotions({
+    pending,
+    before: [],
+    after: [],
+    events: [event(pending[0], "superseded_existing")],
+  });
+
+  assert.deepEqual([...result.supersededKeys], [memoryKey(pending[0])]);
+  assert.deepEqual([...result.clearableKeys], [memoryKey(pending[0])]);
+  assert.equal(result.absorbedKeys.size, 0);
+  assert.equal(result.rejectedKeys.size, 0);
+});
+
+test("accountPendingPromotions clears compaction capacity rejection from accounting", () => {
+  const pending = [mem("pending_capacity", "Weak compaction reference that should lose capacity review.", {
+    type: "reference",
+    source: "compaction",
+  })];
+
+  const result = accountPendingPromotions({
+    pending,
+    before: [],
+    after: [],
+    events: [event(pending[0], "rejected_capacity")],
+  });
+
+  assert.deepEqual([...result.rejectedKeys], [memoryKey(pending[0])]);
+  assert.deepEqual([...result.clearableKeys], [memoryKey(pending[0])]);
+});
+
+test("accountPendingPromotions keeps explicit capacity rejection pending", () => {
+  const pending = [mem("pending_explicit_capacity", "Explicit reference should retry if capacity rejected.", {
+    type: "reference",
+    source: "explicit",
+  })];
+
+  const result = accountPendingPromotions({
+    pending,
+    before: [],
+    after: [],
+    events: [event(pending[0], "rejected_capacity")],
+  });
+
+  assert.deepEqual([...result.rejectedKeys], [memoryKey(pending[0])]);
+  assert.equal(result.clearableKeys.size, 0);
+});
+
+test("accountPendingPromotions clears compaction stale rejection from accounting", () => {
+  const pending = [mem("pending_stale", "Stale compaction reference should be terminal.", {
+    type: "reference",
+    source: "compaction",
+  })];
+
+  const result = accountPendingPromotions({
+    pending,
+    before: [],
+    after: [],
+    events: [event(pending[0], "rejected_stale")],
+  });
+
+  assert.deepEqual([...result.rejectedKeys], [memoryKey(pending[0])]);
+  assert.deepEqual([...result.clearableKeys], [memoryKey(pending[0])]);
 });

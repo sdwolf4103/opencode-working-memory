@@ -44,6 +44,10 @@ function normalizeJournal(
   return workspaceKey(root).then(key => ({
     version: 1,
     workspace: { root, key },
+    // TODO(memory-consolidation follow-up): add the deferred pending journal
+    // safety cap (max entries and old compaction pruning). P0 currently relies
+    // on promotion accounting to clear terminal compaction candidates without
+    // changing journal capacity behavior.
     entries: dedupeByText(Array.isArray(store.entries) ? store.entries : []),
     updatedAt: new Date().toISOString(),
   }));
