@@ -291,6 +291,18 @@ function feedbackTopicKey(text: string): string | null {
   return null;
 }
 
+export function workspaceMemoryIdentityKey(entry: Pick<LongTermMemoryEntry, "type" | "text">): string {
+  if (entry.type === "project" || entry.type === "reference") {
+    return `${entry.type}:${extractEntityKey(entry.text) ?? canonicalMemoryText(entry.text)}`;
+  }
+
+  if (entry.type === "feedback") {
+    return `${entry.type}:${feedbackTopicKey(entry.text) ?? canonicalMemoryText(entry.text)}`;
+  }
+
+  return `decision:${decisionTopicKey(entry.text) ?? canonicalMemoryText(entry.text)}`;
+}
+
 /** Check if entry should be pruned by age (for compaction/manual entries only) */
 function isPrunableByAge(entry: LongTermMemoryEntry, now: number): boolean {
   // Never prune feedback or explicit entries
@@ -350,17 +362,15 @@ export function enforceLongTermLimits(entries: LongTermMemoryEntry[]): LongTermM
   // Build entity key dedup for project/reference/feedback
   const entityDeduped = new Map<string, LongTermMemoryEntry>();
   for (const entry of projectRefEntries) {
-    const entityKey = entry.type === "project" || entry.type === "reference"
-      ? extractEntityKey(entry.text)
-      : feedbackTopicKey(entry.text);
-    const key = entityKey ? `${entry.type}:${entityKey}` : `${entry.type}:${canonicalMemoryText(entry.text)}`;
+    const key = workspaceMemoryIdentityKey(entry);
+    const hasTopicIdentity = key !== `${entry.type}:${canonicalMemoryText(entry.text)}`;
 
     const existing = entityDeduped.get(key);
     if (!existing) {
       entityDeduped.set(key, entry);
     } else {
       // Feedback topic conflicts use supersession mode (newer beats longer)
-      const mode = entry.type === "feedback" && entityKey ? "supersession" as const : "entity" as const;
+      const mode = entry.type === "feedback" && hasTopicIdentity ? "supersession" as const : "entity" as const;
       if (chooseBetterMemory(entry, existing, mode) === entry) {
         entityDeduped.set(key, entry);
       }
@@ -371,8 +381,7 @@ export function enforceLongTermLimits(entries: LongTermMemoryEntry[]): LongTermM
   const decisionEntries = phase1.filter(e => e.type === "decision");
   const decisionDeduped = new Map<string, LongTermMemoryEntry>();
   for (const entry of decisionEntries) {
-    const topic = decisionTopicKey(entry.text);
-    const key = topic ? `decision:${topic}` : `decision:${canonicalMemoryText(entry.text)}`;
+    const key = workspaceMemoryIdentityKey(entry);
 
     const existing = decisionDeduped.get(key);
     if (!existing) {

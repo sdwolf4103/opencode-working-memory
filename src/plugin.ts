@@ -59,6 +59,7 @@ import {
   latestCompactionSummary,
   pendingTodos,
 } from "./opencode.ts";
+import { accountPendingPromotions } from "./promotion-accounting.ts";
 
 /**
  * Build the complete compaction prompt.
@@ -231,7 +232,10 @@ export const MemoryV2Plugin: Plugin = async (input) => {
     ];
     if (pending.length === 0) return;
 
+    let beforeEntries: Awaited<ReturnType<typeof loadWorkspaceMemory>>["entries"] = [];
+
     const updatedWorkspaceMemory = await updateWorkspaceMemory(directory, workspaceMemory => {
+      beforeEntries = [...workspaceMemory.entries];
       const existingKeys = new Set(workspaceMemory.entries.map(memory => memoryKey(memory)));
 
       for (const memory of pending) {
@@ -245,19 +249,23 @@ export const MemoryV2Plugin: Plugin = async (input) => {
       return workspaceMemory;
     });
 
-    // Only clear pending memories that survived workspace normalization/limits.
-    // updateWorkspaceMemory() may dedupe, supersede, redact, or cap entries.
-    const retainedKeys = new Set(updatedWorkspaceMemory.entries.map(memory => memoryKey(memory)));
+    const accounting = accountPendingPromotions({
+      pending,
+      before: beforeEntries,
+      after: updatedWorkspaceMemory.entries,
+    });
 
     if (sessionID) {
       await updateSessionState(directory, sessionID, state => {
-        state.pendingMemories = state.pendingMemories.filter(memory => !retainedKeys.has(memoryKey(memory)));
+        state.pendingMemories = state.pendingMemories.filter(memory => !accounting.clearableKeys.has(memoryKey(memory)));
         return state;
       });
       clearFrozenWorkspaceMemoryCache(sessionID);
     }
 
-    await clearPendingMemories(directory, retainedKeys);
+    if (accounting.clearableKeys.size > 0) {
+      await clearPendingMemories(directory, accounting.clearableKeys);
+    }
   }
 
   function bashExitCode(hookOutput: unknown): number | undefined {
