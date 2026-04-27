@@ -73,14 +73,15 @@ Long-term memory that persists across sessions within the same workspace. Perfec
 
 ### Memory Extraction
 
-During compaction, the plugin scans for `<workspace_memory_candidates>` blocks:
+During compaction, the plugin scans for `Memory candidates:` sections:
 
 ```
-<workspace_memory_candidates>
+Memory candidates:
 - [decision] Use npm cache for plugin loading
 - [project] This repo uses TypeScript with strict mode
-</workspace_memory_candidates>
 ```
+
+**Legacy Format**: The plugin also accepts `<workspace_memory_candidates>` XML blocks for backward compatibility, but this format is deprecated.
 
 **Quality Gate**: Not all candidates become memories. The plugin rejects:
 - Git commit hashes (e.g., `abc1234`)
@@ -180,15 +181,20 @@ Hot session state is injected after workspace memory:
 
 ```
 ---
-<workspace_memory_candidates>
-- [project] This repo uses TypeScript with strict mode
-</workspace_memory_candidates>
 
-Active Files:
+Hot session state (current session):
+
+active_files:
 - src/plugin.ts (edit, 18x)
 - tests/plugin.test.ts (edit, 5x)
 
-Open Errors: (none)
+open_errors: (none)
+
+recent_decisions:
+- Use frozen workspace memory snapshots for cache stability
+
+pending_memories:
+- [decision] Parser supports 3 candidate formats
 ```
 
 ## Layer 3: Native OpenCode State
