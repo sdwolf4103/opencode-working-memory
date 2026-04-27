@@ -630,7 +630,22 @@ test("compaction intentionally refreshes frozen system[1] with promoted memories
   const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-test-"));
 
   try {
-    // 1. First transform creates frozen system[1]
+    // 1. Seed workspace memory, then first transform creates non-empty frozen system[1].
+    const now = new Date().toISOString();
+    await updateWorkspaceMemory(tmpDir, store => {
+      store.entries.push({
+        id: "mem_old_stable",
+        type: "project",
+        text: "Old stable memory.",
+        source: "compaction",
+        confidence: 0.9,
+        status: "active",
+        createdAt: now,
+        updatedAt: now,
+      });
+      return store;
+    });
+
     const client = mockRootClient();
     const plugin = await MemoryV2Plugin({ directory: tmpDir, client });
 
@@ -640,7 +655,9 @@ test("compaction intentionally refreshes frozen system[1] with promoted memories
       output1,
     );
 
-    const firstSystem1 = output1.system[1]; // workspace memory snapshot
+    const firstSystem1 = output1.system.find((part: string) => part.startsWith("Workspace memory"));
+    assert.match(firstSystem1 ?? "", /Old stable memory/,
+      "first transform should create a non-empty frozen system[1]");
 
     // 2. Add pending memory to session state
     await saveSessionState(tmpDir, {
@@ -678,13 +695,15 @@ test("compaction intentionally refreshes frozen system[1] with promoted memories
       output2,
     );
 
-    const secondSystem1 = output2.system[1];
+    const secondSystem1 = output2.system.find((part: string) => part.startsWith("Workspace memory"));
 
     // 5. Assert: system[1] changed (compaction started new cache epoch)
     assert.notEqual(secondSystem1, firstSystem1,
       "frozen system[1] should change after compaction (new cache epoch)");
 
-    // 6. Assert: promoted memory is now in system[1]
+    // 6. Assert: old stable memory is preserved and promoted memory is now in system[1]
+    assert.match(secondSystem1 ?? "", /Old stable memory/,
+      "refreshed system[1] should preserve existing workspace memory");
     assert.match(secondSystem1 ?? "", /Compaction refreshes frozen snapshot/,
       "promoted memory should appear in refreshed system[1]");
 

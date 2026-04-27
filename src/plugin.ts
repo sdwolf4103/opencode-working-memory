@@ -231,8 +231,7 @@ export const MemoryV2Plugin: Plugin = async (input) => {
     ];
     if (pending.length === 0) return;
 
-    const promotedKeys = new Set<string>();
-    await updateWorkspaceMemory(directory, workspaceMemory => {
+    const updatedWorkspaceMemory = await updateWorkspaceMemory(directory, workspaceMemory => {
       const existingKeys = new Set(workspaceMemory.entries.map(memory => memoryKey(memory)));
 
       for (const memory of pending) {
@@ -241,21 +240,24 @@ export const MemoryV2Plugin: Plugin = async (input) => {
           workspaceMemory.entries.push(memory);
           existingKeys.add(key);
         }
-        promotedKeys.add(key);
       }
 
       return workspaceMemory;
     });
 
+    // Only clear pending memories that survived workspace normalization/limits.
+    // updateWorkspaceMemory() may dedupe, supersede, redact, or cap entries.
+    const retainedKeys = new Set(updatedWorkspaceMemory.entries.map(memory => memoryKey(memory)));
+
     if (sessionID) {
       await updateSessionState(directory, sessionID, state => {
-        state.pendingMemories = state.pendingMemories.filter(memory => !promotedKeys.has(memoryKey(memory)));
+        state.pendingMemories = state.pendingMemories.filter(memory => !retainedKeys.has(memoryKey(memory)));
         return state;
       });
       clearFrozenWorkspaceMemoryCache(sessionID);
     }
 
-    await clearPendingMemories(directory, promotedKeys);
+    await clearPendingMemories(directory, retainedKeys);
   }
 
   function bashExitCode(hookOutput: unknown): number | undefined {
@@ -312,6 +314,11 @@ export const MemoryV2Plugin: Plugin = async (input) => {
    */
   function clearFrozenWorkspaceMemoryCache(sessionID: string): void {
     frozenWorkspaceMemoryCache.delete(sessionID);
+  }
+
+  function sessionIDFromEventProperties(properties: unknown): string | undefined {
+    const props = properties as { sessionID?: string; info?: { id?: string } } | undefined;
+    return props?.sessionID ?? props?.info?.id;
   }
 
   return {
@@ -469,8 +476,7 @@ export const MemoryV2Plugin: Plugin = async (input) => {
     // Handle session events
     event: async ({ event }) => {
       if (event.type === "session.compacted") {
-        const sessionID = (event.properties as { sessionID?: string; info?: { id?: string } })?.sessionID
-          ?? (event.properties as { info?: { id?: string } })?.info?.id;
+        const sessionID = sessionIDFromEventProperties(event.properties);
         if (!sessionID) return;
 
         // Sub-agents don't need post-compaction processing
@@ -492,7 +498,7 @@ export const MemoryV2Plugin: Plugin = async (input) => {
       }
 
       if (event.type === "session.deleted") {
-        const sessionID = (event.properties as { info?: { id?: string } })?.info?.id;
+        const sessionID = sessionIDFromEventProperties(event.properties);
         if (sessionID) {
           // Promote pending memories before deleting per-session state.
           // If promotion fails, leave session state and journal intact.
