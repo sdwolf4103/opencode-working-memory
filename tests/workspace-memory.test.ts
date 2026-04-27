@@ -13,6 +13,7 @@ import {
   enforceLongTermLimitsWithAccounting,
   normalizeWorkspaceMemoryWithAccounting,
   workspaceMemoryExactKey,
+  workspaceMemoryIdentityKey,
   redactCredentials,
   isProjectSnapshotViolation,
   runMigrationP0Cleanup,
@@ -279,17 +280,17 @@ test("dedupeLongTermEntriesWithAccounting reports exact duplicates as absorbed",
   assert.equal(result.absorbed[0].memory.id, "lower");
 });
 
-test("dedupeLongTermEntriesWithAccounting reports identity duplicates as absorbed", () => {
+test("dedupeLongTermEntriesWithAccounting reports concrete path identity duplicates as absorbed", () => {
   const older = agedEntry(
     "older",
-    "This repo uses opencode-agenthub plugin system at /Users/sd_wo/work/opencode-working-memory/",
-    "project",
+    "OpenCode plugin config location: `.opencode-agenthub/current/xdg/opencode/opencode.json` in workspace",
+    "reference",
     { daysAgo: 5 },
   );
   const newer = agedEntry(
     "newer",
-    "此 repo 在開發時使用 opencode-agenthub 插件系統，目錄位於 /Users/sd_wo/work/opencode-working-memory/.opencode-agenthub/",
-    "project",
+    "OpenCode plugin config: .opencode-agenthub/current/xdg/opencode/opencode.json in workspace",
+    "reference",
     { daysAgo: 0 },
   );
 
@@ -299,9 +300,25 @@ test("dedupeLongTermEntriesWithAccounting reports identity duplicates as absorbe
   assert.equal(result.absorbed.length, 1);
   assert.equal(result.absorbed[0].reason, "absorbed_identity");
   assert.equal(result.absorbed[0].retainedId, result.kept[0].id);
+  assert.equal(
+    workspaceMemoryIdentityKey(older),
+    "reference:path:.opencode-agenthub/current/xdg/opencode/opencode.json",
+  );
 });
 
-test("dedupeLongTermEntriesWithAccounting reports topic duplicates as superseded", () => {
+test("dedupeLongTermEntriesWithAccounting reports path identity duplicates as absorbed", () => {
+  const older = entry("older", "Config location: .opencode/opencode.json", "reference");
+  const newer = entry("newer", "OpenCode config path `.opencode/opencode.json`", "reference");
+
+  const result = dedupeLongTermEntriesWithAccounting([older, newer]);
+
+  assert.equal(result.kept.length, 1);
+  assert.equal(result.absorbed.length, 1);
+  assert.equal(result.absorbed[0].reason, "absorbed_identity");
+  assert.equal(result.superseded.length, 0);
+});
+
+test("dedupeLongTermEntriesWithAccounting does not supersede parser decision variants by topic", () => {
   const older = agedEntry(
     "older",
     "Parser supports 3 formats: HTML comment, Markdown section, legacy XML",
@@ -317,12 +334,19 @@ test("dedupeLongTermEntriesWithAccounting reports topic duplicates as superseded
 
   const result = dedupeLongTermEntriesWithAccounting([older, newer]);
 
-  assert.equal(result.kept.length, 1);
-  assert.equal(result.kept[0].id, "newer");
-  assert.equal(result.superseded.length, 1);
-  assert.equal(result.superseded[0].reason, "superseded_existing");
-  assert.equal(result.superseded[0].supersededId, "older");
-  assert.equal(result.superseded[0].retainedId, "newer");
+  assert.equal(result.kept.length, 2);
+  assert.equal(result.superseded.length, 0);
+});
+
+test("dedupeLongTermEntriesWithAccounting does not report heuristic topic supersession", () => {
+  const older = entry("older", "Parser supports 3 formats: HTML comment, Markdown section, legacy XML", "decision");
+  const newer = entry("newer", "Parser supports 4 formats: plain text label, Markdown section, legacy section name, legacy XML", "decision");
+
+  const result = dedupeLongTermEntriesWithAccounting([older, newer]);
+
+  assert.equal(result.kept.length, 2);
+  assert.equal(result.absorbed.length, 0);
+  assert.equal(result.superseded.length, 0);
 });
 
 test("enforceLongTermLimitsWithAccounting reports capacity drops", () => {
@@ -487,32 +511,65 @@ test("updateWorkspaceMemoryWithAccounting emits accounting events for persisted 
 // P0d: identity-key dedup, supersession, staleness
 // ============================================
 
-test("enforceLongTermLimits project: bilingual variants collapse to one", () => {
-  // All three mention opencode-agenthub plugin system - should merge
+test("enforceLongTermLimits project: phrase-only opencode-agenthub variants do not collapse", () => {
   const entries = [
-    agedEntry("p1", "此 repo 在開發時使用 opencode-agenthub 插件系統，目錄位於 /Users/sd_wo/work/opencode-working-memory/.opencode-agenthub/", "project", { daysAgo: 2 }),
-    agedEntry("p2", "此 repo 在開發時使用 opencode-agenthub 插件系統", "project", { daysAgo: 1 }),
-    agedEntry("p3", "This repo uses opencode-agenthub plugin system at /Users/sd_wo/work/opencode-working-memory/", "project", { daysAgo: 0 }),
+    agedEntry("p1", "此 repo 在開發時使用 opencode-agenthub 插件系統", "project", { daysAgo: 2 }),
+    agedEntry("p2", "This repo uses the opencode-agenthub plugin system", "project", { daysAgo: 0 }),
   ];
 
   const kept = enforceLongTermLimits(entries);
   const projectEntries = kept.filter(e => e.type === "project");
-  assert.equal(projectEntries.length, 1, "All three project variants should merge to one");
+  assert.equal(projectEntries.length, 2, "Phrase-only repo/product names should not form a dedupe identity");
 });
 
-test("enforceLongTermLimits reference: same config path variants collapse to one", () => {
+test("enforceLongTermLimits reference: same concrete config path variants collapse to one", () => {
   const entries = [
-    agedEntry("r1", "OpenCode plugin config location: .opencode-agenthub/current/xdg/opencode/opencode.json in workspace", "reference", { daysAgo: 1 }),
+    agedEntry("r1", "OpenCode plugin config location: `.opencode-agenthub/current/xdg/opencode/opencode.json` in workspace", "reference", { daysAgo: 1 }),
     agedEntry("r2", "OpenCode plugin config: .opencode-agenthub/current/xdg/opencode/opencode.json in workspace", "reference", { daysAgo: 0 }),
   ];
 
   const kept = enforceLongTermLimits(entries);
   const refEntries = kept.filter(e => e.type === "reference");
-  assert.equal(refEntries.length, 1, "Both reference variants should merge to one");
+  assert.equal(refEntries.length, 1, "Shared concrete paths should merge despite wording differences");
+  assert.equal(
+    workspaceMemoryIdentityKey(entries[0]),
+    "reference:path:.opencode-agenthub/current/xdg/opencode/opencode.json",
+  );
 });
 
-test("enforceLongTermLimits decision: newer supersedes older on same topic", () => {
-  // "4 formats" supersedes "3 formats" on the same parser topic
+test("workspaceMemoryIdentityKey reference: normalizes wrapped path punctuation", () => {
+  const a = agedEntry("a", "Config path is `.opencode/opencode.json`.", "reference", { daysAgo: 1 });
+  const b = agedEntry("b", "Config path: .opencode/opencode.json", "reference", { daysAgo: 0 });
+
+  assert.equal(workspaceMemoryIdentityKey(a), "reference:path:.opencode/opencode.json");
+  assert.equal(workspaceMemoryIdentityKey(b), "reference:path:.opencode/opencode.json");
+  assert.equal(enforceLongTermLimits([a, b]).length, 1);
+});
+
+test("enforceLongTermLimits reference: same URL variants collapse to one", () => {
+  const entries = [
+    agedEntry("u1", "Docs live at https://Example.com/docs/memory/#section", "reference", { daysAgo: 2 }),
+    agedEntry("u2", "Memory documentation: https://example.com/docs/memory/", "reference", { daysAgo: 0 }),
+  ];
+
+  const kept = enforceLongTermLimits(entries);
+  const refEntries = kept.filter(e => e.type === "reference");
+  assert.equal(refEntries.length, 1, "Shared normalized URLs should merge despite wording differences");
+  assert.equal(workspaceMemoryIdentityKey(entries[0]), "reference:url:https://example.com/docs/memory");
+});
+
+test("workspaceMemoryIdentityKey reference: strips URL hash but preserves query", () => {
+  const withHash = agedEntry("a", "Docs: https://example.com/memory?version=1#install", "reference", { daysAgo: 1 });
+  const sameWithoutHash = agedEntry("b", "Docs: https://EXAMPLE.com/memory?version=1", "reference", { daysAgo: 0 });
+  const differentQuery = agedEntry("c", "Docs: https://example.com/memory?version=2", "reference", { daysAgo: 0 });
+
+  assert.equal(workspaceMemoryIdentityKey(withHash), "reference:url:https://example.com/memory?version=1");
+  assert.equal(workspaceMemoryIdentityKey(sameWithoutHash), "reference:url:https://example.com/memory?version=1");
+  assert.equal(workspaceMemoryIdentityKey(differentQuery), "reference:url:https://example.com/memory?version=2");
+  assert.equal(enforceLongTermLimits([withHash, sameWithoutHash, differentQuery]).length, 2);
+});
+
+test("enforceLongTermLimits decision: parser format variants do not supersede by topic", () => {
   const entries = [
     agedEntry("d1", "Parser supports 3 formats: HTML comment, Markdown section, legacy XML", "decision", { daysAgo: 2 }),
     agedEntry("d2", "Parser supports 4 formats: plain text label, Markdown section, legacy section name, legacy XML", "decision", { daysAgo: 0 }),
@@ -520,11 +577,21 @@ test("enforceLongTermLimits decision: newer supersedes older on same topic", () 
 
   const kept = enforceLongTermLimits(entries);
   const decisionEntries = kept.filter(e => e.text.includes("formats"));
-  assert.equal(decisionEntries.length, 1, "Newer 4-formats should supersede older 3-formats");
-  assert.ok(decisionEntries[0].text.includes("4 formats"), "Kept entry should be the 4-formats one");
+  assert.equal(decisionEntries.length, 2, "Distinct decision wording should not be superseded without explicit replacement metadata");
 });
 
-test("enforceLongTermLimits feedback: newer supersedes older on same issue", () => {
+test("enforceLongTermLimits decision: plugin-loading config variants do not supersede by topic", () => {
+  const entries = [
+    agedEntry("d1", "Plugin loading uses OpenCode config plugin array for extension registration", "decision", { daysAgo: 2 }),
+    agedEntry("d2", "OpenCode plugin config remains singular plugin, not plugins, for compatibility", "decision", { daysAgo: 0 }),
+  ];
+
+  const kept = enforceLongTermLimits(entries);
+  const decisionEntries = kept.filter(e => e.type === "decision" && /plugin/i.test(e.text));
+  assert.equal(decisionEntries.length, 2, "Plugin-loading/config decision variants should not supersede without explicit replacement metadata");
+});
+
+test("enforceLongTermLimits feedback: purple italic variants do not supersede by topic", () => {
   const entries = [
     agedEntry("f1", "Purple/italic text issue resolved by using plain text labels instead of any special markup syntax", "feedback", { daysAgo: 2 }),
     agedEntry("f2", "Purple/italic text issue resolved by replacing default compaction template with ---free version using only Markdown headings", "feedback", { daysAgo: 0 }),
@@ -532,8 +599,29 @@ test("enforceLongTermLimits feedback: newer supersedes older on same issue", () 
 
   const kept = enforceLongTermLimits(entries);
   const feedbackEntries = kept.filter(e => e.type === "feedback");
-  assert.equal(feedbackEntries.length, 1, "Newer purple/italic fix should supersede older");
-  assert.ok(feedbackEntries[0].text.includes("replacing default compaction template"), "Kept entry should be the newer fix");
+  assert.equal(feedbackEntries.length, 2, "Distinct feedback wording should not be superseded without explicit replacement metadata");
+});
+
+test("enforceLongTermLimits decision: exact canonical duplicates still collapse", () => {
+  const entries = [
+    agedEntry("d1", "Parser supports 4 formats!!!", "decision", { daysAgo: 1 }),
+    agedEntry("d2", "parser supports 4 formats", "decision", { daysAgo: 0 }),
+  ];
+
+  const kept = enforceLongTermLimits(entries);
+  const decisions = kept.filter(e => e.type === "decision");
+  assert.equal(decisions.length, 1, "Exact canonical decision duplicates should still collapse");
+});
+
+test("enforceLongTermLimits feedback: exact canonical duplicates still collapse", () => {
+  const entries = [
+    agedEntry("f1", "Users prefer dark theme!!!", "feedback", { daysAgo: 1 }),
+    agedEntry("f2", "users prefer dark theme", "feedback", { daysAgo: 0 }),
+  ];
+
+  const kept = enforceLongTermLimits(entries);
+  const feedbackEntries = kept.filter(e => e.type === "feedback");
+  assert.equal(feedbackEntries.length, 1, "Exact canonical feedback duplicates should still collapse");
 });
 
 test("enforceLongTermLimits stale: compaction entry older than staleAfterDays+grace is pruned", () => {
@@ -624,15 +712,23 @@ test("enforceLongTermLimits config: unrelated plugin configs are NOT collapsed",
   assert.equal(refEntries.length, 2, "Unrelated plugin configs should remain separate");
 });
 
-test("enforceLongTermLimits supersession: newer shorter decision beats older longer one", () => {
-  // Same topic, same source, same confidence — newer wins even if shorter
+test("enforceLongTermLimits reference: plugin array wording does not collapse without shared path", () => {
+  const entries = [
+    agedEntry("a", "OpenCode config uses a plugin array", "reference", { daysAgo: 1 }),
+    agedEntry("b", "OpenCode config plugin array should include the working memory plugin", "reference", { daysAgo: 0 }),
+  ];
+
+  const kept = enforceLongTermLimits(entries);
+  assert.equal(kept.filter(e => e.type === "reference").length, 2, "The plugin array key is product wording, not a dedupe identity");
+});
+
+test("enforceLongTermLimits decision: newer shorter parser decision does not replace older longer decision", () => {
   const older = agedEntry("d1", "Parser supports 3 formats: HTML comment, Markdown section, legacy XML with backward compatibility", "decision", { daysAgo: 5 });
   const newer = agedEntry("d2", "Parser supports 4 formats", "decision", { daysAgo: 0 });
 
   const kept = enforceLongTermLimits([older, newer]);
   const decisions = kept.filter(e => e.type === "decision" && /parser.*format/i.test(e.text));
-  assert.equal(decisions.length, 1, "Newer shorter decision should supersede older longer one");
-  assert.ok(decisions[0].text.includes("4 formats"), "Kept entry should be the newer 4-formats");
+  assert.equal(decisions.length, 2, "Newer decision should not replace older decision by heuristic topic");
 });
 
 test("enforceLongTermLimits feedback: English port issue does NOT collapse with server error", () => {
@@ -657,15 +753,13 @@ test("enforceLongTermLimits config: unrelated generic plugin configs do NOT coll
   assert.equal(refEntries.length, 2, "Unrelated plugin configs without entity key should remain separate");
 });
 
-test("enforceLongTermLimits feedback: supersession prefers newer shorter over older longer", () => {
-  // Same purple/italic issue, newer shorter fix supersedes older verbose fix
+test("enforceLongTermLimits feedback: newer shorter purple italic feedback does not replace older longer feedback", () => {
   const older = agedEntry("f1", "Purple/italic text issue resolved by using plain text labels instead of any special markup syntax in the prompt", "feedback", { daysAgo: 5 });
   const newer = agedEntry("f2", "Purple/italic text fixed via template replacement", "feedback", { daysAgo: 0 });
 
   const kept = enforceLongTermLimits([older, newer]);
   const feedbackEntries = kept.filter(e => e.type === "feedback");
-  assert.equal(feedbackEntries.length, 1, "Newer shorter feedback should supersede older longer");
-  assert.ok(feedbackEntries[0].text.includes("template replacement"), "Kept entry should be the newer fix");
+  assert.equal(feedbackEntries.length, 2, "Newer feedback should not replace older feedback by heuristic topic");
 });
 
 // ============================================

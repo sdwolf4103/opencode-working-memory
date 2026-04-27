@@ -313,72 +313,80 @@ export function workspaceMemoryExactKey(entry: Pick<LongTermMemoryEntry, "type" 
   return `${entry.type}:${canonicalMemoryText(entry.text)}`;
 }
 
-/** Extract entity/destination keys for project and reference dedup */
-function extractEntityKey(text: string): string | null {
-  const normalized = canonicalMemoryText(text);
-  // Check known key phrases (bilingual-friendly)
-  // opencode + agenthub plugin system
-  if (/opencode.*agenthub/i.test(normalized)) {
-    return "opencode-agenthub plugin system";
+function normalizeUrlIdentity(raw: string): string | null {
+  const cleaned = raw.replace(/[),.;:!?]+$/g, "");
+  try {
+    const url = new URL(cleaned);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+    url.protocol = url.protocol.toLowerCase();
+    url.hostname = url.hostname.toLowerCase();
+    url.hash = "";
+    if (url.pathname.length > 1) {
+      url.pathname = url.pathname.replace(/\/+$/g, "");
+    }
+    return `url:${url.toString()}`;
+  } catch {
+    return null;
   }
-  // For generic config references, fall back to canonical text dedup — no entity key
-  return null;
 }
 
-/** Extract decision topic key for supersession detection */
-function decisionTopicKey(text: string): string | null {
-  const normalized = text.toLowerCase();
-  // Parser format versions
-  if (/parser.*formats?|supports?\s*\d+\s*format/i.test(normalized)) {
-    return "parser-supported-formats";
-  }
-  // Compaction template replacement
-  if (/compaction.*template|output\.prompt|template.*replace/i.test(normalized)) {
-    return "compaction-template-replacement";
-  }
-  // Plugin loading
-  if (/plugin.*load|npm.*cache|plugin.*config/i.test(normalized)) {
-    return "plugin-loading-config";
-  }
-  // Output format changes (purple/italic, YAML frontmatter, etc)
-  if (/purple.*italic|markup|markdown.*render|frontmatter/i.test(normalized)) {
-    return "output-format-rendering";
-  }
-  return null;
+function normalizePathIdentity(raw: string): string | null {
+  const unwrapped = raw
+    .trim()
+    .replace(/^[`"']+|[`"']+$/g, "")
+    .replace(/[),.;:!?]+$/g, "")
+    .replace(/\\+/g, "/");
+
+  if (!unwrapped) return null;
+  const collapsed = unwrapped.startsWith("/")
+    ? `/${unwrapped.slice(1).replace(/\/+$/g, "/").replace(/\/+/g, "/")}`
+    : unwrapped.replace(/\/+/g, "/");
+  const withoutTrailingSlash = collapsed.length > 1 ? collapsed.replace(/\/+$/g, "") : collapsed;
+  return `path:${withoutTrailingSlash}`;
 }
 
-/** Extract feedback topic key for supersession detection */
-function feedbackTopicKey(text: string): string | null {
-  const normalized = text.toLowerCase();
-  // Purple/italic rendering issue
-  if (/purple.*italic/i.test(normalized)) {
-    return "purple-italic-rendering";
+function isConcretePathIdentity(pathIdentity: string): boolean {
+  const path = pathIdentity.slice("path:".length);
+  if (!path || path === "." || path === "..") return false;
+
+  if (path.startsWith("/")) return true;
+  if (/^\.\.?\//.test(path)) return true;
+  if (/^\.[A-Za-z0-9_.-]+\//.test(path)) return true;
+  if (/^[A-Za-z0-9_.-]+\//.test(path)) return true;
+  return /\.(?:json|jsonc|ts|tsx|js|jsx|mjs|cjs|md|yaml|yml|toml|lock|config)$/i.test(path);
+}
+
+function normalizeConcretePathIdentity(raw: string): string | null {
+  const pathIdentity = normalizePathIdentity(raw);
+  if (!pathIdentity) return null;
+  return isConcretePathIdentity(pathIdentity) ? pathIdentity : null;
+}
+
+function extractConcreteIdentityKey(text: string): string | null {
+  const urlMatch = text.match(/https?:\/\/[^\s`"'<>]+/i);
+  if (urlMatch) {
+    const urlIdentity = normalizeUrlIdentity(urlMatch[0]);
+    if (urlIdentity) return urlIdentity;
   }
-  // Browser login/server errors (500 internal_error)
-  if (/login.*500|500.*internal|internal_error|server.*error/i.test(normalized)) {
-    return "server-error";
+
+  const wrappedPathPattern = /[`"']([^`"']+)[`"']/g;
+  for (const match of text.matchAll(wrappedPathPattern)) {
+    const pathIdentity = normalizeConcretePathIdentity(match[1]);
+    if (pathIdentity) return pathIdentity;
   }
-  // Port occupied / environment issues
-  if (/port.*occup|9473|端口|舊進程|旧进程/i.test(normalized)) {
-    return "port-occupied-environment";
-  }
-  // Theme preferences
-  if (/theme|dark.*light|prefer.*theme/i.test(normalized)) {
-    return "theme-preference";
-  }
-  return null;
+
+  const pathMatch = text.match(/(?:\/[^ \s`"'<>]+|(?:\.{1,2}[\\/]|[A-Za-z0-9_.-]+[\\/])[^\s`"'<>]+|[A-Za-z0-9_.-]+\.(?:json|jsonc|ts|tsx|js|jsx|mjs|cjs|md|yaml|yml|toml|lock|config))(?:\b|$)/);
+  if (!pathMatch) return null;
+
+  return normalizeConcretePathIdentity(pathMatch[0]);
 }
 
 export function workspaceMemoryIdentityKey(entry: Pick<LongTermMemoryEntry, "type" | "text">): string {
   if (entry.type === "project" || entry.type === "reference") {
-    return `${entry.type}:${extractEntityKey(entry.text) ?? canonicalMemoryText(entry.text)}`;
+    return `${entry.type}:${extractConcreteIdentityKey(entry.text) ?? canonicalMemoryText(entry.text)}`;
   }
 
-  if (entry.type === "feedback") {
-    return `${entry.type}:${feedbackTopicKey(entry.text) ?? canonicalMemoryText(entry.text)}`;
-  }
-
-  return `decision:${decisionTopicKey(entry.text) ?? canonicalMemoryText(entry.text)}`;
+  return workspaceMemoryExactKey(entry);
 }
 
 function consolidationEvent(
@@ -479,34 +487,25 @@ export function dedupeLongTermEntriesWithAccounting(entries: LongTermMemoryEntry
   const absorbed: MemoryConsolidationEvent[] = [];
   const superseded: MemoryConsolidationEvent[] = [];
 
-  // For project/reference/feedback: detect entity keys FIRST, then dedupe by entity OR canonical
+  // For project/reference/feedback: dedupe by concrete identity or exact canonical text.
   const projectRefEntries = entries.filter(e => e.type === "project" || e.type === "reference" || e.type === "feedback");
 
-  // Build entity key dedup for project/reference/feedback
+  // Build identity key dedup for project/reference/feedback.
   const entityDeduped = new Map<string, LongTermMemoryEntry>();
   for (const entry of projectRefEntries) {
     const key = workspaceMemoryIdentityKey(entry);
-    const hasTopicIdentity = key !== workspaceMemoryExactKey(entry);
 
     const existing = entityDeduped.get(key);
     if (!existing) {
       entityDeduped.set(key, entry);
     } else {
-      // Feedback topic conflicts use supersession mode (newer beats longer)
-      const mode = entry.type === "feedback" && hasTopicIdentity ? "supersession" as const : "entity" as const;
-      const retained = chooseBetterMemory(entry, existing, mode);
+      const retained = chooseBetterMemory(entry, existing, "entity");
       const dropped = retained === entry ? existing : entry;
       const reason = workspaceMemoryExactKey(entry) === workspaceMemoryExactKey(existing)
         ? "absorbed_exact" as const
-        : mode === "supersession"
-          ? "superseded_existing" as const
-          : "absorbed_identity" as const;
+        : "absorbed_identity" as const;
 
-      if (reason === "superseded_existing") {
-        superseded.push(consolidationEvent(dropped, reason, retained));
-      } else {
-        absorbed.push(consolidationEvent(dropped, reason, retained));
-      }
+      absorbed.push(consolidationEvent(dropped, reason, retained));
 
       if (retained === entry) {
         entityDeduped.set(key, entry);
@@ -514,7 +513,7 @@ export function dedupeLongTermEntriesWithAccounting(entries: LongTermMemoryEntry
     }
   }
 
-  // For decisions: detect topic keys for supersession, or use canonical
+  // For decisions: exact canonical duplicates only.
   const decisionEntries = entries.filter(e => e.type === "decision");
   const decisionDeduped = new Map<string, LongTermMemoryEntry>();
   for (const entry of decisionEntries) {
