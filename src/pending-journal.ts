@@ -2,6 +2,20 @@ import type { LongTermMemoryEntry, PendingMemoryJournalStore } from "./types.ts"
 import { workspaceKey, workspacePendingJournalPath } from "./paths.ts";
 import { atomicWriteJSON, readJSON, updateJSON } from "./storage.ts";
 
+/**
+ * Retention limits for the pending memory journal.
+ *
+ * The journal is a scratchpad for memories that haven't been promoted to
+ * workspace memory yet. It should not grow unboundedly:
+ * - maxEntries: Hard cap on number of pending entries
+ * - maxAgeDays: Prune entries older than this (compaction candidates that
+ *   were never promoted)
+ */
+export const PENDING_JOURNAL_LIMITS = {
+  maxEntries: 50,
+  maxAgeDays: 30,
+} as const;
+
 function normalizeMemoryText(text: string): string {
   return text
     .normalize("NFKC")
@@ -37,6 +51,51 @@ function dedupeByText(entries: LongTermMemoryEntry[]): LongTermMemoryEntry[] {
   return result;
 }
 
+function isStaleEntry(entry: LongTermMemoryEntry, maxAgeDays: number): boolean {
+  const createdAt = entry.createdAt ? new Date(entry.createdAt).getTime() : NaN;
+  const updatedAt = entry.updatedAt ? new Date(entry.updatedAt).getTime() : NaN;
+  
+  // If both timestamps are invalid, treat as stale
+  if (Number.isNaN(createdAt) && Number.isNaN(updatedAt)) {
+    return true;
+  }
+  
+  // Use createdAt as primary age timestamp
+  const ageMs = Date.now() - (Number.isNaN(createdAt) ? updatedAt : createdAt);
+  const maxAgeMs = maxAgeDays * 24 * 60 * 60 * 1000;
+  
+  return ageMs > maxAgeMs;
+}
+
+function applyRetention(
+  entries: LongTermMemoryEntry[],
+  maxEntries: number,
+  maxAgeDays: number,
+): LongTermMemoryEntry[] {
+  // 1. Dedupe first
+  const deduped = dedupeByText(entries);
+  
+  // 2. Remove stale entries
+  const freshEntries = deduped.filter(entry => !isStaleEntry(entry, maxAgeDays));
+  
+  // 3. Sort by createdAt descending (newest first) for cap
+  const sorted = [...freshEntries].sort((a, b) => {
+    const aTime = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+    const bTime = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+    return bTime - aTime;
+  });
+  
+  // 4. Keep maxEntries newest
+  const capped = sorted.slice(0, maxEntries);
+  
+  // 5. Restore stable order (oldest-to-newest) for consistency with existing code
+  return capped.sort((a, b) => {
+    const aTime = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+    const bTime = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+    return aTime - bTime;
+  });
+}
+
 function normalizeJournal(
   root: string,
   store: PendingMemoryJournalStore,
@@ -44,11 +103,11 @@ function normalizeJournal(
   return workspaceKey(root).then(key => ({
     version: 1,
     workspace: { root, key },
-    // TODO(memory-consolidation follow-up): add the deferred pending journal
-    // safety cap (max entries and old compaction pruning). P0 currently relies
-    // on promotion accounting to clear terminal compaction candidates without
-    // changing journal capacity behavior.
-    entries: dedupeByText(Array.isArray(store.entries) ? store.entries : []),
+    entries: applyRetention(
+      Array.isArray(store.entries) ? store.entries : [],
+      PENDING_JOURNAL_LIMITS.maxEntries,
+      PENDING_JOURNAL_LIMITS.maxAgeDays,
+    ),
     updatedAt: new Date().toISOString(),
   }));
 }
