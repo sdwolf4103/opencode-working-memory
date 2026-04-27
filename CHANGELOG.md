@@ -13,10 +13,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Accounting-aware deduplication (`dedupeLongTermEntriesWithAccounting`).
 - Accounting-aware normalization (`normalizeWorkspaceMemoryWithAccounting`).
 - Promotion classification: promoted, absorbed, superseded, rejected.
-- Clear terminal low-value compaction candidates after promotion review.
+- Remove absorbed/superseded keys from rejected set to avoid duplicate rejection tracking.
+- Memory quality evaluation fixtures covering accepted durable facts and rejected noisy facts.
+- Sharper compaction memory extraction prompt with concrete good/bad memory examples.
 
 ### Fixed
 
+- Promotion accounting now clears only pending memories that survive workspace normalization/cap limits.
+- `session.deleted` now uses shared session ID extraction, matching `session.compacted` behavior.
+- Absorbed duplicate pending memories are accounted for instead of retrying forever.
 - Active vs superseded boundary when promoting pending memories (superseded entries no longer block promotion of same-key active memories).
 - Removed unused `rejected_duplicate_lower_quality` type.
 
@@ -24,34 +29,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Deferred pending journal safety cap implementation (see TODO in `src/pending-journal.ts`).
 - Clarified superseded accounting semantics: P0 emits events only, does not archive newly superseded records.
+- README structure was streamlined around the automatic memory flow and ongoing memory-quality work.
+- Architecture docs now describe `Memory candidates:` as the primary extraction format and XML candidate blocks as legacy.
+- Superpowers implementation plans are no longer tracked in git.
 
 ## [1.2.3] - 2026-04-26
 
+### Added
+
+- Frozen workspace memory snapshot in `system[1]` for better OpenCode prompt-cache stability.
+- Ephemeral hot session state and pending memories in later system messages.
+- Durable pending journal so explicit memories survive until promotion.
+
 ### Fixed
 
-- Account for absorbed pending memories in promotion accounting.
-- Clarify cache epoch semantics and add regression tests.
+- Explicit memories no longer mutate the frozen workspace snapshot mid-session.
+- Pending memories are promoted at safe cache-epoch boundaries.
 
 ## [1.2.0] - 2026-04-25
 
 ### Added
 
-- Memory quality evaluation fixtures (5 accepted, 7 rejected cases).
-- Compaction prompt examples for better memory extraction.
-- Promotion accounting for pending memories.
+- Memory V2 three-layer architecture.
+- Workspace memory for durable cross-session decisions, preferences, project facts, and references.
+- Hot session state for active files, open errors, and recent context.
+- Hook-based memory extraction during OpenCode compaction.
+
+### Changed
+
+- Removed manual memory tools in favor of automatic prompt injection.
+- Moved storage to `~/.local/share/opencode-working-memory/`.
 
 ## [1.1.0] - 2026-04-24
 
-### Added
+### Changed
 
-- Workspace memory cache optimization with frozen snapshots.
-- Pending journal durability for same-session visibility.
-- Credential redaction always-on.
+- Improved pre-V2 memory documentation and installation flow.
 
 ## [1.0.0] - 2026-04-23
 
 ### Added
 
 - Initial release with three-layer memory architecture.
-- Hot session state, workspace memory, pending journal.
-- Memory extraction from user messages and compaction summaries.
+- Initial OpenCode memory integration.
+- Basic memory extraction and prompt injection.

@@ -1,11 +1,11 @@
-# OpenCode Working Memory Plugin
+# OpenCode Working Memory
 
 [![npm version](https://img.shields.io/npm/v/opencode-working-memory.svg)](https://www.npmjs.com/package/opencode-working-memory)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 Automatic memory for OpenCode agents.
 
-This plugin helps your agent keep useful context across compactions and sessions: project decisions, preferences, important references, active files, and unresolved errors.
+OpenCode Working Memory helps your agent keep useful context across compactions and sessions: project decisions, preferences, important references, active files, and unresolved errors.
 
 It works automatically, without manual memory tools or extra LLM/API calls.
 
@@ -13,7 +13,7 @@ It works automatically, without manual memory tools or extra LLM/API calls.
 
 OpenCode compaction keeps conversations manageable, but important context can still get lost over time.
 
-This plugin adds a workspace-aware memory layer so your agent can remember durable facts while keeping short-term session state fresh and lightweight.
+It adds a workspace-aware memory layer so your agent can remember durable facts while keeping short-term session state fresh and lightweight.
 
 Use it when you want your agent to remember things like:
 
@@ -34,7 +34,7 @@ Use it when you want your agent to remember things like:
 
 ## Installation
 
-Add the plugin to your OpenCode config:
+Add OpenCode Working Memory to your OpenCode config:
 
 ```json
 {
@@ -42,7 +42,7 @@ Add the plugin to your OpenCode config:
 }
 ```
 
-Then restart OpenCode. The plugin activates automatically.
+Then restart OpenCode. It activates automatically.
 
 ## How It Works
 
@@ -89,7 +89,7 @@ OpenCode Working Memory adds durable memory without making extra LLM/API calls.
 └──────────────────────────────────────┘
 ```
 
-**Zero extra API calls:** the plugin does not call the model on its own. Memory extraction is folded into OpenCode's built-in compaction request.
+**Zero extra API calls:** OpenCode Working Memory does not call the model on its own. Memory extraction is folded into OpenCode's built-in compaction request.
 
 **Cache-friendly layout:** durable workspace memory is rendered as a stable frozen snapshot for the session, while fast-changing hot session state is appended separately. Compaction starts a new cache epoch, refreshing the workspace snapshot after pending memories are promoted.
 
@@ -161,13 +161,14 @@ Avoid saving:
 
 ## Quality Guards
 
-The plugin tries to keep memory useful and low-noise.
+OpenCode Working Memory tries to keep memory useful and low-noise.
 
 It includes guards for:
 
 - Credential redaction
 - Duplicate memory cleanup
 - Superseding older decisions with newer ones
+- Consolidation accounting so promoted, absorbed, superseded, and rejected memories are handled differently
 - Filtering stack traces, git hashes, raw errors, and noisy path-heavy facts
 - Rejecting temporary project progress snapshots
 
@@ -175,7 +176,7 @@ The goal is to remember durable facts, not every detail.
 
 ## Configuration
 
-The plugin works out of the box.
+OpenCode Working Memory works out of the box.
 
 Default behavior:
 

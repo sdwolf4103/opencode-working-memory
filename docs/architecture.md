@@ -2,7 +2,7 @@
 
 ## Overview
 
-The Working Memory Plugin implements a **three-layer memory architecture** designed to preserve context across OpenCode session compactions.
+OpenCode Working Memory implements a **three-layer memory architecture** designed to preserve context across OpenCode session compactions.
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -73,7 +73,7 @@ Long-term memory that persists across sessions within the same workspace. Perfec
 
 ### Memory Extraction
 
-During compaction, the plugin scans for `Memory candidates:` sections:
+During compaction, OpenCode Working Memory scans for `Memory candidates:` sections:
 
 ```
 Memory candidates:
@@ -81,32 +81,39 @@ Memory candidates:
 - [project] This repo uses TypeScript with strict mode
 ```
 
-**Legacy Format**: The plugin also accepts `<workspace_memory_candidates>` XML blocks for backward compatibility, but this format is deprecated.
+**Legacy Format**: OpenCode Working Memory also accepts `<workspace_memory_candidates>` XML blocks for backward compatibility, but this format is deprecated.
 
-**Quality Gate**: Not all candidates become memories. The plugin rejects:
+**Quality Gate**: Not all candidates become memories. OpenCode Working Memory rejects:
 - Git commit hashes (e.g., `abc1234`)
 - Raw errors (e.g., `Error: something failed`)
 - Stack traces
 - Path-heavy facts (>50% paths)
 - Very short text (<20 chars)
 
-### Deduplication
+### Consolidation and Deduplication
 
-Memories are deduplicated using **canonical text matching**:
-1. Normalize: lowercase, strip punctuation, collapse whitespace
-2. Hash the canonical text
-3. Keep the entry with highest confidence
+Memories are deduplicated and consolidated with accounting:
+
+1. Normalize exact text: lowercase, strip punctuation, collapse whitespace.
+2. Group project/reference entries by identity where possible.
+3. Group decisions and feedback by topic where possible.
+4. Keep the best surviving entry by source, confidence, type, and freshness rules.
+5. Emit accounting events so pending memories can be classified as promoted, absorbed, superseded, or rejected.
+
+This prevents absorbed or superseded pending memories from retrying forever while still preserving the active surviving memory.
 
 ### System Prompt Injection
 
 Workspace memory is injected at the top of every message:
 
 ```
-<workspace_memory>
-- [decision] Use npm cache for plugin loading, not npm link
-- [project] This repo uses opencode-agenthub plugin system
-- [reference] Storage: ~/.local/share/opencode-working-memory/...
-</workspace_memory>
+Workspace memory (cross-session, verify if stale):
+decision:
+- Use npm cache for plugin loading, not npm link
+project:
+- This repo uses the opencode-agenthub plugin system
+reference:
+- Storage: ~/.local/share/opencode-working-memory/...
 ```
 
 ## Layer 2: Hot Session State
@@ -211,7 +218,7 @@ Delegate task tracking to OpenCode's native features.
 
 ## Plugin Hooks
 
-The plugin hooks into OpenCode lifecycle events:
+OpenCode Working Memory hooks into OpenCode lifecycle events:
 
 ### `experimental.chat.system.transform`
 
@@ -227,12 +234,14 @@ Injects workspace memory and hot session state into system prompt.
 ### `experimental.session.compacting`
 
 Extracts workspace memory candidates from conversation.
-Applies quality gate, deduplication, and source priority.
+Applies quality gate, redaction, migration, consolidation accounting, deduplication, and source priority.
 
 ### `event` (session.compacted, session.deleted)
 
 - `session.compacted`: Promote session decisions to workspace memory
 - `session.deleted`: Clean up session state files
+
+Promotion uses accounting results from workspace memory normalization. Pending memories that are kept are promoted; duplicate memories are absorbed; obsolete same-topic memories are superseded; stale or over-capacity compaction memories are rejected.
 
 ## Quality Guarantees
 
@@ -349,7 +358,7 @@ Modify `src/extractors.ts` to add new extraction patterns.
 
 ### Memory V1 to V2
 
-The plugin automatically migrates old format files to the new three-layer architecture. No manual intervention needed.
+OpenCode Working Memory automatically migrates old format files to the new three-layer architecture. No manual intervention needed.
 
 ---
 

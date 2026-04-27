@@ -1,8 +1,8 @@
-# AGENTS.md - OpenCode Working Memory Plugin Development Guide
+# AGENTS.md - OpenCode Working Memory Development Guide
 
 ## Project Overview
 
-The **OpenCode Working Memory Plugin** provides a **three-layer memory architecture** for AI agents:
+**OpenCode Working Memory** provides a **three-layer memory architecture** for AI agents:
 
 1. **Workspace Memory** - Long-term memory that persists across sessions (decisions, project info, references)
 2. **Hot Session State** - Automatic tracking of active files, open errors, and recent decisions
