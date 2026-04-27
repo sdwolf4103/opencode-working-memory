@@ -99,7 +99,7 @@ test("accountPendingPromotions ignores superseded exact keys when detecting exis
   assert.deepEqual([...result.clearableKeys], [memoryKey(pending[0])]);
 });
 
-test("accountPendingPromotions marks same-topic decision represented after normalization as absorbed", () => {
+test("accountPendingPromotions does not absorb same-topic decision without exact match", () => {
   const existing = mem("existing", "Parser supports 2 candidate formats.", {
     type: "decision",
     source: "compaction",
@@ -120,8 +120,8 @@ test("accountPendingPromotions marks same-topic decision represented after norma
   const result = accountPendingPromotions({ pending, before, after });
 
   assert.equal(result.promotedKeys.size, 0);
-  assert.deepEqual([...result.absorbedKeys], [memoryKey(pending[0])]);
-  assert.equal(result.rejectedKeys.size, 0);
+  assert.equal(result.absorbedKeys.size, 0);
+  assert.deepEqual([...result.rejectedKeys], [memoryKey(pending[0])]);
 });
 
 test("accountPendingPromotions keeps pending memory rejected when no equivalent survived", () => {
