@@ -48,3 +48,6 @@ pnpm-lock.yaml
 .opencode/
 .opencode-agenthub/
 .opencode-agenthub.user.json
+
+# Superpowers local planning artifacts
+docs/superpowers/plans/
