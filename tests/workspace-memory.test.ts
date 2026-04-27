@@ -695,6 +695,13 @@ test("redactCredentials handles username+password pair and punctuation boundary"
   );
 });
 
+test("redactCredentials handles generic API keys and tokens", () => {
+  assert.equal(redactCredentials("API_KEY: sk-123456789"), "API_KEY: [REDACTED]");
+  assert.equal(redactCredentials("Bearer Token: eyJhbGciOiJIUzI1..."), "Bearer Token: [REDACTED]");
+  assert.equal(redactCredentials("GitHub Secret: ghp_abc123"), "GitHub Secret: [REDACTED]");
+  assert.equal(redactCredentials("auth: abc123def"), "auth: [REDACTED]");
+});
+
 test("redactCredentials is idempotent and also redacts rationale text", () => {
   assert.equal(redactCredentials("password: [REDACTED]"), "password: [REDACTED]");
 

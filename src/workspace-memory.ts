@@ -11,10 +11,12 @@ const SECRET_VALUE = String.raw`[^` + "`" + String.raw`'",，,\s\[]+`;
 
 const PASSWORD_LABELS = /password|passwd|pwd|密碼|密码|パスワード|비밀번호|contraseña|mot de passe|passwort/i;
 const USERNAME_LABELS = /username|user name|用戶名|用户名|ユーザー名|사용자명|usuario|utilisateur|benutzer/i;
+const SENSITIVE_LABELS = /api[_-]?key|token|bearer|secret|credential|auth|auth[_-]?key|private[_-]?key/i;
 
 const PIN_PREFIX = String.raw`(\bPIN\b(?:\s*(?:是|=|:|：)\s*|\s+(?![是=:：])))`;
 const PASSWORD_PREFIX = String.raw`((?:${PASSWORD_LABELS.source})(?:\s*(?:是|=|:|：)\s*|\s+(?![是=:：])))`;
 const USERNAME_PREFIX = String.raw`((?:${USERNAME_LABELS.source})(?:\s*(?:是|=|:|：)\s*|\s+(?![是=:：])))`;
+const SENSITIVE_PREFIX = String.raw`((?:${SENSITIVE_LABELS.source})(?:\s*(?:推|是|=|:|：)\s*|[:：]\s*))`;
 
 export type MemoryConsolidationReason =
   | "promoted"
@@ -228,6 +230,12 @@ export function redactCredentials(text: string): string {
   // 3. Standalone password
   result = result.replace(
     new RegExp(String.raw`${PASSWORD_PREFIX}[\`'"]?(${SECRET_VALUE})`, "gi"),
+    "$1[REDACTED]",
+  );
+
+  // 4. Standalone sensitive keys/tokens
+  result = result.replace(
+    new RegExp(String.raw`${SENSITIVE_PREFIX}[\`'"]?(${SECRET_VALUE})`, "gi"),
     "$1[REDACTED]",
   );
 
