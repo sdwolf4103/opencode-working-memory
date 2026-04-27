@@ -193,7 +193,7 @@ describe("pending journal retention", () => {
     );
   });
 
-  it("savePendingJournal keeps explicit entries even if old", async () => {
+  it("savePendingJournal prunes stale entries regardless of source", async () => {
     const now = new Date();
     const staleDate = new Date(now.getTime() - 35 * 24 * 60 * 60 * 1000);
 
@@ -223,12 +223,51 @@ describe("pending journal retention", () => {
 
     const loaded = await loadPendingJournal(testDir);
 
-    // Both explicit and compaction entries past maxAgeDays should be pruned
-    // Currently retention doesn't differentiate by source
-    // This test documents current behavior
-    assert.ok(
-      loaded.entries.length <= 2,
-      "Entries should be within cap"
+    // Both explicit and compaction entries past maxAgeDays are pruned
+    // Retention does not differentiate by source
+    assert.strictEqual(
+      loaded.entries.length,
+      0,
+      "Stale entries should be pruned regardless of source"
+    );
+  });
+
+  it("savePendingJournal uses updatedAt when createdAt is missing", async () => {
+    const now = new Date();
+    const freshDate = new Date(now.getTime() - 1 * 24 * 60 * 60 * 1000);
+    const staleDate = new Date(now.getTime() - 35 * 24 * 60 * 60 * 1000);
+
+    const entries: LongTermMemoryEntry[] = [
+      {
+        type: "decision",
+        text: "Entry with missing createdAt but fresh updatedAt",
+        source: "compaction",
+        createdAt: "", // invalid
+        updatedAt: freshDate.toISOString(),
+      },
+      {
+        type: "decision",
+        text: "Entry with missing createdAt and stale updatedAt",
+        source: "compaction",
+        createdAt: "", // invalid
+        updatedAt: staleDate.toISOString(),
+      },
+    ];
+
+    await savePendingJournal(testDir, {
+      version: 1,
+      workspace: { root: testDir, key: "test" },
+      entries,
+      updatedAt: now.toISOString(),
+    });
+
+    const loaded = await loadPendingJournal(testDir);
+
+    // Fresh entry should be kept, stale entry should be pruned
+    assert.strictEqual(loaded.entries.length, 1);
+    assert.strictEqual(
+      loaded.entries[0].text,
+      "Entry with missing createdAt but fresh updatedAt"
     );
   });
 });

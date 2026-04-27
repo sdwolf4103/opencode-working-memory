@@ -51,17 +51,27 @@ function dedupeByText(entries: LongTermMemoryEntry[]): LongTermMemoryEntry[] {
   return result;
 }
 
-function isStaleEntry(entry: LongTermMemoryEntry, maxAgeDays: number): boolean {
-  const createdAt = entry.createdAt ? new Date(entry.createdAt).getTime() : NaN;
+/**
+ * Get the effective timestamp for an entry, preferring updatedAt over createdAt.
+ * Returns 0 if both are invalid/missing.
+ */
+function entryTime(entry: LongTermMemoryEntry): number {
   const updatedAt = entry.updatedAt ? new Date(entry.updatedAt).getTime() : NaN;
+  if (!Number.isNaN(updatedAt)) return updatedAt;
+
+  const createdAt = entry.createdAt ? new Date(entry.createdAt).getTime() : NaN;
+  if (!Number.isNaN(createdAt)) return createdAt;
+
+  return 0;
+}
+
+function isStaleEntry(entry: LongTermMemoryEntry, maxAgeDays: number): boolean {
+  const time = entryTime(entry);
   
-  // If both timestamps are invalid, treat as stale
-  if (Number.isNaN(createdAt) && Number.isNaN(updatedAt)) {
-    return true;
-  }
+  // If timestamp is 0 (both invalid), treat as stale
+  if (time === 0) return true;
   
-  // Use createdAt as primary age timestamp
-  const ageMs = Date.now() - (Number.isNaN(createdAt) ? updatedAt : createdAt);
+  const ageMs = Date.now() - time;
   const maxAgeMs = maxAgeDays * 24 * 60 * 60 * 1000;
   
   return ageMs > maxAgeMs;
@@ -78,11 +88,9 @@ function applyRetention(
   // 2. Remove stale entries
   const freshEntries = deduped.filter(entry => !isStaleEntry(entry, maxAgeDays));
   
-  // 3. Sort by createdAt descending (newest first) for cap
+  // 3. Sort by entryTime descending (newest first) for cap, using updatedAt then createdAt
   const sorted = [...freshEntries].sort((a, b) => {
-    const aTime = a.createdAt ? new Date(a.createdAt).getTime() : 0;
-    const bTime = b.createdAt ? new Date(b.createdAt).getTime() : 0;
-    return bTime - aTime;
+    return entryTime(b) - entryTime(a);
   });
   
   // 4. Keep maxEntries newest
@@ -90,9 +98,7 @@ function applyRetention(
   
   // 5. Restore stable order (oldest-to-newest) for consistency with existing code
   return capped.sort((a, b) => {
-    const aTime = a.createdAt ? new Date(a.createdAt).getTime() : 0;
-    const bTime = b.createdAt ? new Date(b.createdAt).getTime() : 0;
-    return aTime - bTime;
+    return entryTime(a) - entryTime(b);
   });
 }
 
