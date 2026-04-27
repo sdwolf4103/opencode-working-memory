@@ -83,7 +83,7 @@ OpenCode Working Memory adds durable memory without making extra LLM/API calls.
 └──────────────────┬───────────────────┘
                    ▼
 ┌──────────────────────────────────────┐
-│ ⚡ Prompt Context                    │
+│ ⚡ Prompt Context                     │
 │ system[1]: frozen workspace memory   │
 │ system[2+]: hot session state        │
 └──────────────────────────────────────┘
