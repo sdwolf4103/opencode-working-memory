@@ -9,7 +9,7 @@ import { parseWorkspaceMemoryCandidates } from "../src/extractors.ts";
 import type { OpenError } from "../src/types.ts";
 import { workspaceMemoryPath, workspacePendingJournalPath } from "../src/paths.ts";
 import { loadPendingJournal, savePendingJournal } from "../src/pending-journal.ts";
-import { updateWorkspaceMemory } from "../src/workspace-memory.ts";
+import { loadWorkspaceMemory, updateWorkspaceMemory } from "../src/workspace-memory.ts";
 
 // Mock client for root session (not a sub-agent)
 function mockRootClient() {
@@ -31,6 +31,23 @@ function mockClientWithLatestUser(text: string, messageID: string) {
           {
             info: { role: "user", id: messageID },
             parts: [{ type: "text", text }],
+          },
+        ],
+      }),
+      todo: async () => ({ data: [] }),
+    },
+  };
+}
+
+function mockClientWithCompactionSummary(summary: string) {
+  return {
+    session: {
+      get: async () => ({ data: { parentID: null } }),
+      messages: async () => ({
+        data: [
+          {
+            info: { role: "assistant", summary: true },
+            parts: [{ type: "text", text: summary }],
           },
         ],
       }),
@@ -562,6 +579,106 @@ test("session.compacted promotes pending memories to workspace memory and clears
   }
 });
 
+test("integration: explicit memory flows from user message through pending journal into workspace", async () => {
+  const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-test-"));
+
+  try {
+    const plugin = await MemoryV2Plugin({
+      directory: tmpDir,
+      client: mockClientWithLatestUser("remember this: Prefer deterministic consolidation accounting.", "msg-explicit-flow"),
+    });
+
+    await (plugin as Record<string, Function>)["experimental.chat.system.transform"](
+      { sessionID: "explicit-flow-session", model: {} },
+      { system: ["base header"] },
+    );
+
+    assert.equal((await loadSessionState(tmpDir, "explicit-flow-session")).pendingMemories.length, 1);
+    assert.equal((await loadPendingJournal(tmpDir)).entries.length, 1);
+
+    await (plugin as Record<string, Function>)["event"]({
+      event: { type: "session.compacted", properties: { sessionID: "explicit-flow-session" } },
+    });
+
+    assert.equal((await loadSessionState(tmpDir, "explicit-flow-session")).pendingMemories.length, 0);
+    assert.equal((await loadPendingJournal(tmpDir)).entries.length, 0);
+
+    const output = { system: ["base header"] };
+    await (plugin as Record<string, Function>)["experimental.chat.system.transform"](
+      { sessionID: "explicit-flow-session", model: {} },
+      output,
+    );
+
+    assert.match(output.system.join("\n"), /Prefer deterministic consolidation accounting/);
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("integration: compaction candidate flows through journal promotion and clears pending journal", async () => {
+  const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-test-"));
+
+  try {
+    const summary = `
+## Goal
+Continue durable memory work.
+
+## Memory Candidates
+- [decision] Use accounting events to classify promoted absorbed superseded and rejected memories.
+`;
+    const plugin = await MemoryV2Plugin({
+      directory: tmpDir,
+      client: mockClientWithCompactionSummary(summary),
+    });
+
+    await (plugin as Record<string, Function>)["event"]({
+      event: { type: "session.compacted", properties: { sessionID: "compaction-flow-session" } },
+    });
+
+    assert.equal((await loadPendingJournal(tmpDir)).entries.length, 0,
+      "compaction candidate should be promoted and then cleared from pending journal");
+
+    const output = { system: ["base header"] };
+    await (plugin as Record<string, Function>)["experimental.chat.system.transform"](
+      { sessionID: "after-compaction-flow", model: {} },
+      output,
+    );
+
+    assert.match(output.system.join("\n"), /accounting events to classify promoted absorbed superseded and rejected memories/);
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("integration: next session promotes prior explicit journal and leaves journal clean", async () => {
+  const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-test-"));
+
+  try {
+    const firstPlugin = await MemoryV2Plugin({
+      directory: tmpDir,
+      client: mockClientWithLatestUser("remember this: Cross-session promotion keeps the journal clean.", "msg-cross-session"),
+    });
+    await (firstPlugin as Record<string, Function>)["experimental.chat.system.transform"](
+      { sessionID: "first-cross-session", model: {} },
+      { system: ["base header"] },
+    );
+
+    assert.equal((await loadPendingJournal(tmpDir)).entries.length, 1);
+
+    const secondPlugin = await MemoryV2Plugin({ directory: tmpDir, client: mockRootClient() });
+    const output = { system: ["base header"] };
+    await (secondPlugin as Record<string, Function>)["experimental.chat.system.transform"](
+      { sessionID: "second-cross-session", model: {} },
+      output,
+    );
+
+    assert.equal((await loadPendingJournal(tmpDir)).entries.length, 0);
+    assert.match(output.system.join("\n"), /Cross-session promotion keeps the journal clean/);
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
 test("same-session explicit memory does not mutate frozen system[1]", async () => {
   const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-test-"));
 
@@ -779,6 +896,65 @@ test("session.compacted clears pending memory absorbed by existing workspace dup
   }
 });
 
+test("session.compacted promotes pending memory when exact existing entry is only superseded", async () => {
+  const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-test-"));
+
+  try {
+    const now = new Date().toISOString();
+    await updateWorkspaceMemory(tmpDir, store => {
+      store.entries.push({
+        id: "mem_superseded_duplicate",
+        type: "decision",
+        text: "Revive superseded exact memories when remembered again.",
+        source: "explicit",
+        confidence: 1,
+        status: "superseded",
+        createdAt: now,
+        updatedAt: now,
+      });
+      return store;
+    });
+
+    await saveSessionState(tmpDir, {
+      version: 1,
+      sessionID: "superseded-boundary-session",
+      turn: 0,
+      updatedAt: now,
+      activeFiles: [],
+      openErrors: [],
+      recentDecisions: [],
+      pendingMemories: [{
+        id: "mem_pending_revive",
+        type: "decision",
+        text: "Revive superseded exact memories when remembered again.",
+        source: "explicit",
+        confidence: 1,
+        status: "active",
+        createdAt: now,
+        updatedAt: now,
+      }],
+    });
+
+    const plugin = await MemoryV2Plugin({ directory: tmpDir, client: mockRootClient() });
+    await (plugin as Record<string, Function>)["event"]({
+      event: { type: "session.compacted", properties: { sessionID: "superseded-boundary-session" } },
+    });
+
+    const state = await loadSessionState(tmpDir, "superseded-boundary-session");
+    assert.equal(state.pendingMemories.length, 0,
+      "revived pending memory should be cleared after successful promotion");
+
+    const workspace = await loadWorkspaceMemory(tmpDir);
+    const activeMatches = workspace.entries.filter(entry =>
+      entry.status === "active" && /Revive superseded exact memories/.test(entry.text)
+    );
+    assert.equal(activeMatches.length, 1,
+      "pending memory should become active even when only matching prior entry is superseded");
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
 test("session.compacted clears pending memory absorbed by existing workspace identity", async () => {
   const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-test-"));
 
@@ -831,7 +1007,7 @@ test("session.compacted clears pending memory absorbed by existing workspace ide
   }
 });
 
-test("session.compacted keeps pending memory rejected by workspace entry cap", async () => {
+test("session.compacted clears compaction pending memory rejected by workspace entry cap", async () => {
   const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-test-"));
 
   try {
@@ -878,15 +1054,69 @@ test("session.compacted keeps pending memory rejected by workspace entry cap", a
     });
 
     const state = await loadSessionState(tmpDir, "rejected-cap-session");
-    assert.equal(state.pendingMemories.length, 1,
-      "pending memory rejected by workspace cap should remain pending for retry");
-    assert.match(state.pendingMemories[0].text, /Low priority reference/);
+    assert.equal(state.pendingMemories.length, 0,
+      "compaction pending memory rejected by workspace cap should be terminal and clearable");
   } finally {
     await rm(tmpDir, { recursive: true, force: true });
   }
 });
 
-test("session.compacted keeps pending memories when all rejected by workspace cap", async () => {
+test("session.compacted keeps explicit pending memory rejected by workspace entry cap", async () => {
+  const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-test-"));
+
+  try {
+    const now = new Date().toISOString();
+    await updateWorkspaceMemory(tmpDir, store => {
+      for (let i = 0; i < 28; i += 1) {
+        store.entries.push({
+          id: `mem_high_explicit_reject_${i}`,
+          type: "feedback",
+          text: `Pinned high priority feedback for explicit reject ${i}.`,
+          source: "explicit",
+          confidence: 1,
+          status: "active",
+          createdAt: now,
+          updatedAt: now,
+        });
+      }
+      return store;
+    });
+
+    await saveSessionState(tmpDir, {
+      version: 1,
+      sessionID: "explicit-rejected-cap-session",
+      turn: 0,
+      updatedAt: now,
+      activeFiles: [],
+      openErrors: [],
+      recentDecisions: [],
+      pendingMemories: [{
+        id: "mem_explicit_low_priority_reference",
+        type: "reference",
+        text: "Explicit reference should remain pending when capacity rejected.",
+        source: "explicit",
+        confidence: 0.1,
+        status: "active",
+        createdAt: now,
+        updatedAt: now,
+      }],
+    });
+
+    const plugin = await MemoryV2Plugin({ directory: tmpDir, client: mockRootClient() });
+    await (plugin as Record<string, Function>)["event"]({
+      event: { type: "session.compacted", properties: { sessionID: "explicit-rejected-cap-session" } },
+    });
+
+    const state = await loadSessionState(tmpDir, "explicit-rejected-cap-session");
+    assert.equal(state.pendingMemories.length, 1,
+      "explicit pending memory rejected by workspace cap should remain pending for retry");
+    assert.match(state.pendingMemories[0].text, /Explicit reference/);
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("session.compacted clears compaction pending memories when all rejected by workspace cap", async () => {
   const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-test-"));
 
   try {
@@ -946,19 +1176,18 @@ test("session.compacted keeps pending memories when all rejected by workspace ca
     });
 
     const state = await loadSessionState(tmpDir, "all-rejected-session");
-    assert.equal(state.pendingMemories.length, 1,
-      "session pending memory must remain when all pending memories are rejected");
+    assert.equal(state.pendingMemories.length, 0,
+      "compaction session pending memory should clear when rejected by capacity accounting");
 
     const pendingAfter = await loadPendingJournal(tmpDir);
-    assert.equal(pendingAfter.entries.length, 1,
-      "journal pending memories must not be cleared when accounting.clearableKeys is empty");
-    assert.match(pendingAfter.entries[0].text, /another session/);
+    assert.equal(pendingAfter.entries.length, 0,
+      "compaction journal pending memories should clear when rejected by capacity accounting");
   } finally {
     await rm(tmpDir, { recursive: true, force: true });
   }
 });
 
-test("session.compacted keeps rejected journal memories when no workspace entries survive", async () => {
+test("session.compacted clears stale rejected compaction journal memories", async () => {
   const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-test-"));
 
   try {
@@ -983,9 +1212,8 @@ test("session.compacted keeps rejected journal memories when no workspace entrie
     });
 
     const pendingAfter = await loadPendingJournal(tmpDir);
-    assert.equal(pendingAfter.entries.length, 1,
-      "rejected journal memory must not be cleared when accounting.clearableKeys is empty");
-    assert.match(pendingAfter.entries[0].text, /Stale journal/);
+    assert.equal(pendingAfter.entries.length, 0,
+      "stale rejected compaction journal memory should be terminal and clearable");
   } finally {
     await rm(tmpDir, { recursive: true, force: true });
   }

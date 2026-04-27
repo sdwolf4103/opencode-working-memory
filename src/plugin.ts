@@ -34,6 +34,7 @@ import {
 import {
   loadWorkspaceMemory,
   updateWorkspaceMemory,
+  updateWorkspaceMemoryWithAccounting,
   renderWorkspaceMemory,
 } from "./workspace-memory.ts";
 import {
@@ -250,9 +251,13 @@ export const MemoryV2Plugin: Plugin = async (input) => {
 
     let beforeEntries: Awaited<ReturnType<typeof loadWorkspaceMemory>>["entries"] = [];
 
-    const updatedWorkspaceMemory = await updateWorkspaceMemory(directory, workspaceMemory => {
+    const updateResult = await updateWorkspaceMemoryWithAccounting(directory, workspaceMemory => {
       beforeEntries = [...workspaceMemory.entries];
-      const existingKeys = new Set(workspaceMemory.entries.map(memory => memoryKey(memory)));
+      const existingKeys = new Set(
+        workspaceMemory.entries
+          .filter(memory => memory.status !== "superseded")
+          .map(memory => memoryKey(memory)),
+      );
 
       for (const memory of pending) {
         const key = memoryKey(memory);
@@ -268,7 +273,8 @@ export const MemoryV2Plugin: Plugin = async (input) => {
     const accounting = accountPendingPromotions({
       pending,
       before: beforeEntries,
-      after: updatedWorkspaceMemory.entries,
+      after: updateResult.store.entries,
+      events: updateResult.events,
     });
 
     if (sessionID) {
