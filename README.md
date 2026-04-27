@@ -214,8 +214,16 @@ npm run typecheck
 
 ## Requirements
 
-- OpenCode >= 1.0.0
+- OpenCode plugin API `>=1.2.0 <2.0.0`
 - Node.js >= 18.0.0
+
+## Limitations
+
+- Requires OpenCode plugin API `>=1.2.0 <2.0.0`; OpenCode hook changes may break compatibility.
+- Not a secret manager. Credential redaction is best-effort. Do not store secrets.
+- Working memory only. No semantic search, embeddings, or vector knowledge base.
+- Other prompt or compaction plugins may conflict depending on plugin order.
+- Multiple OpenCode processes on the same workspace may race on local files.
 
 ## License
 
