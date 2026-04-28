@@ -15,6 +15,11 @@ export type LongTermMemoryEntry = {
   staleAfterDays?: number;
   supersedes?: string[];
   tags?: string[];
+  pendingOwnerSessionID?: string;
+  pendingMessageID?: string;
+  promotionAttempts?: number;
+  lastPromotionAttemptAt?: string;
+  lastPromotionFailureReason?: string;
 };
 
 export type WorkspaceMemoryStore = {
@@ -99,4 +104,16 @@ export const HOT_STATE_LIMITS = {
   maxRecentDecisionsStored: 8,
   maxPendingMemoriesStored: 12,
   maxPendingMemoriesRendered: 6,
+} as const;
+
+export const PROMOTION_RETRY_LIMITS = {
+  maxExplicitAttempts: 3,
+  maxManualAttempts: 3,
+} as const;
+
+export const WORKSPACE_MEMORY_CACHE_LIMITS = {
+  maxFrozenSessions: 50,
+  maxProcessedSessionIDs: 200,
+  maxProcessedMessagesPerSession: 50,
+  frozenTtlMs: 60 * 60 * 1000,
 } as const;

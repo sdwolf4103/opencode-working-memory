@@ -43,6 +43,7 @@ import {
   hasPendingJournalEntries,
   loadPendingJournal,
   memoryKey,
+  recordPromotionRejections,
 } from "./pending-journal.ts";
 import {
   loadSessionState,
@@ -61,6 +62,7 @@ import {
   pendingTodos,
 } from "./opencode.ts";
 import { accountPendingPromotions } from "./promotion-accounting.ts";
+import { WORKSPACE_MEMORY_CACHE_LIMITS } from "./types.ts";
 
 /**
  * Build the complete compaction prompt.
@@ -203,13 +205,67 @@ export const MemoryV2Plugin: Plugin = async (input) => {
   // Cache for processed user message IDs (to avoid duplicate processing)
   const processedUserMessages = new Map<string, Set<string>>();
 
+  function pruneFrozenWorkspaceMemoryCache(now = Date.now()): void {
+    for (const [sessionID, cached] of frozenWorkspaceMemoryCache) {
+      if (now - cached.loadedAt > WORKSPACE_MEMORY_CACHE_LIMITS.frozenTtlMs) {
+        frozenWorkspaceMemoryCache.delete(sessionID);
+      }
+    }
+
+    while (frozenWorkspaceMemoryCache.size > WORKSPACE_MEMORY_CACHE_LIMITS.maxFrozenSessions) {
+      const oldest = [...frozenWorkspaceMemoryCache.entries()]
+        .sort((a, b) => a[1].loadedAt - b[1].loadedAt)[0]?.[0];
+      if (!oldest) break;
+      frozenWorkspaceMemoryCache.delete(oldest);
+    }
+  }
+
+  function pruneProcessedUserMessagesCache(): void {
+    for (const [sessionID, messages] of processedUserMessages) {
+      while (messages.size > WORKSPACE_MEMORY_CACHE_LIMITS.maxProcessedMessagesPerSession) {
+        const oldest = messages.values().next().value as string | undefined;
+        if (!oldest) break;
+        messages.delete(oldest);
+      }
+
+      if (messages.size === 0) {
+        processedUserMessages.delete(sessionID);
+      }
+    }
+
+    while (processedUserMessages.size > WORKSPACE_MEMORY_CACHE_LIMITS.maxProcessedSessionIDs) {
+      const oldestSessionID = processedUserMessages.keys().next().value as string | undefined;
+      if (!oldestSessionID) break;
+      processedUserMessages.delete(oldestSessionID);
+    }
+  }
+
+  function rememberProcessedUserMessage(sessionID: string, messageID: string, processedForSession: Set<string>): void {
+    processedForSession.add(messageID);
+    while (processedForSession.size > WORKSPACE_MEMORY_CACHE_LIMITS.maxProcessedMessagesPerSession) {
+      const oldest = processedForSession.values().next().value as string | undefined;
+      if (!oldest) break;
+      processedForSession.delete(oldest);
+    }
+
+    if (processedUserMessages.has(sessionID)) {
+      processedUserMessages.delete(sessionID);
+    }
+    processedUserMessages.set(sessionID, processedForSession);
+    pruneProcessedUserMessagesCache();
+  }
+
   async function processLatestUserMessage(sessionID: string): Promise<void> {
     const processedForSession = processedUserMessages.get(sessionID) ?? new Set<string>();
     const latestMessage = await latestUserText(client, sessionID);
 
     if (!latestMessage?.id || processedForSession.has(latestMessage.id)) return;
 
-    const memories = extractExplicitMemories(latestMessage.text);
+    const memories = extractExplicitMemories(latestMessage.text).map(memory => ({
+      ...memory,
+      pendingOwnerSessionID: sessionID,
+      pendingMessageID: latestMessage.id,
+    }));
     const decisions = memories.filter(memory => memory.type === "decision");
 
     if (memories.length > 0) {
@@ -233,19 +289,29 @@ export const MemoryV2Plugin: Plugin = async (input) => {
       });
     }
 
-    processedForSession.add(latestMessage.id);
-    processedUserMessages.set(sessionID, processedForSession);
+    rememberProcessedUserMessage(sessionID, latestMessage.id, processedForSession);
   }
 
-  async function promotePendingMemories(sessionID?: string): Promise<void> {
+  async function promotePendingMemories(
+    sessionID?: string,
+    options: { includeUnownedJournal?: boolean; includeOwnedJournal?: boolean } = {},
+  ): Promise<void> {
+    const includeUnownedJournal = options.includeUnownedJournal ?? !sessionID;
+    const includeOwnedJournal = options.includeOwnedJournal ?? Boolean(sessionID);
     const [journal, sessionState] = await Promise.all([
       loadPendingJournal(directory),
       sessionID ? loadSessionState(directory, sessionID) : Promise.resolve(undefined),
     ]);
 
+    const journalPending = journal.entries.filter(memory => {
+      if (sessionID && includeOwnedJournal && memory.pendingOwnerSessionID === sessionID) return true;
+      if (includeUnownedJournal && !memory.pendingOwnerSessionID) return true;
+      return false;
+    });
+
     const pending = [
       ...(sessionState?.pendingMemories ?? []),
-      ...journal.entries,
+      ...journalPending,
     ];
     if (pending.length === 0) return;
 
@@ -277,16 +343,39 @@ export const MemoryV2Plugin: Plugin = async (input) => {
       events: updateResult.events,
     });
 
+    const exhaustedRejectedKeys = await recordPromotionRejections(
+      directory,
+      accounting.retryableRejectedKeys,
+      "rejected_capacity",
+      { ownerSessionID: sessionID },
+    );
+
+    const sessionRemovalKeys = new Set([
+      ...accounting.clearableKeys,
+      ...exhaustedRejectedKeys,
+    ]);
+
     if (sessionID) {
       await updateSessionState(directory, sessionID, state => {
-        state.pendingMemories = state.pendingMemories.filter(memory => !accounting.clearableKeys.has(memoryKey(memory)));
+        state.pendingMemories = state.pendingMemories.filter(memory => {
+          const key = memoryKey(memory);
+          if (!sessionRemovalKeys.has(key)) return true;
+
+          if (accounting.clearableKeys.has(key)) return false;
+          if (exhaustedRejectedKeys.has(key)) return false;
+
+          return true;
+        });
         return state;
       });
       clearFrozenWorkspaceMemoryCache(sessionID);
     }
 
     if (accounting.clearableKeys.size > 0) {
-      await clearPendingMemories(directory, accounting.clearableKeys);
+      await clearPendingMemories(directory, accounting.clearableKeys, {
+        ownerSessionID: sessionID,
+        clearUnowned: !sessionID || includeUnownedJournal === true,
+      });
     }
   }
 
@@ -324,6 +413,7 @@ export const MemoryV2Plugin: Plugin = async (input) => {
     renderedPrompt: string;
   }> {
     const now = Date.now();
+    pruneFrozenWorkspaceMemoryCache(now);
     const cached = frozenWorkspaceMemoryCache.get(sessionID);
 
     // Cache is valid for the current session cache epoch.
@@ -336,6 +426,7 @@ export const MemoryV2Plugin: Plugin = async (input) => {
     const store = await loadWorkspaceMemory(root);
     const renderedPrompt = renderWorkspaceMemory(store);
     frozenWorkspaceMemoryCache.set(sessionID, { store, renderedPrompt, loadedAt: now });
+    pruneFrozenWorkspaceMemoryCache(now);
     return { store, renderedPrompt };
   }
 
@@ -357,18 +448,22 @@ export const MemoryV2Plugin: Plugin = async (input) => {
       const { sessionID } = hookInput;
       if (!sessionID) return;
 
+      pruneFrozenWorkspaceMemoryCache();
+      pruneProcessedUserMessagesCache();
+
       // Sub-agents are short-lived - skip memory system
       if (await isSubAgent(sessionID)) return;
 
-      // Before first snapshot in this session, promote durable pending memories from
-      // prior sessions. Keep this before processing latest user text so current-turn
-      // explicit memory remains pending (not immediately frozen into system[1]).
-      if (!frozenWorkspaceMemoryCache.has(sessionID) && await hasPendingJournalEntries(directory)) {
-        await promotePendingMemories();
-      }
-
-      // Process explicit user memory even on no-tool turns.
+      // Process explicit user memory even on no-tool turns. Keep this after the
+      // sub-agent guard so child sessions never append to the parent journal.
       await processLatestUserMessage(sessionID);
+
+      // Before first snapshot in this session, promote durable unowned backlog from
+      // prior sessions. Current-turn owned explicit memory remains pending and only
+      // appears in hot state for this transform.
+      if (!frozenWorkspaceMemoryCache.has(sessionID) && await hasPendingJournalEntries(directory)) {
+        await promotePendingMemories(undefined, { includeUnownedJournal: true, includeOwnedJournal: false });
+      }
 
       // Get frozen workspace memory snapshot (loaded and rendered once per session)
       const workspaceSnapshot = await getFrozenWorkspaceMemorySnapshot(directory, sessionID);
@@ -521,7 +616,7 @@ export const MemoryV2Plugin: Plugin = async (input) => {
         }
 
         try {
-          await promotePendingMemories(sessionID);
+          await promotePendingMemories(sessionID, { includeUnownedJournal: true });
         } catch {
           // Keep pending memories in session/journal for retry on next event/session.
         }
@@ -532,16 +627,20 @@ export const MemoryV2Plugin: Plugin = async (input) => {
         if (sessionID) {
           // Promote pending memories before deleting per-session state.
           // If promotion fails, leave session state and journal intact.
+          let promoted = false;
           try {
-            await promotePendingMemories(sessionID);
+            await promotePendingMemories(sessionID, { includeOwnedJournal: true, includeUnownedJournal: false });
+            promoted = true;
           } catch {
             return;
+          } finally {
+            if (promoted) {
+              frozenWorkspaceMemoryCache.delete(sessionID);
+              processedUserMessages.delete(sessionID);
+              sessionParentCache.delete(sessionID);
+            }
           }
 
-          // Clean up caches
-          frozenWorkspaceMemoryCache.delete(sessionID);
-          processedUserMessages.delete(sessionID);
-          sessionParentCache.delete(sessionID);
           await rm(await sessionStatePath(directory, sessionID), { force: true });
         }
       }

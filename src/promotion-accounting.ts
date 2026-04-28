@@ -8,6 +8,7 @@ export type PendingPromotionAccounting = {
   absorbedKeys: Set<string>;
   supersededKeys: Set<string>;
   rejectedKeys: Set<string>;
+  retryableRejectedKeys: Set<string>;
   clearableKeys: Set<string>;
 };
 
@@ -72,24 +73,38 @@ export function accountPendingPromotions(input: {
     rejectedKeys.add(key);
   }
 
+  const clearableKeys = new Set([
+    ...promotedKeys,
+    ...absorbedKeys,
+    ...supersededKeys,
+    ...input.pending
+      .filter(memory => {
+        const terminal = terminalEventByKey.get(memoryKey(memory));
+        return memory.source === "compaction" && (
+          terminal?.reason === "rejected_capacity" ||
+          terminal?.reason === "rejected_stale"
+        );
+      })
+      .map(memory => memoryKey(memory)),
+  ]);
+
+  const retryableRejectedKeys = new Set(
+    input.pending
+      .filter(memory => {
+        const key = memoryKey(memory);
+        return rejectedKeys.has(key) &&
+          !clearableKeys.has(key) &&
+          (memory.source === "explicit" || memory.source === "manual");
+      })
+      .map(memory => memoryKey(memory)),
+  );
+
   return {
     promotedKeys,
     absorbedKeys,
     supersededKeys,
     rejectedKeys,
-    clearableKeys: new Set([
-      ...promotedKeys,
-      ...absorbedKeys,
-      ...supersededKeys,
-      ...input.pending
-        .filter(memory => {
-          const terminal = terminalEventByKey.get(memoryKey(memory));
-          return memory.source === "compaction" && (
-            terminal?.reason === "rejected_capacity" ||
-            terminal?.reason === "rejected_stale"
-          );
-        })
-        .map(memory => memoryKey(memory)),
-    ]),
+    retryableRejectedKeys,
+    clearableKeys,
   };
 }

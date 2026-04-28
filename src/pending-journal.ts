@@ -1,4 +1,5 @@
 import type { LongTermMemoryEntry, PendingMemoryJournalStore } from "./types.ts";
+import { PROMOTION_RETRY_LIMITS } from "./types.ts";
 import { workspaceKey, workspacePendingJournalPath } from "./paths.ts";
 import { atomicWriteJSON, readJSON, updateJSON } from "./storage.ts";
 
@@ -42,7 +43,7 @@ function dedupeByText(entries: LongTermMemoryEntry[]): LongTermMemoryEntry[] {
   const result: LongTermMemoryEntry[] = [];
 
   for (const entry of entries) {
-    const key = memoryKey(entry);
+    const key = `${memoryKey(entry)}\u0000${entry.pendingOwnerSessionID ?? ""}`;
     if (seen.has(key)) continue;
     seen.add(key);
     result.push(entry);
@@ -67,14 +68,15 @@ function entryTime(entry: LongTermMemoryEntry): number {
 
 function isStaleEntry(entry: LongTermMemoryEntry, maxAgeDays: number): boolean {
   const time = entryTime(entry);
-  
-  // If timestamp is 0 (both invalid), treat as stale
+
+  // Invalid timestamps are corruption safety and apply to every source.
   if (time === 0) return true;
-  
-  const ageMs = Date.now() - time;
-  const maxAgeMs = maxAgeDays * 24 * 60 * 60 * 1000;
-  
-  return ageMs > maxAgeMs;
+
+  // TTL policy applies only to compaction candidates. Explicit/manual entries
+  // represent user intent and should survive age while under the hard cap.
+  if (entry.source !== "compaction") return false;
+
+  return Date.now() - time > maxAgeDays * 86_400_000;
 }
 
 function applyRetention(
@@ -82,23 +84,18 @@ function applyRetention(
   maxEntries: number,
   maxAgeDays: number,
 ): LongTermMemoryEntry[] {
-  // 1. Dedupe first
   const deduped = dedupeByText(entries);
-  
-  // 2. Remove stale entries
   const freshEntries = deduped.filter(entry => !isStaleEntry(entry, maxAgeDays));
-  
-  // 3. Sort by entryTime descending (newest first) for cap, using updatedAt then createdAt
   const sorted = [...freshEntries].sort((a, b) => {
-    return entryTime(b) - entryTime(a);
+    const timeDiff = entryTime(b) - entryTime(a);
+    if (timeDiff !== 0) return timeDiff;
+    return a.id.localeCompare(b.id);
   });
-  
-  // 4. Keep maxEntries newest
   const capped = sorted.slice(0, maxEntries);
-  
-  // 5. Restore stable order (oldest-to-newest) for consistency with existing code
   return capped.sort((a, b) => {
-    return entryTime(a) - entryTime(b);
+    const timeDiff = entryTime(a) - entryTime(b);
+    if (timeDiff !== 0) return timeDiff;
+    return a.id.localeCompare(b.id);
   });
 }
 
@@ -159,13 +156,69 @@ export async function hasPendingJournalEntries(root: string): Promise<boolean> {
   return journal.entries.length > 0;
 }
 
-export async function clearPendingMemories(root: string, keys?: Set<string>): Promise<void> {
+export async function clearPendingMemories(
+  root: string,
+  keys?: Set<string>,
+  options: { ownerSessionID?: string; clearUnowned?: boolean } = {},
+): Promise<void> {
   await updatePendingJournal(root, store => {
     if (!keys || keys.size === 0) {
       store.entries = [];
       return store;
     }
-    store.entries = store.entries.filter(entry => !keys.has(memoryKey(entry)));
+
+    store.entries = store.entries.filter(entry => {
+      if (!keys.has(memoryKey(entry))) return true;
+      if (!options.ownerSessionID) return false;
+      if (entry.pendingOwnerSessionID === options.ownerSessionID) return false;
+      if (options.clearUnowned && !entry.pendingOwnerSessionID) return false;
+      return true;
+    });
     return store;
   });
+}
+
+export async function recordPromotionRejections(
+  root: string,
+  keys: Set<string>,
+  reason: string,
+  options: { ownerSessionID?: string } = {},
+): Promise<Set<string>> {
+  const exhausted = new Set<string>();
+  if (keys.size === 0) return exhausted;
+
+  await updatePendingJournal(root, store => {
+    const nowIso = new Date().toISOString();
+    const exhaustedEntries = new Set<string>();
+
+    store.entries = store.entries.map(entry => {
+      const key = memoryKey(entry);
+      if (!keys.has(key)) return entry;
+      if (options.ownerSessionID && entry.pendingOwnerSessionID !== options.ownerSessionID) return entry;
+
+      const promotionAttempts = (entry.promotionAttempts ?? 0) + 1;
+      const max = entry.source === "manual"
+        ? PROMOTION_RETRY_LIMITS.maxManualAttempts
+        : PROMOTION_RETRY_LIMITS.maxExplicitAttempts;
+
+      if (promotionAttempts >= max) {
+        exhausted.add(key);
+        exhaustedEntries.add(`${key}\u0000${entry.pendingOwnerSessionID ?? ""}`);
+      }
+
+      return {
+        ...entry,
+        promotionAttempts,
+        lastPromotionAttemptAt: nowIso,
+        lastPromotionFailureReason: reason,
+      };
+    });
+
+    store.entries = store.entries.filter(entry => (
+      !exhaustedEntries.has(`${memoryKey(entry)}\u0000${entry.pendingOwnerSessionID ?? ""}`)
+    ));
+    return store;
+  });
+
+  return exhausted;
 }
