@@ -7,24 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.4.0] - 2026-04-28
 
-### Added
+### Memory Quality Cleanup
 
-- Unified memory quality gate in `src/memory-quality.ts` as the single source of truth for all memory quality rules.
-- CRITICAL MEMORY RULES in compaction prompt with explicit good/bad examples.
-- Auto-supersede migration `2026-04-28-quality-cleanup` that marks low-quality compaction memories as superseded on first load.
+- Unified quality gate for compaction memory candidates and cleanup checks.
+- Rewritten compaction memory prompt to reduce over-production of low-quality memories.
+- Conservative one-time quality cleanup migration (`2026-04-28-quality-cleanup`) that supersedes only high-confidence garbage patterns: progress snapshots, raw errors, commit/CI snapshots, temporary status notes, active file snapshots, code/API signatures, path-heavy entries, and empty entries.
+- Soft heuristic failures (`bad_feedback`, `bad_decision`) are intentionally excluded from automatic migration cleanup to protect durable declarative memories such as branding rules, API facts, release rules, and architecture decisions.
+- Migration audit log: `~/.local/share/opencode-working-memory/migration-logs/2026-04-28-quality-cleanup.jsonl`.
+- Extraction rejection log: `~/.local/share/opencode-working-memory/extraction-rejections.jsonl`.
 
-### Changed
+### Recovery note
 
-- Memory quality rules now apply to all memory types, not just project entries.
-- Compaction prompt explicitly instructs model that most compactions should produce zero memories.
-- Low-quality compaction memories (progress snapshots, implementation notes, session-internal notes) are automatically superseded during workspace memory normalization.
-
-### Migration Notes
-
-- Existing low-quality `source: "compaction"` entries will be marked as `superseded` once on first load after upgrade.
-- Explicit and manual memories are never affected by quality cleanup.
-- Superseded entries are retained on disk with `quality_cleanup` tags for audit purposes.
-- Migration is idempotent and runs exactly once per workspace.
+The cleanup migration changes matching entries to `status: "superseded"`; it does not delete the entry. If a useful memory is superseded, inspect the migration audit log and restore by changing that entry back to `status: "active"` in the workspace's `workspace-memory.json`. The migration runs once per workspace.
 
 ## [1.3.3] - 2026-04-28
 
