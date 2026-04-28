@@ -1,6 +1,8 @@
+import { appendFile, mkdir } from "node:fs/promises";
+import { dirname } from "node:path";
 import type { LongTermMemoryEntry, WorkspaceMemoryStore } from "./types.ts";
 import { LONG_TERM_LIMITS } from "./types.ts";
-import { workspaceKey, workspaceMemoryPath } from "./paths.ts";
+import { migrationLogPath, workspaceKey, workspaceMemoryPath } from "./paths.ts";
 import { atomicWriteJSON, readJSON, updateJSON } from "./storage.ts";
 import { assessMemoryQuality, isHardQualityReason, isProgressSnapshotViolation } from "./memory-quality.ts";
 
@@ -48,6 +50,21 @@ export type LongTermLimitResult = {
 export type WorkspaceMemoryNormalizationResult = LongTermLimitResult & {
   store: WorkspaceMemoryStore;
   events: MemoryConsolidationEvent[];
+};
+
+export type QualityCleanupMigrationLogEntry = {
+  migrationId: string;
+  timestamp: string;
+  workspaceKey: string;
+  workspaceRoot: string;
+  entryId: string;
+  type: LongTermMemoryEntry["type"];
+  source: LongTermMemoryEntry["source"];
+  text: string;
+  reasons: string[];
+  hardReasons: string[];
+  beforeStatus: "active";
+  afterStatus: "superseded";
 };
 
 export async function emptyWorkspaceMemory(root: string): Promise<WorkspaceMemoryStore> {
@@ -191,7 +208,13 @@ export async function normalizeWorkspaceMemoryWithAccounting(
   // One-time migrations for legacy/low-quality snapshot violations.
   // Run quality cleanup first so hard violations receive quality audit tags
   // before the older P0 project-only cleanup marks progress snapshots.
-  result = runMigrationQualityCleanup(result, nowIso);
+  const qualityCleanup = runMigrationQualityCleanup(result, nowIso);
+  result = qualityCleanup.store;
+  if (qualityCleanup.events.length > 0) {
+    await appendQualityCleanupMigrationLog(qualityCleanup.events).catch(error => {
+      console.error("[memory] failed to write quality cleanup migration log:", error);
+    });
+  }
   result = runMigrationP0Cleanup(result, nowIso);
 
   // P0 accounting only considers active entries. Entries that were already
@@ -287,14 +310,22 @@ export function runMigrationP0Cleanup(
   };
 }
 
+async function appendQualityCleanupMigrationLog(events: QualityCleanupMigrationLogEntry[]): Promise<void> {
+  if (events.length === 0) return;
+  const path = migrationLogPath(QUALITY_CLEANUP_MIGRATION_ID);
+  await mkdir(dirname(path), { recursive: true });
+  await appendFile(path, events.map(event => JSON.stringify(event)).join("\n") + "\n", "utf8");
+}
+
 export function runMigrationQualityCleanup(
   store: WorkspaceMemoryStore,
   nowIso: string,
-): WorkspaceMemoryStore {
+): { store: WorkspaceMemoryStore; events: QualityCleanupMigrationLogEntry[] } {
   if (store.migrations?.includes(QUALITY_CLEANUP_MIGRATION_ID)) {
-    return store;
+    return { store, events: [] };
   }
 
+  const events: QualityCleanupMigrationLogEntry[] = [];
   let changed = false;
   const entries = store.entries.map(entry => {
     if (entry.source !== "compaction") return entry;
@@ -307,6 +338,21 @@ export function runMigrationQualityCleanup(
     if (hardReasons.length === 0) return entry;
 
     changed = true;
+    events.push({
+      migrationId: QUALITY_CLEANUP_MIGRATION_ID,
+      timestamp: nowIso,
+      workspaceKey: store.workspace.key,
+      workspaceRoot: store.workspace.root,
+      entryId: entry.id,
+      type: entry.type,
+      source: entry.source,
+      text: entry.text,
+      reasons: quality.reasons,
+      hardReasons,
+      beforeStatus: "active",
+      afterStatus: "superseded",
+    });
+
     const tags = new Set([
       ...(entry.tags ?? []),
       "quality_cleanup",
@@ -322,10 +368,13 @@ export function runMigrationQualityCleanup(
   });
 
   return {
-    ...store,
-    entries,
-    migrations: [...(store.migrations ?? []), QUALITY_CLEANUP_MIGRATION_ID],
-    updatedAt: changed ? nowIso : store.updatedAt,
+    store: {
+      ...store,
+      entries,
+      migrations: [...(store.migrations ?? []), QUALITY_CLEANUP_MIGRATION_ID],
+      updatedAt: changed ? nowIso : store.updatedAt,
+    },
+    events,
   };
 }
 

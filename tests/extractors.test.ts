@@ -1,6 +1,22 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { extractErrorsFromBash, extractExplicitMemories } from "../src/extractors.ts";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { extractErrorsFromBash, extractExplicitMemories, parseWorkspaceMemoryCandidates } from "../src/extractors.ts";
+
+async function waitForFile(path: string, attempts = 20): Promise<string> {
+  let lastError: unknown;
+  for (let i = 0; i < attempts; i += 1) {
+    try {
+      return await readFile(path, "utf8");
+    } catch (error) {
+      lastError = error;
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+  }
+  throw lastError;
+}
 
 // ============================================
 // Task 1: extractErrorsFromBash tests
@@ -128,8 +144,6 @@ test("extractExplicitMemories captures multiple memories in same message", () =>
 // ============================================
 // Task 7: Compaction quality gate tests
 // ============================================
-
-import { parseWorkspaceMemoryCandidates } from "../src/extractors.ts";
 
 test("parseWorkspaceMemoryCandidates rejects short text", () => {
   const summary = `
@@ -279,6 +293,35 @@ Memory candidates:
 
   const items = parseWorkspaceMemoryCandidates(summary);
   assert.equal(items.length, 0, "Exact test counts are session snapshots, not durable memory");
+});
+
+test("parseWorkspaceMemoryCandidates logs quality gate rejections locally", async () => {
+  const dataHome = await mkdtemp(join(tmpdir(), "wm-extraction-reject-data-"));
+  const previousXdgDataHome = process.env.XDG_DATA_HOME;
+  process.env.XDG_DATA_HOME = dataHome;
+
+  try {
+    const summary = `
+Memory candidates:
+- feedback Wave 1 completed successfully and all tests passed
+`;
+
+    const items = parseWorkspaceMemoryCandidates(summary);
+
+    assert.equal(items.length, 0);
+    const logPath = join(dataHome, "opencode-working-memory", "extraction-rejections.jsonl");
+    const lines = (await waitForFile(logPath)).trim().split("\n");
+    assert.equal(lines.length, 1);
+    const event = JSON.parse(lines[0]);
+    assert.equal(event.type, "feedback");
+    assert.equal(event.text, "Wave 1 completed successfully and all tests passed");
+    assert.deepEqual(event.reasons, ["progress_snapshot", "bad_feedback"]);
+    assert.equal(event.source, "compaction");
+  } finally {
+    if (previousXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
+    else process.env.XDG_DATA_HOME = previousXdgDataHome;
+    await rm(dataHome, { recursive: true, force: true });
+  }
 });
 
 test("parseWorkspaceMemoryCandidates rejects exact file count snapshots", () => {

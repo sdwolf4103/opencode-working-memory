@@ -1,7 +1,10 @@
 import { createHash } from "crypto";
+import { appendFile, mkdir } from "node:fs/promises";
+import { dirname } from "node:path";
 import type { ActiveFile, LongTermMemoryEntry, LongTermType, OpenError } from "./types.ts";
 import { LONG_TERM_LIMITS } from "./types.ts";
 import { assessMemoryQuality } from "./memory-quality.ts";
+import { extractionRejectionLogPath } from "./paths.ts";
 
 function id(prefix: string): string {
   return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -227,6 +230,24 @@ function extractFirstPath(text: string): string | undefined {
  * Acceptance gate for workspace memory candidates.
  * Keeps extraction-specific checks local and delegates memory quality rules to memory-quality.ts.
  */
+type ExtractionRejectionLogEntry = {
+  timestamp: string;
+  type: LongTermType;
+  text: string;
+  reasons: string[];
+  source: "compaction";
+};
+
+async function logExtractionRejection(entry: ExtractionRejectionLogEntry): Promise<void> {
+  try {
+    const path = extractionRejectionLogPath();
+    await mkdir(dirname(path), { recursive: true });
+    await appendFile(path, JSON.stringify(entry) + "\n", "utf8");
+  } catch (error) {
+    console.error("[memory] failed to write extraction rejection log:", error);
+  }
+}
+
 function shouldAcceptWorkspaceMemoryCandidate(
   entry: {
     type: LongTermType;
@@ -253,7 +274,16 @@ function shouldAcceptWorkspaceMemoryCandidate(
   if (/\b(ignore|instruction|overwrite)\b/i.test(text) && /\b(previous|all|rules|behavior|prompt|system)\b/i.test(text)) return false;
 
   const quality = assessMemoryQuality({ type: entry.type, text, source: "compaction" });
-  if (!quality.accepted) return false;
+  if (!quality.accepted) {
+    void logExtractionRejection({
+      timestamp: new Date().toISOString(),
+      type: entry.type,
+      text,
+      reasons: quality.reasons,
+      source: "compaction",
+    });
+    return false;
+  }
 
   return true;
 }
