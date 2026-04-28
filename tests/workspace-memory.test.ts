@@ -5,7 +5,7 @@ import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import type { LongTermMemoryEntry, WorkspaceMemoryStore } from "../src/types.ts";
 import { LONG_TERM_LIMITS } from "../src/types.ts";
-import { workspaceMemoryPath } from "../src/paths.ts";
+import { workspaceKey, workspaceMemoryPath } from "../src/paths.ts";
 import {
   renderWorkspaceMemory,
   enforceLongTermLimits,
@@ -14,13 +14,16 @@ import {
   normalizeWorkspaceMemoryWithAccounting,
   workspaceMemoryExactKey,
   workspaceMemoryIdentityKey,
-  redactCredentials,
-  isProjectSnapshotViolation,
   runMigrationP0Cleanup,
+  runMigrationQualityCleanup,
   loadWorkspaceMemory,
   saveWorkspaceMemory,
   updateWorkspaceMemoryWithAccounting,
 } from "../src/workspace-memory.ts";
+import { redactCredentials } from "../src/redaction.ts";
+import { assessMemoryQuality, isHardQualityReason, isProgressSnapshotViolation } from "../src/memory-quality.ts";
+import { reviewerCurrent28Fixture } from "./fixtures/memory-quality-current-28.ts";
+import { REAL_WORKSPACE_FIXTURES } from "./fixtures/real-workspaces-snapshot.ts";
 
 function entry(id: string, text: string, type: LongTermMemoryEntry["type"] = "decision"): LongTermMemoryEntry {
   const now = new Date().toISOString();
@@ -889,13 +892,13 @@ test("redactCredentials is idempotent and also redacts rationale text", () => {
   assert.equal(migrated.entries[0].rationale, "password: [REDACTED]");
 });
 
-test("isProjectSnapshotViolation detects wave progress and avoids limit context false positives", () => {
-  assert.equal(isProjectSnapshotViolation("1237 tests pass, 226 suites"), true);
-  assert.equal(isProjectSnapshotViolation("USB 同步：37 個文件"), true);
-  assert.equal(isProjectSnapshotViolation("Waves 1-5 已完成，Wave 6 deferred"), true);
+test("shared progress snapshot rule detects wave progress and avoids limit context false positives", () => {
+  assert.equal(isProgressSnapshotViolation("1237 tests pass, 226 suites"), true);
+  assert.equal(isProgressSnapshotViolation("USB 同步：37 個文件"), true);
+  assert.equal(isProgressSnapshotViolation("Waves 1-5 已完成，Wave 6 deferred"), true);
 
-  assert.equal(isProjectSnapshotViolation("Upload limit is 10 files"), false);
-  assert.equal(isProjectSnapshotViolation("Project supports 5 test suites"), false);
+  assert.equal(isProgressSnapshotViolation("Upload limit is 10 files"), false);
+  assert.equal(isProgressSnapshotViolation("Project supports 5 test suites"), false);
 });
 
 test("runMigrationP0Cleanup marks only non-explicit project snapshots and runs once", () => {
@@ -951,6 +954,379 @@ test("runMigrationP0Cleanup marks only non-explicit project snapshots and runs o
   const twice = runMigrationP0Cleanup(once, later);
   assert.deepEqual(twice.migrations, ["2026-04-26-p0-cleanup"], "migration id should not duplicate");
   assert.equal(twice.entries.find(e => e.id === "project-snapshot")?.updatedAt, once.entries.find(e => e.id === "project-snapshot")?.updatedAt);
+});
+
+test("quality cleanup migration preserves soft-only feedback and decision violations", async () => {
+  const root = await mkdtemp(join(tmpdir(), "wm-quality-soft-preserve-"));
+  try {
+    const now = new Date().toISOString();
+    await saveWorkspaceMemory(root, {
+      version: 1,
+      workspace: { root, key: await workspaceKey(root) },
+      limits: { maxRenderedChars: LONG_TERM_LIMITS.maxRenderedChars, maxEntries: LONG_TERM_LIMITS.maxEntries },
+      entries: [
+        {
+          id: "soft_feedback",
+          type: "feedback",
+          text: "UI 要統一風格：兩個表格都要 scrollable，約 20 rows",
+          source: "compaction",
+          confidence: 0.75,
+          status: "active",
+          createdAt: now,
+          updatedAt: now,
+        },
+        {
+          id: "soft_decision",
+          type: "decision",
+          text: "Product branding is \"OpenCode Working Memory\" without \"Plugin\" in the name",
+          source: "compaction",
+          confidence: 0.75,
+          status: "active",
+          createdAt: now,
+          updatedAt: now,
+          staleAfterDays: 45,
+        },
+      ],
+      migrations: [],
+      updatedAt: now,
+    });
+
+    const loaded = await loadWorkspaceMemory(root);
+    assert.equal(loaded.entries.find(e => e.id === "soft_feedback")?.status, "active");
+    assert.equal(loaded.entries.find(e => e.id === "soft_decision")?.status, "active");
+    assert.ok(loaded.migrations?.includes("2026-04-28-quality-cleanup"));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("quality cleanup migration supersedes hard quality violations", async () => {
+  const root = await mkdtemp(join(tmpdir(), "wm-quality-hard-supersede-"));
+  try {
+    const now = new Date().toISOString();
+    await saveWorkspaceMemory(root, {
+      version: 1,
+      workspace: { root, key: await workspaceKey(root) },
+      limits: { maxRenderedChars: LONG_TERM_LIMITS.maxRenderedChars, maxEntries: LONG_TERM_LIMITS.maxEntries },
+      entries: [{
+        id: "hard_progress",
+        type: "project",
+        text: "測試套件：1237 tests pass, 226 suites",
+        source: "compaction",
+        confidence: 0.75,
+        status: "active",
+        createdAt: now,
+        updatedAt: now,
+        staleAfterDays: 60,
+      }],
+      migrations: [],
+      updatedAt: now,
+    });
+
+    const loaded = await loadWorkspaceMemory(root);
+    const entry = loaded.entries.find(e => e.id === "hard_progress");
+    assert.equal(entry?.status, "superseded");
+    assert.ok(entry?.tags?.includes("quality_cleanup"));
+    assert.ok(entry?.tags?.includes("quality:progress_snapshot"));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("quality cleanup migration writes audit log for hard supersedes", async () => {
+  const root = await mkdtemp(join(tmpdir(), "wm-quality-audit-root-"));
+  const dataHome = await mkdtemp(join(tmpdir(), "wm-quality-audit-data-"));
+  const previousXdgDataHome = process.env.XDG_DATA_HOME;
+  process.env.XDG_DATA_HOME = dataHome;
+
+  try {
+    const now = new Date().toISOString();
+    await saveWorkspaceMemory(root, {
+      version: 1,
+      workspace: { root, key: await workspaceKey(root) },
+      limits: { maxRenderedChars: LONG_TERM_LIMITS.maxRenderedChars, maxEntries: LONG_TERM_LIMITS.maxEntries },
+      entries: [{
+        id: "hard_progress",
+        type: "project",
+        text: "測試套件：1237 tests pass, 226 suites",
+        source: "compaction",
+        confidence: 0.75,
+        status: "active",
+        createdAt: now,
+        updatedAt: now,
+        staleAfterDays: 60,
+      }],
+      migrations: [],
+      updatedAt: now,
+    });
+
+    await loadWorkspaceMemory(root);
+
+    const logPath = join(dataHome, "opencode-working-memory", "migration-logs", "2026-04-28-quality-cleanup.jsonl");
+    const lines = (await readFile(logPath, "utf8")).trim().split("\n");
+    assert.equal(lines.length, 1);
+    const event = JSON.parse(lines[0]);
+    assert.equal(event.migrationId, "2026-04-28-quality-cleanup");
+    assert.equal(event.entryId, "hard_progress");
+    assert.deepEqual(event.hardReasons, ["progress_snapshot"]);
+    assert.equal(event.beforeStatus, "active");
+    assert.equal(event.afterStatus, "superseded");
+    assert.equal(event.text, "測試套件：1237 tests pass, 226 suites");
+  } finally {
+    if (previousXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
+    else process.env.XDG_DATA_HOME = previousXdgDataHome;
+    await rm(root, { recursive: true, force: true });
+    await rm(dataHome, { recursive: true, force: true });
+  }
+});
+
+test("quality cleanup migration aborts supersede when audit log cannot be written", async () => {
+  const sandbox = await mkdtemp(join(tmpdir(), "wm-quality-audit-fail-"));
+  const dataHome = join(sandbox, "xdg-data-home");
+  const root = join(sandbox, "workspace");
+  const previousXdgDataHome = process.env.XDG_DATA_HOME;
+  const previousConsoleError = console.error;
+  process.env.XDG_DATA_HOME = dataHome;
+  console.error = () => {};
+
+  try {
+    await mkdir(root, { recursive: true });
+    const now = "2026-04-28T00:00:00.000Z";
+    const storePath = await workspaceMemoryPath(root);
+    await mkdir(dirname(storePath), { recursive: true });
+    await writeFile(storePath, JSON.stringify({
+      version: 1,
+      workspace: { root, key: await workspaceKey(root) },
+      limits: { maxRenderedChars: LONG_TERM_LIMITS.maxRenderedChars, maxEntries: LONG_TERM_LIMITS.maxEntries },
+      entries: [{
+        id: "hard_progress",
+        type: "project",
+        text: "Test suite: 1237 tests pass, 226 suites",
+        source: "compaction",
+        confidence: 0.75,
+        status: "active",
+        createdAt: now,
+        updatedAt: now,
+        staleAfterDays: 60,
+      }],
+      migrations: [],
+      updatedAt: now,
+    }, null, 2), "utf8");
+
+    const blockedLogDir = join(dataHome, "opencode-working-memory", "migration-logs");
+    await writeFile(blockedLogDir, "not a directory", "utf8");
+
+    const loaded = await loadWorkspaceMemory(root);
+    const persisted = JSON.parse(await readFile(storePath, "utf8")) as WorkspaceMemoryStore;
+
+    assert.equal(loaded.entries.find(entry => entry.id === "hard_progress")?.status, "active");
+    assert.equal(persisted.entries.find(entry => entry.id === "hard_progress")?.status, "active");
+    assert.equal(loaded.migrations?.includes("2026-04-28-quality-cleanup"), false);
+    assert.equal(persisted.migrations?.includes("2026-04-28-quality-cleanup"), false);
+  } finally {
+    console.error = previousConsoleError;
+    if (previousXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
+    else process.env.XDG_DATA_HOME = previousXdgDataHome;
+    await rm(sandbox, { recursive: true, force: true });
+  }
+});
+
+test("real workspace regression fixture is de-identified and English-only", () => {
+  const cjkText = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
+  const identifyingTerms = [
+    "medical-atlas",
+    "opencode-record",
+    "agent-reports",
+    "pdf-extraction",
+    "self-repo",
+    "OpenCode Working Memory",
+  ];
+  const failures: string[] = [];
+
+  for (const [workspaceName, fixtureEntries] of Object.entries(REAL_WORKSPACE_FIXTURES)) {
+    if (identifyingTerms.some(term => workspaceName.includes(term))) {
+      failures.push(`${workspaceName}: workspace key should be generalized`);
+    }
+
+    for (const entry of fixtureEntries) {
+      if (cjkText.test(entry.text)) {
+        failures.push(`${workspaceName}/${entry.id}: text must be English-only`);
+      }
+      for (const term of identifyingTerms) {
+        if (entry.text.includes(term)) {
+          failures.push(`${workspaceName}/${entry.id}: text contains identifying term ${term}`);
+        }
+      }
+    }
+  }
+
+  assert.equal(failures.length, 0, `Fixture privacy failures:\n${failures.join("\n")}`);
+});
+
+test("quality cleanup migration regression against real workspace samples", async () => {
+  const failures: string[] = [];
+  const now = "2026-04-28T00:00:00.000Z";
+
+  for (const [workspaceName, fixtureEntries] of Object.entries(REAL_WORKSPACE_FIXTURES)) {
+    const root = `/fixture/${workspaceName}`;
+    const store = {
+      version: 1,
+      workspace: { root, key: workspaceName.padEnd(16, "0").slice(0, 16) },
+      limits: { maxRenderedChars: LONG_TERM_LIMITS.maxRenderedChars, maxEntries: LONG_TERM_LIMITS.maxEntries },
+      entries: fixtureEntries.map(({ expectedAfterMigration, expectation, ...entry }) => entry),
+      migrations: [],
+      updatedAt: now,
+    };
+
+    const result = runMigrationQualityCleanup(store, now).store;
+    const byId = new Map(result.entries.map(entry => [entry.id, entry]));
+
+    for (const original of fixtureEntries) {
+      const after = byId.get(original.id);
+      if (!after) {
+        failures.push(`${workspaceName}/${original.id}: missing after migration`);
+        continue;
+      }
+      if (after.status !== original.expectedAfterMigration) {
+        failures.push(
+          `${workspaceName}/${original.id}: expected ${original.expectedAfterMigration}, got ${after.status}\n` +
+          `  text: ${original.text.slice(0, 120)}\n` +
+          `  why: ${original.expectation}`,
+        );
+      }
+    }
+  }
+
+  assert.equal(failures.length, 0, `Regression failures:\n${failures.join("\n")}`);
+});
+
+test("quality cleanup migration supersedes only hard violations from current fixture", async () => {
+  const root = await mkdtemp(join(tmpdir(), "wm-quality-cleanup-"));
+  try {
+    const now = new Date().toISOString();
+    await saveWorkspaceMemory(root, {
+      version: 1,
+      workspace: { root, key: await workspaceKey(root) },
+      limits: { maxRenderedChars: LONG_TERM_LIMITS.maxRenderedChars, maxEntries: LONG_TERM_LIMITS.maxEntries },
+      entries: reviewerCurrent28Fixture,
+      migrations: [],
+      updatedAt: now,
+    });
+
+    const loaded = await loadWorkspaceMemory(root);
+    const activeIds = new Set(loaded.entries.filter(entry => entry.status === "active").map(entry => entry.id));
+    const supersededIds = new Set(loaded.entries.filter(entry => entry.status === "superseded").map(entry => entry.id));
+
+    for (const entry of reviewerCurrent28Fixture) {
+      const quality = assessMemoryQuality(entry);
+      const hasHardReason = quality.reasons.some(isHardQualityReason);
+      if (entry.source === "compaction" && !quality.accepted && hasHardReason) {
+        assert.equal(supersededIds.has(entry.id), true, `${entry.id} should be superseded`);
+      } else {
+        assert.equal(activeIds.has(entry.id), true, `${entry.id} should remain active`);
+      }
+    }
+
+    assert.ok(loaded.migrations?.includes("2026-04-28-quality-cleanup"));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("quality cleanup migration dedupes tags", async () => {
+  const root = await mkdtemp(join(tmpdir(), "wm-quality-tags-"));
+  try {
+    const now = new Date().toISOString();
+    await saveWorkspaceMemory(root, {
+      version: 1,
+      workspace: { root, key: await workspaceKey(root) },
+      limits: { maxRenderedChars: LONG_TERM_LIMITS.maxRenderedChars, maxEntries: LONG_TERM_LIMITS.maxEntries },
+      entries: [{
+        id: "bad_with_tags",
+        type: "feedback",
+        text: "Wave 1 completed successfully and all tests passed",
+        source: "compaction",
+        confidence: 0.75,
+        status: "active",
+        createdAt: now,
+        updatedAt: now,
+        tags: ["quality_cleanup", "quality:progress_snapshot"],
+      }],
+      migrations: [],
+      updatedAt: now,
+    });
+
+    const loaded = await loadWorkspaceMemory(root);
+    const tags = loaded.entries[0].tags ?? [];
+    assert.equal(tags.filter(tag => tag === "quality_cleanup").length, 1);
+    assert.equal(tags.filter(tag => tag === "quality:progress_snapshot").length, 1);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("quality cleanup migration does not supersede explicit memories", async () => {
+  const root = await mkdtemp(join(tmpdir(), "wm-quality-explicit-"));
+  try {
+    const now = new Date().toISOString();
+    const explicitBadShape = {
+      id: "explicit_progress_like",
+      type: "feedback" as const,
+      text: "Wave 1 completed successfully and all tests passed",
+      source: "explicit" as const,
+      confidence: 1,
+      status: "active" as const,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    await saveWorkspaceMemory(root, {
+      version: 1,
+      workspace: { root, key: await workspaceKey(root) },
+      limits: { maxRenderedChars: LONG_TERM_LIMITS.maxRenderedChars, maxEntries: LONG_TERM_LIMITS.maxEntries },
+      entries: [explicitBadShape],
+      migrations: [],
+      updatedAt: now,
+    });
+
+    const loaded = await loadWorkspaceMemory(root);
+    assert.equal(loaded.entries[0].status, "active");
+    assert.equal(loaded.entries[0].source, "explicit");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("quality cleanup migration does not supersede manual memories", async () => {
+  const root = await mkdtemp(join(tmpdir(), "wm-quality-manual-"));
+  try {
+    const now = new Date().toISOString();
+    const manualBadShape = {
+      id: "manual_progress_like",
+      type: "feedback" as const,
+      text: "Wave 1 completed successfully and all tests passed",
+      source: "manual" as const,
+      confidence: 0.9,
+      status: "active" as const,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    await saveWorkspaceMemory(root, {
+      version: 1,
+      workspace: { root, key: await workspaceKey(root) },
+      limits: { maxRenderedChars: LONG_TERM_LIMITS.maxRenderedChars, maxEntries: LONG_TERM_LIMITS.maxEntries },
+      entries: [manualBadShape],
+      migrations: [],
+      updatedAt: now,
+    });
+
+    const loaded = await loadWorkspaceMemory(root);
+    assert.equal(loaded.entries[0].status, "active");
+    assert.equal(loaded.entries[0].source, "manual");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("renderWorkspaceMemory excludes superseded entries", () => {

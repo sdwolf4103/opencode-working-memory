@@ -1,5 +1,105 @@
 # Release Notes
 
+## 1.4.0 (2026-04-28)
+
+### Memory Quality Cleanup
+
+This release improves automatic workspace memory quality without risking broad cleanup of useful existing memories.
+
+The quality gate is now shared across compaction extraction and migration checks, the compaction prompt is stricter about what should become durable memory, and the one-time migration is intentionally conservative.
+
+### What Changed
+
+- **Unified quality rules**: memory quality checks now live in one shared module and apply consistently across feedback, decisions, project facts, and references.
+- **Stricter compaction output**: the compaction prompt now tells the model to save fewer memories and prefer durable facts, user preferences, architecture decisions, and hard-to-rediscover references.
+- **Conservative migration cleanup**: the `2026-04-28-quality-cleanup` migration only supersedes high-confidence garbage patterns, not every rejected memory.
+- **Audit logs**: automatic migration cleanup writes local JSONL audit records so superseded entries can be inspected and restored.
+- **Extraction rejection logs**: newly rejected compaction candidates are logged locally to help calibrate future quality rules.
+- **Regression coverage**: migration behavior is tested against sanitized real-workspace patterns to prevent mass false positives from coming back.
+- **Workspace cleanup tooling**: a dev/admin cleanup command can dry-run or quarantine definite temp/test workspace residues without deleting unknown missing-root workspaces.
+- **Test storage isolation**: test runs now use a temporary `XDG_DATA_HOME`, preventing fixture workspaces from polluting real local memory data.
+
+### What Gets Cleaned Up
+
+The migration may supersede existing `source: "compaction"` memories only when they match hard garbage patterns:
+
+- Empty entries
+- Progress snapshots, such as "Wave 1 completed successfully"
+- Test or suite count snapshots, such as "180 tests passed"
+- Raw errors and stack traces
+- Commit or CI snapshots
+- Temporary status notes, such as "Currently running npm test"
+- Active file snapshots
+- Code or API signatures
+- Path-heavy entries that are just rediscoverable file lists
+
+### What Is Protected
+
+The migration does not supersede entries whose only issue is a soft heuristic failure, such as:
+
+- `bad_feedback`
+- `bad_decision`
+
+This protects useful declarative memories like:
+
+- Product branding rules
+- API facts
+- Release rules
+- Architecture decisions
+- User workflow preferences
+
+Explicit and manual memories are also protected.
+
+### Migration Behavior
+
+- Runs once per workspace.
+- Only affects active `source: "compaction"` entries.
+- Marks matching entries as `status: "superseded"` instead of deleting them.
+- Adds `quality_cleanup` and `quality:<reason>` tags to superseded entries.
+- Writes audit logs to:
+  `~/.local/share/opencode-working-memory/migration-logs/2026-04-28-quality-cleanup.jsonl`
+- Writes extraction rejection logs to:
+  `~/.local/share/opencode-working-memory/extraction-rejections.jsonl`
+
+### Recovery
+
+If a useful memory is superseded, inspect the migration audit log and restore the entry by changing its status back to `"active"` in the workspace's `workspace-memory.json`.
+
+### Workspace Residue Cleanup
+
+If old test/temp workspace stores already exist locally, inspect them first:
+
+```bash
+npm run cleanup:workspaces -- --dry-run
+```
+
+To move definite temp/test residues into a local quarantine folder instead of deleting them:
+
+```bash
+npm run cleanup:workspaces -- --quarantine
+```
+
+The cleanup command skips existing workspace roots and unknown missing-root workspaces by default.
+
+### Upgrade Notes
+
+- No configuration changes required.
+- Existing workspace memory files remain compatible.
+- The OpenCode config entry stays the same:
+
+```json
+{
+  "plugin": ["opencode-working-memory"]
+}
+```
+
+### Validation
+
+- `npm test`
+- `npm run typecheck`
+
+---
+
 ## 1.3.2 (2026-04-27)
 
 ### CI Compatibility Patch

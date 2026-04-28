@@ -1,23 +1,16 @@
+import { appendFile, mkdir } from "node:fs/promises";
+import { dirname } from "node:path";
 import type { LongTermMemoryEntry, WorkspaceMemoryStore } from "./types.ts";
 import { LONG_TERM_LIMITS } from "./types.ts";
-import { workspaceKey, workspaceMemoryPath } from "./paths.ts";
+import { migrationLogPath, workspaceKey, workspaceMemoryPath } from "./paths.ts";
 import { atomicWriteJSON, readJSON, updateJSON } from "./storage.ts";
+import { assessMemoryQuality, isHardQualityReason, isProgressSnapshotViolation } from "./memory-quality.ts";
+import { redactCredentials } from "./redaction.ts";
 
 // Minimum length for workspace_memory envelope: <workspace_memory>\n...\n</workspace_memory>
 const MIN_ENVELOPE_LENGTH = 80;
 const MIGRATION_ID = "2026-04-26-p0-cleanup";
-
-const SECRET_VALUE = String.raw`[^` + "`" + String.raw`'",，,\s\[]+`;
-
-const PASSWORD_LABELS = /password|passwd|pwd|密碼|密码|パスワード|비밀번호|contraseña|mot de passe|passwort/i;
-const USERNAME_LABELS = /username|user name|用戶名|用户名|ユーザー名|사용자명|usuario|utilisateur|benutzer/i;
-const SENSITIVE_LABELS = /api[_-]?key|token|bearer|secret|credential|auth|auth[_-]?key|private[_-]?key/i;
-
-const PIN_PREFIX = String.raw`(\bPIN\b(?:\s*(?:是|=|:|：)\s*|\s+(?![是=:：])))`;
-const PASSWORD_PREFIX = String.raw`((?:${PASSWORD_LABELS.source})(?:\s*(?:是|=|:|：)\s*|\s+(?![是=:：])))`;
-const USERNAME_PREFIX = String.raw`((?:${USERNAME_LABELS.source})(?:\s*(?:是|=|:|：)\s*|\s+(?![是=:：])))`;
-const SENSITIVE_PREFIX = String.raw`((?:${SENSITIVE_LABELS.source})(?:\s*(?:推|是|=|:|：)\s*|[:：]\s*))`;
-const BEARER_PREFIX = String.raw`(Bearer\s+)`;
+const QUALITY_CLEANUP_MIGRATION_ID = "2026-04-28-quality-cleanup";
 
 export type MemoryConsolidationReason =
   | "promoted"
@@ -46,6 +39,21 @@ export type LongTermLimitResult = {
 export type WorkspaceMemoryNormalizationResult = LongTermLimitResult & {
   store: WorkspaceMemoryStore;
   events: MemoryConsolidationEvent[];
+};
+
+export type QualityCleanupMigrationLogEntry = {
+  migrationId: string;
+  timestamp: string;
+  workspaceKey: string;
+  workspaceRoot: string;
+  entryId: string;
+  type: LongTermMemoryEntry["type"];
+  source: LongTermMemoryEntry["source"];
+  text: string;
+  reasons: string[];
+  hardReasons: string[];
+  beforeStatus: "active";
+  afterStatus: "superseded";
 };
 
 export async function emptyWorkspaceMemory(root: string): Promise<WorkspaceMemoryStore> {
@@ -186,8 +194,26 @@ export async function normalizeWorkspaceMemoryWithAccounting(
     };
   });
 
-  // One-time migration for legacy snapshot violations
-  result = runMigrationP0Cleanup(result, nowIso);
+  // One-time migrations for legacy/low-quality snapshot violations.
+  // Run quality cleanup first so hard violations receive quality audit tags
+  // before the older P0 project-only cleanup marks progress snapshots.
+  const beforeQualityCleanup = result;
+  const qualityCleanup = runMigrationQualityCleanup(result, nowIso);
+  result = qualityCleanup.store;
+  let skipRemainingMigrations = false;
+  if (qualityCleanup.events.length > 0) {
+    try {
+      await appendQualityCleanupMigrationLog(qualityCleanup.events);
+    } catch (error) {
+      console.error("[memory] failed to write quality cleanup migration log:", error);
+      console.error("[memory] aborting migration to maintain audit trail integrity");
+      result = beforeQualityCleanup;
+      skipRemainingMigrations = true;
+    }
+  }
+  if (!skipRemainingMigrations) {
+    result = runMigrationP0Cleanup(result, nowIso);
+  }
 
   // P0 accounting only considers active entries. Entries that were already
   // superseded before this normalization are preserved in storage; entries that
@@ -213,66 +239,6 @@ export async function normalizeWorkspaceMemoryWithAccounting(
   };
 }
 
-export function redactCredentials(text: string): string {
-  let result = text;
-
-  // 1. PIN
-  result = result.replace(
-    new RegExp(String.raw`${PIN_PREFIX}[\`'"]?(${SECRET_VALUE})`, "gi"),
-    "$1[REDACTED]",
-  );
-
-  // 2. Username+password pair
-  result = result.replace(
-    new RegExp(
-      String.raw`${USERNAME_PREFIX}[\`'"]?(${SECRET_VALUE})((?:，|,)\s*)${PASSWORD_PREFIX}[\`'"]?(${SECRET_VALUE})`,
-      "gi",
-    ),
-    "$1[REDACTED]$3$4[REDACTED]",
-  );
-
-  // 3. Standalone password
-  result = result.replace(
-    new RegExp(String.raw`${PASSWORD_PREFIX}[\`'"]?(${SECRET_VALUE})`, "gi"),
-    "$1[REDACTED]",
-  );
-
-  // 4. Standalone sensitive keys/tokens
-  result = result.replace(
-    new RegExp(String.raw`${BEARER_PREFIX}(?!token\s*[:=：])[\`'"]?(${SECRET_VALUE})`, "gi"),
-    "$1[REDACTED]",
-  );
-
-  result = result.replace(
-    new RegExp(String.raw`${SENSITIVE_PREFIX}[\`'"]?(${SECRET_VALUE})`, "gi"),
-    "$1[REDACTED]",
-  );
-
-  return result;
-}
-
-export function isProjectSnapshotViolation(text: string): boolean {
-  // Test/suite counts
-  if (/\d+\s+tests?\s+pass(?:ed)?/i.test(text)) return true;
-  if (/\d+\s+suites?\s+(?:pass|fail)/i.test(text)) return true;
-
-  // File counts with snapshot context, excluding limit statements
-  if (/\d+\s*(?:個|个)?\s*(?:files?|文件)/i.test(text)) {
-    const hasSnapshotContext = /同步|synced|uploaded|downloaded|completed|generated|created|modified|processed|完成/i.test(text);
-    const hasLimitContext = /limit|max|maximum|min|minimum|supports?|allowed|per\s+(?:batch|request|upload)/i.test(text);
-    if (hasSnapshotContext && !hasLimitContext) return true;
-  }
-
-  // Phase/Wave/Sprint/Milestone/Task progress
-  if (/(?:phases?|waves?|sprints?|milestones?|tasks?)\s*\d+(?:\s*[-–]\s*\d+)?/i.test(text)) {
-    if (/completed|done|finished|完成/i.test(text)) return true;
-  }
-
-  if (/(?:已完成|完成).{0,30}(?:phases?|waves?|sprints?|milestones?|tasks?)/i.test(text)) return true;
-
-  return false;
-}
-
 export function runMigrationP0Cleanup(
   store: WorkspaceMemoryStore,
   nowIso: string,
@@ -282,10 +248,10 @@ export function runMigrationP0Cleanup(
   }
 
   const entries = store.entries.map(entry => {
-    if (entry.source === "explicit") return entry;
+    if (entry.source !== "compaction") return entry;
     if (entry.type !== "project") return entry;
 
-    if (isProjectSnapshotViolation(entry.text)) {
+    if (isProgressSnapshotViolation(entry.text)) {
       return {
         ...entry,
         status: "superseded" as const,
@@ -301,6 +267,74 @@ export function runMigrationP0Cleanup(
     entries,
     migrations: [...(store.migrations || []), MIGRATION_ID],
     updatedAt: nowIso,
+  };
+}
+
+async function appendQualityCleanupMigrationLog(events: QualityCleanupMigrationLogEntry[]): Promise<void> {
+  if (events.length === 0) return;
+  const path = migrationLogPath(QUALITY_CLEANUP_MIGRATION_ID);
+  await mkdir(dirname(path), { recursive: true });
+  await appendFile(path, events.map(event => JSON.stringify(event)).join("\n") + "\n", "utf8");
+}
+
+export function runMigrationQualityCleanup(
+  store: WorkspaceMemoryStore,
+  nowIso: string,
+): { store: WorkspaceMemoryStore; events: QualityCleanupMigrationLogEntry[] } {
+  if (store.migrations?.includes(QUALITY_CLEANUP_MIGRATION_ID)) {
+    return { store, events: [] };
+  }
+
+  const events: QualityCleanupMigrationLogEntry[] = [];
+  let changed = false;
+  const entries = store.entries.map(entry => {
+    if (entry.source !== "compaction") return entry;
+    if (entry.status === "superseded") return entry;
+
+    const quality = assessMemoryQuality(entry);
+    if (quality.accepted) return entry;
+
+    const hardReasons = quality.reasons.filter(isHardQualityReason);
+    if (hardReasons.length === 0) return entry;
+
+    changed = true;
+    events.push({
+      migrationId: QUALITY_CLEANUP_MIGRATION_ID,
+      timestamp: nowIso,
+      workspaceKey: store.workspace.key,
+      workspaceRoot: store.workspace.root,
+      entryId: entry.id,
+      type: entry.type,
+      source: entry.source,
+      text: entry.text,
+      reasons: quality.reasons,
+      hardReasons,
+      beforeStatus: "active",
+      afterStatus: "superseded",
+    });
+
+    const tags = new Set([
+      ...(entry.tags ?? []),
+      "quality_cleanup",
+      ...hardReasons.map(reason => `quality:${reason}`),
+    ]);
+
+    return {
+      ...entry,
+      status: "superseded" as const,
+      updatedAt: nowIso,
+      tags: [...tags],
+    };
+  });
+
+  return {
+    store: {
+      ...store,
+      entries,
+      migrations: [...(store.migrations ?? []), QUALITY_CLEANUP_MIGRATION_ID],
+      updatedAt: changed ? nowIso : store.updatedAt,
+    },
+    events,
   };
 }
 

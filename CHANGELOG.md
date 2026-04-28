@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-04-28
+
+### Added
+
+- Local migration audit log for the `2026-04-28-quality-cleanup` migration:
+  `~/.local/share/opencode-working-memory/migration-logs/2026-04-28-quality-cleanup.jsonl`.
+- Local extraction rejection log for rejected compaction memory candidates:
+  `~/.local/share/opencode-working-memory/extraction-rejections.jsonl`.
+- Sanitized real-workspace regression fixtures for memory cleanup migration behavior.
+- Safe workspace residue cleanup tooling that dry-runs by default and quarantines definite temp/test workspace stores instead of deleting them.
+
+### Changed
+
+- Unified memory quality rules in a shared quality gate for compaction memory candidates and cleanup checks.
+- Rewritten compaction memory prompt to reduce over-production of low-quality memories.
+- Changed quality cleanup migration to be conservative: it supersedes only high-confidence garbage patterns, including progress snapshots, raw errors, commit/CI snapshots, temporary status notes, active file snapshots, code/API signatures, path-heavy entries, and empty entries.
+- Soft heuristic failures (`bad_feedback`, `bad_decision`) are intentionally excluded from automatic migration cleanup to protect durable declarative memories such as branding rules, API facts, release rules, user workflow preferences, and architecture decisions.
+- Isolated test runs under a temporary `XDG_DATA_HOME` so test workspaces no longer pollute real local workspace memory data.
+
+### Recovery note
+
+The cleanup migration changes matching entries to `status: "superseded"`; it does not delete the entry. If a useful memory is superseded, inspect the migration audit log and restore by changing that entry back to `status: "active"` in the workspace's `workspace-memory.json`. The migration runs once per workspace.
+
 ## [1.3.3] - 2026-04-28
 
 ### Fixed

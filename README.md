@@ -174,6 +174,17 @@ It includes guards for:
 
 The goal is to remember durable facts, not every detail.
 
+Historical cleanup is intentionally conservative: extraction-time filtering may reject more aggressively, but one-time migration cleanup only supersedes high-confidence garbage patterns. This protects existing durable memories written in declarative style, such as "API endpoint is X" or "Product branding is Y".
+
+For local development cleanup, use:
+
+```bash
+npm run cleanup:workspaces -- --dry-run
+npm run cleanup:workspaces -- --quarantine
+```
+
+The cleanup command only quarantines definite temp/test workspace residues by default. It does not delete unknown missing-root workspaces.
+
 ## Configuration
 
 OpenCode Working Memory works out of the box.
@@ -210,6 +221,7 @@ cd opencode-working-memory
 npm install
 npm test
 npm run typecheck
+npm run cleanup:workspaces -- --dry-run
 ```
 
 ## Requirements
