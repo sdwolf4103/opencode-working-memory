@@ -2,7 +2,7 @@ import type { LongTermMemoryEntry, WorkspaceMemoryStore } from "./types.ts";
 import { LONG_TERM_LIMITS } from "./types.ts";
 import { workspaceKey, workspaceMemoryPath } from "./paths.ts";
 import { atomicWriteJSON, readJSON, updateJSON } from "./storage.ts";
-import { assessMemoryQuality, isProgressSnapshotViolation } from "./memory-quality.ts";
+import { assessMemoryQuality, isHardQualityReason, isProgressSnapshotViolation } from "./memory-quality.ts";
 
 // Minimum length for workspace_memory envelope: <workspace_memory>\n...\n</workspace_memory>
 const MIN_ENVELOPE_LENGTH = 80;
@@ -188,9 +188,11 @@ export async function normalizeWorkspaceMemoryWithAccounting(
     };
   });
 
-  // One-time migration for legacy snapshot violations
-  result = runMigrationP0Cleanup(result, nowIso);
+  // One-time migrations for legacy/low-quality snapshot violations.
+  // Run quality cleanup first so hard violations receive quality audit tags
+  // before the older P0 project-only cleanup marks progress snapshots.
   result = runMigrationQualityCleanup(result, nowIso);
+  result = runMigrationP0Cleanup(result, nowIso);
 
   // P0 accounting only considers active entries. Entries that were already
   // superseded before this normalization are preserved in storage; entries that
@@ -285,7 +287,7 @@ export function runMigrationP0Cleanup(
   };
 }
 
-function runMigrationQualityCleanup(
+export function runMigrationQualityCleanup(
   store: WorkspaceMemoryStore,
   nowIso: string,
 ): WorkspaceMemoryStore {
@@ -301,11 +303,14 @@ function runMigrationQualityCleanup(
     const quality = assessMemoryQuality(entry);
     if (quality.accepted) return entry;
 
+    const hardReasons = quality.reasons.filter(isHardQualityReason);
+    if (hardReasons.length === 0) return entry;
+
     changed = true;
     const tags = new Set([
       ...(entry.tags ?? []),
       "quality_cleanup",
-      ...quality.reasons.map(reason => `quality:${reason}`),
+      ...hardReasons.map(reason => `quality:${reason}`),
     ]);
 
     return {

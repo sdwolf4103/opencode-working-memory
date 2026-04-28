@@ -9,6 +9,21 @@ export type MemoryQualityResult = {
   reasons: string[];
 };
 
+export const HARD_QUALITY_REASONS: ReadonlySet<string> = new Set([
+  "empty",
+  "progress_snapshot",
+  "raw_error",
+  "commit_or_ci_snapshot",
+  "temporary_status",
+  "active_file_snapshot",
+  "code_or_api_signature",
+  "path_heavy",
+]);
+
+export function isHardQualityReason(reason: string): boolean {
+  return HARD_QUALITY_REASONS.has(reason);
+}
+
 export function assessMemoryQuality(entry: MemoryQualityInput): MemoryQualityResult {
   const reasons: string[] = [];
   const text = entry.text.trim();
