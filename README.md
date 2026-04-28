@@ -174,6 +174,8 @@ It includes guards for:
 
 The goal is to remember durable facts, not every detail.
 
+Historical cleanup is intentionally conservative: extraction-time filtering may reject more aggressively, but one-time migration cleanup only supersedes high-confidence garbage patterns. This protects existing durable memories written in declarative style, such as "API endpoint is X" or "Product branding is Y".
+
 ## Configuration
 
 OpenCode Working Memory works out of the box.
