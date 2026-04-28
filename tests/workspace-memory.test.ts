@@ -16,12 +16,14 @@ import {
   workspaceMemoryIdentityKey,
   redactCredentials,
   runMigrationP0Cleanup,
+  runMigrationQualityCleanup,
   loadWorkspaceMemory,
   saveWorkspaceMemory,
   updateWorkspaceMemoryWithAccounting,
 } from "../src/workspace-memory.ts";
 import { assessMemoryQuality, isHardQualityReason, isProgressSnapshotViolation } from "../src/memory-quality.ts";
 import { reviewerCurrent28Fixture } from "./fixtures/memory-quality-current-28.ts";
+import { REAL_WORKSPACE_FIXTURES } from "./fixtures/real-workspaces-snapshot.ts";
 
 function entry(id: string, text: string, type: LongTermMemoryEntry["type"] = "decision"): LongTermMemoryEntry {
   const now = new Date().toISOString();
@@ -1076,6 +1078,43 @@ test("quality cleanup migration writes audit log for hard supersedes", async () 
     await rm(root, { recursive: true, force: true });
     await rm(dataHome, { recursive: true, force: true });
   }
+});
+
+test("quality cleanup migration regression against real workspace samples", async () => {
+  const failures: string[] = [];
+  const now = "2026-04-28T00:00:00.000Z";
+
+  for (const [workspaceName, fixtureEntries] of Object.entries(REAL_WORKSPACE_FIXTURES)) {
+    const root = `/fixture/${workspaceName}`;
+    const store = {
+      version: 1,
+      workspace: { root, key: workspaceName.padEnd(16, "0").slice(0, 16) },
+      limits: { maxRenderedChars: LONG_TERM_LIMITS.maxRenderedChars, maxEntries: LONG_TERM_LIMITS.maxEntries },
+      entries: fixtureEntries.map(({ expectedAfterMigration, expectation, ...entry }) => entry),
+      migrations: [],
+      updatedAt: now,
+    };
+
+    const result = runMigrationQualityCleanup(store, now).store;
+    const byId = new Map(result.entries.map(entry => [entry.id, entry]));
+
+    for (const original of fixtureEntries) {
+      const after = byId.get(original.id);
+      if (!after) {
+        failures.push(`${workspaceName}/${original.id}: missing after migration`);
+        continue;
+      }
+      if (after.status !== original.expectedAfterMigration) {
+        failures.push(
+          `${workspaceName}/${original.id}: expected ${original.expectedAfterMigration}, got ${after.status}\n` +
+          `  text: ${original.text.slice(0, 120)}\n` +
+          `  why: ${original.expectation}`,
+        );
+      }
+    }
+  }
+
+  assert.equal(failures.length, 0, `Regression failures:\n${failures.join("\n")}`);
 });
 
 test("quality cleanup migration supersedes only hard violations from current fixture", async () => {
