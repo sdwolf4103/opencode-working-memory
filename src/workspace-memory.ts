@@ -2,10 +2,12 @@ import type { LongTermMemoryEntry, WorkspaceMemoryStore } from "./types.ts";
 import { LONG_TERM_LIMITS } from "./types.ts";
 import { workspaceKey, workspaceMemoryPath } from "./paths.ts";
 import { atomicWriteJSON, readJSON, updateJSON } from "./storage.ts";
+import { assessMemoryQuality } from "./memory-quality.ts";
 
 // Minimum length for workspace_memory envelope: <workspace_memory>\n...\n</workspace_memory>
 const MIN_ENVELOPE_LENGTH = 80;
 const MIGRATION_ID = "2026-04-26-p0-cleanup";
+const QUALITY_CLEANUP_MIGRATION_ID = "2026-04-28-quality-cleanup";
 
 const SECRET_VALUE = String.raw`[^` + "`" + String.raw`'",，,\s\[]+`;
 
@@ -188,6 +190,7 @@ export async function normalizeWorkspaceMemoryWithAccounting(
 
   // One-time migration for legacy snapshot violations
   result = runMigrationP0Cleanup(result, nowIso);
+  result = runMigrationQualityCleanup(result, nowIso);
 
   // P0 accounting only considers active entries. Entries that were already
   // superseded before this normalization are preserved in storage; entries that
@@ -282,7 +285,7 @@ export function runMigrationP0Cleanup(
   }
 
   const entries = store.entries.map(entry => {
-    if (entry.source === "explicit") return entry;
+    if (entry.source !== "compaction") return entry;
     if (entry.type !== "project") return entry;
 
     if (isProjectSnapshotViolation(entry.text)) {
@@ -301,6 +304,45 @@ export function runMigrationP0Cleanup(
     entries,
     migrations: [...(store.migrations || []), MIGRATION_ID],
     updatedAt: nowIso,
+  };
+}
+
+function runMigrationQualityCleanup(
+  store: WorkspaceMemoryStore,
+  nowIso: string,
+): WorkspaceMemoryStore {
+  if (store.migrations?.includes(QUALITY_CLEANUP_MIGRATION_ID)) {
+    return store;
+  }
+
+  let changed = false;
+  const entries = store.entries.map(entry => {
+    if (entry.source !== "compaction") return entry;
+    if (entry.status === "superseded") return entry;
+
+    const quality = assessMemoryQuality(entry);
+    if (quality.accepted) return entry;
+
+    changed = true;
+    const tags = new Set([
+      ...(entry.tags ?? []),
+      "quality_cleanup",
+      ...quality.reasons.map(reason => `quality:${reason}`),
+    ]);
+
+    return {
+      ...entry,
+      status: "superseded" as const,
+      updatedAt: nowIso,
+      tags: [...tags],
+    };
+  });
+
+  return {
+    ...store,
+    entries,
+    migrations: [...(store.migrations ?? []), QUALITY_CLEANUP_MIGRATION_ID],
+    updatedAt: changed ? nowIso : store.updatedAt,
   };
 }
 
