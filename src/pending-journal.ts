@@ -169,10 +169,18 @@ export async function clearPendingMemories(
 
     store.entries = store.entries.filter(entry => {
       if (!keys.has(memoryKey(entry))) return true;
-      if (!options.ownerSessionID) return false;
-      if (entry.pendingOwnerSessionID === options.ownerSessionID) return false;
-      if (options.clearUnowned && !entry.pendingOwnerSessionID) return false;
-      return true;
+
+      if (options.ownerSessionID) {
+        if (entry.pendingOwnerSessionID === options.ownerSessionID) return false;
+        if (options.clearUnowned && !entry.pendingOwnerSessionID) return false;
+        return true;
+      }
+
+      if (options.clearUnowned) {
+        return Boolean(entry.pendingOwnerSessionID);
+      }
+
+      return false;
     });
     return store;
   });
@@ -182,7 +190,7 @@ export async function recordPromotionRejections(
   root: string,
   keys: Set<string>,
   reason: string,
-  options: { ownerSessionID?: string } = {},
+  options: { ownerSessionID?: string; includeUnownedOnly?: boolean } = {},
 ): Promise<Set<string>> {
   const exhausted = new Set<string>();
   if (keys.size === 0) return exhausted;
@@ -195,6 +203,7 @@ export async function recordPromotionRejections(
       const key = memoryKey(entry);
       if (!keys.has(key)) return entry;
       if (options.ownerSessionID && entry.pendingOwnerSessionID !== options.ownerSessionID) return entry;
+      if (!options.ownerSessionID && options.includeUnownedOnly && entry.pendingOwnerSessionID) return entry;
 
       const promotionAttempts = (entry.promotionAttempts ?? 0) + 1;
       const max = entry.source === "manual"
