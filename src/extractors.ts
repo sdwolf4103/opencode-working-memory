@@ -248,6 +248,15 @@ async function logExtractionRejection(entry: ExtractionRejectionLogEntry): Promi
   }
 }
 
+function redactSensitiveText(text: string): string {
+  return text
+    .replace(/bearer\s+[a-zA-Z0-9._-]+/gi, "bearer [REDACTED]")
+    .replace(/token[=:]\s*[a-zA-Z0-9._-]+/gi, "token=[REDACTED]")
+    .replace(/password[=:]\s*[a-zA-Z0-9._-]+/gi, "password=[REDACTED]")
+    .replace(/secret[=:]\s*[a-zA-Z0-9._-]+/gi, "secret=[REDACTED]")
+    .replace(/api[-_]?key[=:]\s*[a-zA-Z0-9._-]+/gi, "api_key=[REDACTED]");
+}
+
 function shouldAcceptWorkspaceMemoryCandidate(
   entry: {
     type: LongTermType;
@@ -278,7 +287,7 @@ function shouldAcceptWorkspaceMemoryCandidate(
     void logExtractionRejection({
       timestamp: new Date().toISOString(),
       type: entry.type,
-      text,
+      text: redactSensitiveText(text),
       reasons: quality.reasons,
       source: "compaction",
     });

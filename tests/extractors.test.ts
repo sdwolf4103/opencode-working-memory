@@ -324,6 +324,35 @@ Memory candidates:
   }
 });
 
+test("parseWorkspaceMemoryCandidates redacts secrets in extraction rejection log", async () => {
+  const dataHome = await mkdtemp(join(tmpdir(), "wm-extraction-redact-data-"));
+  const previousXdgDataHome = process.env.XDG_DATA_HOME;
+  process.env.XDG_DATA_HOME = dataHome;
+
+  try {
+    const summary = `
+Memory candidates:
+- reference TypeError: bearer sk_test token=tok123 password=pass123 secret=sec123 api_key=key123
+`;
+
+    const items = parseWorkspaceMemoryCandidates(summary);
+
+    assert.equal(items.length, 0);
+    const logPath = join(dataHome, "opencode-working-memory", "extraction-rejections.jsonl");
+    const lines = (await waitForFile(logPath)).trim().split("\n");
+    assert.equal(lines.length, 1);
+    const event = JSON.parse(lines[0]);
+    assert.equal(
+      event.text,
+      "TypeError: bearer [REDACTED] token=[REDACTED] password=[REDACTED] secret=[REDACTED] api_key=[REDACTED]",
+    );
+  } finally {
+    if (previousXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
+    else process.env.XDG_DATA_HOME = previousXdgDataHome;
+    await rm(dataHome, { recursive: true, force: true });
+  }
+});
+
 test("parseWorkspaceMemoryCandidates rejects exact file count snapshots", () => {
   const summary = `
 Memory candidates:
