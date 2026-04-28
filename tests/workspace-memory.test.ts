@@ -1031,6 +1031,53 @@ test("quality cleanup migration supersedes hard quality violations", async () =>
   }
 });
 
+test("quality cleanup migration writes audit log for hard supersedes", async () => {
+  const root = await mkdtemp(join(tmpdir(), "wm-quality-audit-root-"));
+  const dataHome = await mkdtemp(join(tmpdir(), "wm-quality-audit-data-"));
+  const previousXdgDataHome = process.env.XDG_DATA_HOME;
+  process.env.XDG_DATA_HOME = dataHome;
+
+  try {
+    const now = new Date().toISOString();
+    await saveWorkspaceMemory(root, {
+      version: 1,
+      workspace: { root, key: await workspaceKey(root) },
+      limits: { maxRenderedChars: LONG_TERM_LIMITS.maxRenderedChars, maxEntries: LONG_TERM_LIMITS.maxEntries },
+      entries: [{
+        id: "hard_progress",
+        type: "project",
+        text: "測試套件：1237 tests pass, 226 suites",
+        source: "compaction",
+        confidence: 0.75,
+        status: "active",
+        createdAt: now,
+        updatedAt: now,
+        staleAfterDays: 60,
+      }],
+      migrations: [],
+      updatedAt: now,
+    });
+
+    await loadWorkspaceMemory(root);
+
+    const logPath = join(dataHome, "opencode-working-memory", "migration-logs", "2026-04-28-quality-cleanup.jsonl");
+    const lines = (await readFile(logPath, "utf8")).trim().split("\n");
+    assert.equal(lines.length, 1);
+    const event = JSON.parse(lines[0]);
+    assert.equal(event.migrationId, "2026-04-28-quality-cleanup");
+    assert.equal(event.entryId, "hard_progress");
+    assert.deepEqual(event.hardReasons, ["progress_snapshot"]);
+    assert.equal(event.beforeStatus, "active");
+    assert.equal(event.afterStatus, "superseded");
+    assert.equal(event.text, "測試套件：1237 tests pass, 226 suites");
+  } finally {
+    if (previousXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
+    else process.env.XDG_DATA_HOME = previousXdgDataHome;
+    await rm(root, { recursive: true, force: true });
+    await rm(dataHome, { recursive: true, force: true });
+  }
+});
+
 test("quality cleanup migration supersedes only hard violations from current fixture", async () => {
   const root = await mkdtemp(join(tmpdir(), "wm-quality-cleanup-"));
   try {

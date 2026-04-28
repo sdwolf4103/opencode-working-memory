@@ -28,3 +28,11 @@ export async function sessionStatePath(root: string, sessionID: string): Promise
   const safeSessionID = createHash("sha256").update(sessionID).digest("hex").slice(0, 32);
   return join(await memoryRoot(root), "sessions", `${safeSessionID}.json`);
 }
+
+export function migrationLogPath(migrationId: string): string {
+  return join(dataHome(), "opencode-working-memory", "migration-logs", `${migrationId}.jsonl`);
+}
+
+export function extractionRejectionLogPath(): string {
+  return join(dataHome(), "opencode-working-memory", "extraction-rejections.jsonl");
+}
