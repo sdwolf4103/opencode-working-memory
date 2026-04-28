@@ -1,6 +1,22 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { extractErrorsFromBash, extractExplicitMemories } from "../src/extractors.ts";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { extractErrorsFromBash, extractExplicitMemories, parseWorkspaceMemoryCandidates } from "../src/extractors.ts";
+
+async function waitForFile(path: string, attempts = 20): Promise<string> {
+  let lastError: unknown;
+  for (let i = 0; i < attempts; i += 1) {
+    try {
+      return await readFile(path, "utf8");
+    } catch (error) {
+      lastError = error;
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+  }
+  throw lastError;
+}
 
 // ============================================
 // Task 1: extractErrorsFromBash tests
@@ -129,8 +145,6 @@ test("extractExplicitMemories captures multiple memories in same message", () =>
 // Task 7: Compaction quality gate tests
 // ============================================
 
-import { parseWorkspaceMemoryCandidates } from "../src/extractors.ts";
-
 test("parseWorkspaceMemoryCandidates rejects short text", () => {
   const summary = `
 ## Memory Candidates
@@ -223,7 +237,7 @@ test("parseWorkspaceMemoryCandidates accepts bracketless candidate format", () =
 Memory candidates:
 - project Backend health improvements organized into phased milestones
 - reference Scrypt 參數必須是 N=16384, r=8, p=1
-- feedback 端口 9473 可能被舊進程佔用，需殺掉後重啟
+- feedback User prefers Traditional Chinese memory summaries
 - decision Use output.prompt to replace the default compaction template
 `;
 
@@ -279,6 +293,64 @@ Memory candidates:
 
   const items = parseWorkspaceMemoryCandidates(summary);
   assert.equal(items.length, 0, "Exact test counts are session snapshots, not durable memory");
+});
+
+test("parseWorkspaceMemoryCandidates logs quality gate rejections locally", async () => {
+  const dataHome = await mkdtemp(join(tmpdir(), "wm-extraction-reject-data-"));
+  const previousXdgDataHome = process.env.XDG_DATA_HOME;
+  process.env.XDG_DATA_HOME = dataHome;
+
+  try {
+    const summary = `
+Memory candidates:
+- feedback Wave 1 completed successfully and all tests passed
+`;
+
+    const items = parseWorkspaceMemoryCandidates(summary);
+
+    assert.equal(items.length, 0);
+    const logPath = join(dataHome, "opencode-working-memory", "extraction-rejections.jsonl");
+    const lines = (await waitForFile(logPath)).trim().split("\n");
+    assert.equal(lines.length, 1);
+    const event = JSON.parse(lines[0]);
+    assert.equal(event.type, "feedback");
+    assert.equal(event.text, "Wave 1 completed successfully and all tests passed");
+    assert.deepEqual(event.reasons, ["progress_snapshot", "bad_feedback"]);
+    assert.equal(event.source, "compaction");
+  } finally {
+    if (previousXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
+    else process.env.XDG_DATA_HOME = previousXdgDataHome;
+    await rm(dataHome, { recursive: true, force: true });
+  }
+});
+
+test("parseWorkspaceMemoryCandidates redacts secrets in extraction rejection log", async () => {
+  const dataHome = await mkdtemp(join(tmpdir(), "wm-extraction-redact-data-"));
+  const previousXdgDataHome = process.env.XDG_DATA_HOME;
+  process.env.XDG_DATA_HOME = dataHome;
+
+  try {
+    const summary = `
+Memory candidates:
+- reference TypeError: bearer sk_test token=tok123 password=pass123 secret=sec123 api_key=key123
+`;
+
+    const items = parseWorkspaceMemoryCandidates(summary);
+
+    assert.equal(items.length, 0);
+    const logPath = join(dataHome, "opencode-working-memory", "extraction-rejections.jsonl");
+    const lines = (await waitForFile(logPath)).trim().split("\n");
+    assert.equal(lines.length, 1);
+    const event = JSON.parse(lines[0]);
+    assert.equal(
+      event.text,
+      "TypeError: bearer [REDACTED] token=[REDACTED] password=[REDACTED] secret=[REDACTED] api_key=[REDACTED]",
+    );
+  } finally {
+    if (previousXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
+    else process.env.XDG_DATA_HOME = previousXdgDataHome;
+    await rm(dataHome, { recursive: true, force: true });
+  }
 });
 
 test("parseWorkspaceMemoryCandidates rejects exact file count snapshots", () => {
@@ -451,14 +523,14 @@ test("parseWorkspaceMemoryCandidates allows benign ignore/instruction wording", 
 Memory candidates:
 - [project] Use .gitignore to ignore generated files.
 - [reference] Instruction parser supports Markdown sections and bracketed memory types.
-- [decision] Prompt context uses a frozen workspace snapshot plus hot session state.
+- [decision] Use a frozen workspace snapshot plus hot session state for prompt context.
 `;
   const items = parseWorkspaceMemoryCandidates(summary);
 
   assert.equal(items.length, 3);
   assert.equal(items[0].text, "Use .gitignore to ignore generated files.");
   assert.equal(items[1].text, "Instruction parser supports Markdown sections and bracketed memory types.");
-  assert.equal(items[2].text, "Prompt context uses a frozen workspace snapshot plus hot session state.");
+  assert.equal(items[2].text, "Use a frozen workspace snapshot plus hot session state for prompt context.");
 });
 
 test("parseWorkspaceMemoryCandidates rejects direct system prompt override attempts", () => {

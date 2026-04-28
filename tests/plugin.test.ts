@@ -297,9 +297,9 @@ test("compaction hook sets output.prompt with ---free template", async () => {
       "Prompt should include concrete positive memory examples");
     assert.equal(prompt!.includes("Bad memory examples to skip:"), true,
       "Prompt should include concrete negative memory examples");
-    assert.equal(prompt!.includes("42 tests passed"), true,
+    assert.equal(prompt!.includes("180 tests passed"), true,
       "Prompt should explicitly reject test-count snapshots");
-    assert.equal(prompt!.includes("commit 4309cb8"), true,
+    assert.equal(prompt!.includes("Commit a762e86"), true,
       "Prompt should explicitly reject commit-hash snapshots");
 
     // Should contain our context data (hot session state)
@@ -312,6 +312,27 @@ test("compaction hook sets output.prompt with ---free template", async () => {
     assert.equal(prompt!.startsWith("##"), false,
       "Prompt should start with plain instructions, not a heading");
 
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("compaction prompt forbids progress and session-internal memory candidates", async () => {
+  const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-prompt-"));
+  try {
+    const plugin = await MemoryV2Plugin({ directory: tmpDir, client: mockRootClient() });
+    const output = { prompt: "", context: [] as string[] };
+
+    await (plugin as Record<string, Function>)["experimental.session.compacting"](
+      { sessionID: "prompt-session", model: {} },
+      output,
+    );
+
+    assert.match(output.prompt, /CRITICAL MEMORY RULES/);
+    assert.match(output.prompt, /NO completion or progress statements/i);
+    assert.match(output.prompt, /NO session-internal implementation notes/i);
+    assert.match(output.prompt, /feedback ONLY/i);
+    assert.match(output.prompt, /Most compactions should produce ZERO memories/i);
   } finally {
     await rm(tmpDir, { recursive: true, force: true });
   }

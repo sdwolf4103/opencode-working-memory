@@ -1,6 +1,11 @@
 import { createHash } from "crypto";
+import { appendFile, mkdir } from "node:fs/promises";
+import { dirname } from "node:path";
 import type { ActiveFile, LongTermMemoryEntry, LongTermType, OpenError } from "./types.ts";
 import { LONG_TERM_LIMITS } from "./types.ts";
+import { assessMemoryQuality } from "./memory-quality.ts";
+import { extractionRejectionLogPath } from "./paths.ts";
+import { redactCredentials } from "./redaction.ts";
 
 function id(prefix: string): string {
   return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -51,7 +56,7 @@ export function extractExplicitMemories(text: string): LongTermMemoryEntry[] {
     // 韓文（長詞優先）：기억해줘/메모해줘 must come before 기억해/메모해
     /(?:^|\n)\s*(?:기억해줘|기억해|잊지 마|잊지마|메모해줘|메모해)[:：,，]?\s*(.+)$/gim,
     // 英文：remember this/that - 必須在行首，避免 "to remember" 非指令匹配
-    /(?:^|\n)\s*(?:please\s+)?remember\s+(?:this|that)?[:：,，]?\s*(.+)$/gim,
+    /(?:^|\n)\s*(?:please\s+)?remember(?:\s+(?:this|that))?[:：,，]?\s*(.+)$/gim,
     // save/add to memory
     /(?:^|\n)\s*(?:please\s+)?(?:save|add)\s+(?:this|that)?\s*(?:to|in)\s+memory[:：,，]?\s*(.+)$/gim,
     // commit to memory
@@ -199,7 +204,7 @@ function normalizeCandidateBody(body: string): { text: string; hadTrigger: boole
     /(?:请|請)?(?:帮我|幫我)?(?:记住|記住|记得|記得|记下来|記下來)(?:这一点|這一點|这点|這點|这个|這個)?[:：,，]?\s*(.+)$/im,
     /(?:覚えておいて|覚えて|忘れないで|メモして)[:：,，]?\s*(.+)$/im,
     /(?:기억해줘|기억해|잊지 마|잊지마|메모해줘|메모해)[:：,，]?\s*(.+)$/im,
-    /(?:please\s+)?remember\s+(?:this|that)?[:：,，]?\s*(.+)$/im,
+    /(?:please\s+)?remember(?:\s+(?:this|that))?[:：,，]?\s*(.+)$/im,
     /(?:please\s+)?(?:save|add)\s+(?:this|that)?\s*(?:to|in)\s+memory[:：,，]?\s*(.+)$/im,
     /(?:please\s+)?commit\s+(?:this|that)?\s*to memory[:：,，]?\s*(.+)$/im,
   ];
@@ -223,9 +228,27 @@ function extractFirstPath(text: string): string | undefined {
 }
 
 /**
- * Quality gate for workspace memory candidates.
- * Rejects low-quality entries like git hashes, error messages, etc.
+ * Acceptance gate for workspace memory candidates.
+ * Keeps extraction-specific checks local and delegates memory quality rules to memory-quality.ts.
  */
+type ExtractionRejectionLogEntry = {
+  timestamp: string;
+  type: LongTermType;
+  text: string;
+  reasons: string[];
+  source: "compaction";
+};
+
+async function logExtractionRejection(entry: ExtractionRejectionLogEntry): Promise<void> {
+  try {
+    const path = extractionRejectionLogPath();
+    await mkdir(dirname(path), { recursive: true });
+    await appendFile(path, JSON.stringify(entry) + "\n", "utf8");
+  } catch (error) {
+    console.error("[memory] failed to write extraction rejection log:", error);
+  }
+}
+
 function shouldAcceptWorkspaceMemoryCandidate(
   entry: {
     type: LongTermType;
@@ -245,61 +268,25 @@ function shouldAcceptWorkspaceMemoryCandidate(
     return false;
   }
 
-  // Git history / commit hash
-  if (/\b[0-9a-f]{7,40}\b/.test(text)) return false;
-  if (/^(fix|feat|chore|docs|refactor|test):/i.test(text)) return false;
-
-  // Raw error / stack trace
-  if (/^\s*(Error|TypeError|ReferenceError|SyntaxError):/i.test(text)) return false;
-  if (/at \S+ \([^)]+:\d+:\d+\)/.test(text)) return false;
-
-  // Active file list
-  if (/^(modified|created|deleted|renamed)\s+\S+\.\S+$/i.test(text)) return false;
-
-  // Temporary progress
-  if (/^(currently|now|pending|in progress|todo|wip):/i.test(text)) return false;
-
-  // Code signature / API doc
-  if (/^(function|class|interface|type|const|let|var)\s+\w+/.test(text)) return false;
-  if (/^(GET|POST|PUT|DELETE|PATCH)\s+\//.test(text)) return false;
-
   // Indirect Prompt Injection / Adversarial Instructions
   // Rejects attempts to overwrite system behavior or "ignore" rules.
   // comparative "instead of" is allowed.
   if (/\b(ignore\s+all|ignore\s+previous|ignore\s+instruction|overwrite\s+system|overwrite\s+rules|forget\s+all|delete\s+root)\b/i.test(text)) return false;
   if (/\b(ignore|instruction|overwrite)\b/i.test(text) && /\b(previous|all|rules|behavior|prompt|system)\b/i.test(text)) return false;
 
-  // Path-heavy facts (rediscoverable from repo)
-  const pathCount = (text.match(/\/[\w.-]+(\/[\w.-]+)+/g) || []).length;
-  if (pathCount > 2) return false;
-
-  // Session-specific progress snapshots for project type
-  if (entry.type === "project") {
-    if (isProjectSnapshotViolation(text)) return false;
+  const quality = assessMemoryQuality({ type: entry.type, text, source: "compaction" });
+  if (!quality.accepted) {
+    void logExtractionRejection({
+      timestamp: new Date().toISOString(),
+      type: entry.type,
+      text: redactCredentials(text),
+      reasons: quality.reasons,
+      source: "compaction",
+    });
+    return false;
   }
 
   return true;
-}
-
-function isProjectSnapshotViolation(text: string): boolean {
-  // Test/suite counts
-  if (/\d+\s+tests?\s+pass(?:ed)?/i.test(text)) return true;
-  if (/\d+\s+suites?\s+(?:pass|fail)/i.test(text)) return true;
-
-  // File counts with snapshot/process context only, not static limits
-  if (/\d+\s*(?:個|个)?\s*(?:files?|文件)/i.test(text)) {
-    const hasSnapshotContext = /同步|synced|uploaded|downloaded|completed|generated|created|modified|processed|完成/i.test(text);
-    const hasLimitContext = /limit|max|maximum|min|minimum|supports?|allowed|per\s+(?:batch|request|upload)/i.test(text);
-    if (hasSnapshotContext && !hasLimitContext) return true;
-  }
-
-  // Phase/Wave/Sprint/Milestone/Task progress
-  if (/(?:phases?|waves?|sprints?|milestones?|tasks?)\s*\d+(?:\s*[-–]\s*\d+)?/i.test(text)) {
-    if (/completed|done|finished|完成/i.test(text)) return true;
-  }
-  if (/(?:已完成|完成).{0,30}(?:phases?|waves?|sprints?|milestones?|tasks?)/i.test(text)) return true;
-
-  return false;
 }
 
 /**
