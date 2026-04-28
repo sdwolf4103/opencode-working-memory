@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Local extraction rejection log for rejected compaction memory candidates:
   `~/.local/share/opencode-working-memory/extraction-rejections.jsonl`.
 - Sanitized real-workspace regression fixtures for memory cleanup migration behavior.
+- Safe workspace residue cleanup tooling that dry-runs by default and quarantines definite temp/test workspace stores instead of deleting them.
 
 ### Changed
 
@@ -21,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Rewritten compaction memory prompt to reduce over-production of low-quality memories.
 - Changed quality cleanup migration to be conservative: it supersedes only high-confidence garbage patterns, including progress snapshots, raw errors, commit/CI snapshots, temporary status notes, active file snapshots, code/API signatures, path-heavy entries, and empty entries.
 - Soft heuristic failures (`bad_feedback`, `bad_decision`) are intentionally excluded from automatic migration cleanup to protect durable declarative memories such as branding rules, API facts, release rules, user workflow preferences, and architecture decisions.
+- Isolated test runs under a temporary `XDG_DATA_HOME` so test workspaces no longer pollute real local workspace memory data.
 
 ### Recovery note
 

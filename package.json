@@ -16,7 +16,8 @@
   "scripts": {
     "build": "node -e \"console.log('No build step required: OpenCode loads index.ts directly')\"",
     "typecheck": "tsc --noEmit",
-    "test": "node --test --experimental-strip-types tests/*.test.ts",
+    "test": "node --import ./tests/setup-xdg-data-home.ts --test --experimental-strip-types tests/*.test.ts",
+    "cleanup:workspaces": "node --experimental-strip-types scripts/dev/cleanup-workspaces.ts",
     "check:compat": "npm install --no-save @opencode-ai/plugin@latest && npm run typecheck && npm test"
   },
   "keywords": [

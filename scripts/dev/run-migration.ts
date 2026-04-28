@@ -2,12 +2,12 @@
  * Local helper to trigger migration on workspace roots.
  *
  * Usage:
- *   MIGRATION_DRY_RUN_ROOTS=/path/a:/path/b bun run scripts/dev/dry-run-migration.ts
+ *   MIGRATION_RUN_ROOTS=/path/a:/path/b bun run scripts/dev/run-migration.ts
  *
  * Or create a local file (gitignored):
- *   echo "/path/to/workspace1" > scripts/dev/dry-run-roots.local.txt
- *   echo "/path/to/workspace2" >> scripts/dev/dry-run-roots.local.txt
- *   bun run scripts/dev/dry-run-migration.ts
+ *   echo "/path/to/workspace1" > scripts/dev/run-migration-roots.local.txt
+ *   echo "/path/to/workspace2" >> scripts/dev/run-migration-roots.local.txt
+ *   bun run scripts/dev/run-migration.ts
  */
 
 import { existsSync } from "node:fs";
@@ -17,13 +17,13 @@ import { loadWorkspaceMemory } from "../../src/workspace-memory.ts";
 
 async function getRoots(): Promise<string[]> {
   // Priority 1: environment variable
-  const envRoots = process.env.MIGRATION_DRY_RUN_ROOTS;
+  const envRoots = process.env.MIGRATION_RUN_ROOTS;
   if (envRoots) {
     return envRoots.split(":").filter(root => root.length > 0);
   }
 
   // Priority 2: local file
-  const localFile = join(import.meta.dirname, "dry-run-roots.local.txt");
+  const localFile = join(import.meta.dirname, "run-migration-roots.local.txt");
   if (existsSync(localFile)) {
     const content = await readFile(localFile, "utf8");
     return content.trim().split("\n").filter(root => root.length > 0);
@@ -31,7 +31,7 @@ async function getRoots(): Promise<string[]> {
 
   // No roots configured
   console.log("No workspace roots configured.");
-  console.log("Set MIGRATION_DRY_RUN_ROOTS=/path/a:/path/b or create dry-run-roots.local.txt");
+  console.log("Set MIGRATION_RUN_ROOTS=/path/a:/path/b or create run-migration-roots.local.txt");
   return [];
 }
 

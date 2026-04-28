@@ -5,23 +5,12 @@ import { LONG_TERM_LIMITS } from "./types.ts";
 import { migrationLogPath, workspaceKey, workspaceMemoryPath } from "./paths.ts";
 import { atomicWriteJSON, readJSON, updateJSON } from "./storage.ts";
 import { assessMemoryQuality, isHardQualityReason, isProgressSnapshotViolation } from "./memory-quality.ts";
+import { redactCredentials } from "./redaction.ts";
 
 // Minimum length for workspace_memory envelope: <workspace_memory>\n...\n</workspace_memory>
 const MIN_ENVELOPE_LENGTH = 80;
 const MIGRATION_ID = "2026-04-26-p0-cleanup";
 const QUALITY_CLEANUP_MIGRATION_ID = "2026-04-28-quality-cleanup";
-
-const SECRET_VALUE = String.raw`[^` + "`" + String.raw`'",，,\s\[]+`;
-
-const PASSWORD_LABELS = /password|passwd|pwd|密碼|密码|パスワード|비밀번호|contraseña|mot de passe|passwort/i;
-const USERNAME_LABELS = /username|user name|用戶名|用户名|ユーザー名|사용자명|usuario|utilisateur|benutzer/i;
-const SENSITIVE_LABELS = /api[_-]?key|token|bearer|secret|credential|auth|auth[_-]?key|private[_-]?key/i;
-
-const PIN_PREFIX = String.raw`(\bPIN\b(?:\s*(?:是|=|:|：)\s*|\s+(?![是=:：])))`;
-const PASSWORD_PREFIX = String.raw`((?:${PASSWORD_LABELS.source})(?:\s*(?:是|=|:|：)\s*|\s+(?![是=:：])))`;
-const USERNAME_PREFIX = String.raw`((?:${USERNAME_LABELS.source})(?:\s*(?:是|=|:|：)\s*|\s+(?![是=:：])))`;
-const SENSITIVE_PREFIX = String.raw`((?:${SENSITIVE_LABELS.source})(?:\s*(?:推|是|=|:|：)\s*|[:：]\s*))`;
-const BEARER_PREFIX = String.raw`(Bearer\s+)`;
 
 export type MemoryConsolidationReason =
   | "promoted"
@@ -248,44 +237,6 @@ export async function normalizeWorkspaceMemoryWithAccounting(
     superseded: accounting.superseded,
     events: [...accounting.dropped, ...accounting.absorbed, ...accounting.superseded],
   };
-}
-
-export function redactCredentials(text: string): string {
-  let result = text;
-
-  // 1. PIN
-  result = result.replace(
-    new RegExp(String.raw`${PIN_PREFIX}[\`'"]?(${SECRET_VALUE})`, "gi"),
-    "$1[REDACTED]",
-  );
-
-  // 2. Username+password pair
-  result = result.replace(
-    new RegExp(
-      String.raw`${USERNAME_PREFIX}[\`'"]?(${SECRET_VALUE})((?:，|,)\s*)${PASSWORD_PREFIX}[\`'"]?(${SECRET_VALUE})`,
-      "gi",
-    ),
-    "$1[REDACTED]$3$4[REDACTED]",
-  );
-
-  // 3. Standalone password
-  result = result.replace(
-    new RegExp(String.raw`${PASSWORD_PREFIX}[\`'"]?(${SECRET_VALUE})`, "gi"),
-    "$1[REDACTED]",
-  );
-
-  // 4. Standalone sensitive keys/tokens
-  result = result.replace(
-    new RegExp(String.raw`${BEARER_PREFIX}(?!token\s*[:=：])[\`'"]?(${SECRET_VALUE})`, "gi"),
-    "$1[REDACTED]",
-  );
-
-  result = result.replace(
-    new RegExp(String.raw`${SENSITIVE_PREFIX}[\`'"]?(${SECRET_VALUE})`, "gi"),
-    "$1[REDACTED]",
-  );
-
-  return result;
 }
 
 export function runMigrationP0Cleanup(

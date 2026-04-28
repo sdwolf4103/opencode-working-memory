@@ -52,5 +52,6 @@ pnpm-lock.yaml
 # Superpowers local planning artifacts
 docs/superpowers/plans/
 
-# Local migration dry-run roots
+# Local dev/admin script inputs
+scripts/dev/run-migration-roots.local.txt
 scripts/dev/dry-run-roots.local.txt

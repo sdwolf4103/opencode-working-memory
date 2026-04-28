@@ -16,6 +16,8 @@ The quality gate is now shared across compaction extraction and migration checks
 - **Audit logs**: automatic migration cleanup writes local JSONL audit records so superseded entries can be inspected and restored.
 - **Extraction rejection logs**: newly rejected compaction candidates are logged locally to help calibrate future quality rules.
 - **Regression coverage**: migration behavior is tested against sanitized real-workspace patterns to prevent mass false positives from coming back.
+- **Workspace cleanup tooling**: a dev/admin cleanup command can dry-run or quarantine definite temp/test workspace residues without deleting unknown missing-root workspaces.
+- **Test storage isolation**: test runs now use a temporary `XDG_DATA_HOME`, preventing fixture workspaces from polluting real local memory data.
 
 ### What Gets Cleaned Up
 
@@ -62,6 +64,22 @@ Explicit and manual memories are also protected.
 ### Recovery
 
 If a useful memory is superseded, inspect the migration audit log and restore the entry by changing its status back to `"active"` in the workspace's `workspace-memory.json`.
+
+### Workspace Residue Cleanup
+
+If old test/temp workspace stores already exist locally, inspect them first:
+
+```bash
+npm run cleanup:workspaces -- --dry-run
+```
+
+To move definite temp/test residues into a local quarantine folder instead of deleting them:
+
+```bash
+npm run cleanup:workspaces -- --quarantine
+```
+
+The cleanup command skips existing workspace roots and unknown missing-root workspaces by default.
 
 ### Upgrade Notes
 

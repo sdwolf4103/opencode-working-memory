@@ -5,6 +5,7 @@ import type { ActiveFile, LongTermMemoryEntry, LongTermType, OpenError } from ".
 import { LONG_TERM_LIMITS } from "./types.ts";
 import { assessMemoryQuality } from "./memory-quality.ts";
 import { extractionRejectionLogPath } from "./paths.ts";
+import { redactCredentials } from "./redaction.ts";
 
 function id(prefix: string): string {
   return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -248,15 +249,6 @@ async function logExtractionRejection(entry: ExtractionRejectionLogEntry): Promi
   }
 }
 
-function redactSensitiveText(text: string): string {
-  return text
-    .replace(/bearer\s+[a-zA-Z0-9._-]+/gi, "bearer [REDACTED]")
-    .replace(/token[=:]\s*[a-zA-Z0-9._-]+/gi, "token=[REDACTED]")
-    .replace(/password[=:]\s*[a-zA-Z0-9._-]+/gi, "password=[REDACTED]")
-    .replace(/secret[=:]\s*[a-zA-Z0-9._-]+/gi, "secret=[REDACTED]")
-    .replace(/api[-_]?key[=:]\s*[a-zA-Z0-9._-]+/gi, "api_key=[REDACTED]");
-}
-
 function shouldAcceptWorkspaceMemoryCandidate(
   entry: {
     type: LongTermType;
@@ -287,7 +279,7 @@ function shouldAcceptWorkspaceMemoryCandidate(
     void logExtractionRejection({
       timestamp: new Date().toISOString(),
       type: entry.type,
-      text: redactSensitiveText(text),
+      text: redactCredentials(text),
       reasons: quality.reasons,
       source: "compaction",
     });
