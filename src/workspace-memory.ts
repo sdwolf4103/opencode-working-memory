@@ -17,6 +17,7 @@ const PIN_PREFIX = String.raw`(\bPIN\b(?:\s*(?:是|=|:|：)\s*|\s+(?![是=:：])
 const PASSWORD_PREFIX = String.raw`((?:${PASSWORD_LABELS.source})(?:\s*(?:是|=|:|：)\s*|\s+(?![是=:：])))`;
 const USERNAME_PREFIX = String.raw`((?:${USERNAME_LABELS.source})(?:\s*(?:是|=|:|：)\s*|\s+(?![是=:：])))`;
 const SENSITIVE_PREFIX = String.raw`((?:${SENSITIVE_LABELS.source})(?:\s*(?:推|是|=|:|：)\s*|[:：]\s*))`;
+const BEARER_PREFIX = String.raw`(Bearer\s+)`;
 
 export type MemoryConsolidationReason =
   | "promoted"
@@ -79,30 +80,33 @@ export async function loadWorkspaceMemory(root: string): Promise<WorkspaceMemory
   };
 
   // Always normalize on load so redaction/migrations are always-on.
-  const normalized = await normalizeWorkspaceMemory(root, store);
+  const normalized = await normalizeWorkspaceMemoryWithAccounting(root, store);
 
-  // Persist only when meaningful content changed (ignore timestamps).
-  if (didStoreMeaningfullyChange(store, normalized)) {
-    await atomicWriteJSON(path, normalized);
+  // Persist security/correctness mutations, but avoid read-time maintenance
+  // writes for ordering/capacity/timestamp-only normalization.
+  if (hasSecurityOrMigrationChange(store, normalized.store)) {
+    await atomicWriteJSON(path, normalized.store);
   }
 
-  return normalized;
+  return normalized.store;
 }
 
-function didStoreMeaningfullyChange(
+function hasSecurityOrMigrationChange(
   before: WorkspaceMemoryStore,
   after: WorkspaceMemoryStore,
 ): boolean {
-  const sanitize = (store: WorkspaceMemoryStore) => ({
-    ...store,
-    updatedAt: "",
-    entries: store.entries.map(entry => ({
-      ...entry,
-      updatedAt: "",
-    })),
-  });
+  const beforeById = new Map((before.entries ?? []).map(entry => [entry.id, entry]));
+  for (const afterEntry of after.entries ?? []) {
+    const beforeEntry = beforeById.get(afterEntry.id);
+    if (!beforeEntry) continue;
+    if (beforeEntry.text !== afterEntry.text) return true;
+    if ((beforeEntry.rationale ?? "") !== (afterEntry.rationale ?? "")) return true;
+    if (beforeEntry.status !== afterEntry.status) return true;
+  }
 
-  return JSON.stringify(sanitize(before)) !== JSON.stringify(sanitize(after));
+  const beforeMigrations = JSON.stringify(before.migrations ?? []);
+  const afterMigrations = JSON.stringify(after.migrations ?? []);
+  return beforeMigrations !== afterMigrations;
 }
 
 export async function saveWorkspaceMemory(root: string, store: WorkspaceMemoryStore): Promise<void> {
@@ -234,6 +238,11 @@ export function redactCredentials(text: string): string {
   );
 
   // 4. Standalone sensitive keys/tokens
+  result = result.replace(
+    new RegExp(String.raw`${BEARER_PREFIX}(?!token\s*[:=：])[\`'"]?(${SECRET_VALUE})`, "gi"),
+    "$1[REDACTED]",
+  );
+
   result = result.replace(
     new RegExp(String.raw`${SENSITIVE_PREFIX}[\`'"]?(${SECRET_VALUE})`, "gi"),
     "$1[REDACTED]",
@@ -556,12 +565,14 @@ export function dedupeLongTermEntriesWithAccounting(entries: LongTermMemoryEntry
 }
 
 function compareLongTermMemoryForRetention(a: LongTermMemoryEntry, b: LongTermMemoryEntry): number {
-  const pA = priorityWithFreshness(a);
-  const pB = priorityWithFreshness(b);
+  const pA = priority(a);
+  const pB = priority(b);
   if (pB !== pA) return pB - pA;
   const sourceDiff = sourcePriority(b.source) - sourcePriority(a.source);
   if (sourceDiff !== 0) return sourceDiff;
-  return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+  const createdDiff = new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+  if (createdDiff !== 0) return createdDiff;
+  return a.id.localeCompare(b.id);
 }
 
 function priority(entry: LongTermMemoryEntry): number {
@@ -574,11 +585,6 @@ function priority(entry: LongTermMemoryEntry): number {
 
   const sourceWeight = entry.source === "explicit" ? 1000 : 0;
   return sourceWeight + typeWeight + entry.confidence * 10;
-}
-
-/** Extended priority including freshness for tie-breaking */
-function priorityWithFreshness(entry: LongTermMemoryEntry): number {
-  return priority(entry);
 }
 
 function wouldFit(

@@ -209,6 +209,25 @@ test("accountPendingPromotions keeps explicit capacity rejection pending", () =>
 
   assert.deepEqual([...result.rejectedKeys], [memoryKey(pending[0])]);
   assert.equal(result.clearableKeys.size, 0);
+  assert.deepEqual([...result.retryableRejectedKeys], [memoryKey(pending[0])]);
+});
+
+test("accountPendingPromotions marks manual capacity rejection as retryable", () => {
+  const pending = [mem("pending_manual_capacity", "Manual reference should retry if capacity rejected.", {
+    type: "reference",
+    source: "manual",
+  })];
+
+  const result = accountPendingPromotions({
+    pending,
+    before: [],
+    after: [],
+    events: [event(pending[0], "rejected_capacity")],
+  });
+
+  assert.deepEqual([...result.rejectedKeys], [memoryKey(pending[0])]);
+  assert.equal(result.clearableKeys.size, 0);
+  assert.deepEqual([...result.retryableRejectedKeys], [memoryKey(pending[0])]);
 });
 
 test("accountPendingPromotions clears compaction stale rejection from accounting", () => {

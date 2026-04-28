@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import type { LongTermMemoryEntry, WorkspaceMemoryStore } from "../src/types.ts";
@@ -34,6 +34,10 @@ function entry(id: string, text: string, type: LongTermMemoryEntry["type"] = "de
     createdAt: now,
     updatedAt: now,
   };
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 /** Create an entry with a createdAt offset from now (negative = in the past) */
@@ -247,6 +251,26 @@ test("enforceLongTermLimits respects maxEntries limit", () => {
 
   const kept = enforceLongTermLimits(entries);
   assert.ok(kept.length <= 28, `Should respect maxEntries. Got: ${kept.length}`);
+});
+
+test("normalization ordering is deterministic for retention ties", () => {
+  const createdAt = "2026-04-28T00:00:00.000Z";
+  const a = {
+    ...entry("a", "Durable unique memory A"),
+    createdAt,
+    updatedAt: createdAt,
+  };
+  const b = {
+    ...entry("b", "Durable unique memory B"),
+    createdAt,
+    updatedAt: createdAt,
+  };
+
+  const first = enforceLongTermLimits([b, a]).map(memory => memory.id);
+  const second = enforceLongTermLimits([a, b]).map(memory => memory.id);
+
+  assert.deepEqual(first, ["a", "b"]);
+  assert.deepEqual(second, ["a", "b"]);
 });
 
 test("dedupeLongTermEntriesWithAccounting reports exact duplicates as absorbed", () => {
@@ -796,6 +820,21 @@ test("redactCredentials handles generic API keys and tokens", () => {
   assert.equal(redactCredentials("auth: abc123def"), "auth: [REDACTED]");
 });
 
+test("redactCredentials redacts bearer tokens", () => {
+  assert.equal(
+    redactCredentials("Bearer sk-test-123"),
+    "Bearer [REDACTED]",
+  );
+  assert.equal(
+    redactCredentials("Authorization: Bearer sk-test-123"),
+    "Authorization: Bearer [REDACTED]",
+  );
+  assert.equal(
+    redactCredentials("curl -H 'Authorization: Bearer ghp_secret123'"),
+    "curl -H 'Authorization: Bearer [REDACTED]'",
+  );
+});
+
 test("redactCredentials does not redact benign security-related wording", () => {
   assert.equal(redactCredentials("token budget is 5200 characters"), "token budget is 5200 characters");
   assert.equal(redactCredentials("auth config uses OAuth"), "auth config uses OAuth");
@@ -949,6 +988,178 @@ test("renderWorkspaceMemory excludes superseded entries", () => {
   const rendered = renderWorkspaceMemory(store);
   assert.match(rendered, /Use pnpm/);
   assert.doesNotMatch(rendered, /Waves 1-5 已完成/);
+});
+
+test("loadWorkspaceMemory does not rewrite an already normalized store", async () => {
+  const sandbox = await mkdtemp(join(tmpdir(), "wm-normalized-"));
+  const dataHome = join(sandbox, "xdg-data-home");
+  const root = join(sandbox, "workspace");
+  const previousXdgDataHome = process.env.XDG_DATA_HOME;
+  process.env.XDG_DATA_HOME = dataHome;
+
+  try {
+    await mkdir(root, { recursive: true });
+    const now = "2026-04-28T00:00:00.000Z";
+    await saveWorkspaceMemory(root, {
+      version: 1,
+      workspace: { root, key: "test" },
+      limits: {
+        maxRenderedChars: LONG_TERM_LIMITS.maxRenderedChars,
+        maxEntries: LONG_TERM_LIMITS.maxEntries,
+      },
+      entries: [
+        {
+          ...entry("normalized-feedback", "Normalized feedback memory", "feedback"),
+          source: "explicit",
+          confidence: 1,
+          createdAt: now,
+          updatedAt: now,
+        },
+      ],
+      migrations: [],
+      updatedAt: now,
+    });
+
+    const storePath = await workspaceMemoryPath(root);
+    const before = (await stat(storePath)).mtimeMs;
+    await sleep(20);
+
+    await loadWorkspaceMemory(root);
+    await loadWorkspaceMemory(root);
+
+    const after = (await stat(storePath)).mtimeMs;
+    assert.equal(after, before, "normalized loads should not touch the store file");
+  } finally {
+    if (previousXdgDataHome === undefined) {
+      delete process.env.XDG_DATA_HOME;
+    } else {
+      process.env.XDG_DATA_HOME = previousXdgDataHome;
+    }
+    await rm(sandbox, { recursive: true, force: true });
+  }
+});
+
+test("loadWorkspaceMemory does not persist pure ordering normalization", async () => {
+  const sandbox = await mkdtemp(join(tmpdir(), "wm-ordering-"));
+  const dataHome = join(sandbox, "xdg-data-home");
+  const root = join(sandbox, "workspace");
+  const previousXdgDataHome = process.env.XDG_DATA_HOME;
+  process.env.XDG_DATA_HOME = dataHome;
+
+  try {
+    await mkdir(root, { recursive: true });
+    const now = "2026-04-28T00:00:00.000Z";
+    await saveWorkspaceMemory(root, {
+      version: 1,
+      workspace: { root, key: "test" },
+      limits: {
+        maxRenderedChars: LONG_TERM_LIMITS.maxRenderedChars,
+        maxEntries: LONG_TERM_LIMITS.maxEntries,
+      },
+      entries: [
+        {
+          ...entry("feedback-first", "High priority feedback memory", "feedback"),
+          source: "explicit",
+          confidence: 1,
+          createdAt: now,
+          updatedAt: now,
+        },
+        {
+          ...entry("reference-second", "Lower priority reference memory", "reference"),
+          source: "compaction",
+          confidence: 0.75,
+          createdAt: now,
+          updatedAt: now,
+        },
+      ],
+      migrations: [],
+      updatedAt: now,
+    });
+
+    const storePath = await workspaceMemoryPath(root);
+    const canonical = JSON.parse(await readFile(storePath, "utf-8")) as WorkspaceMemoryStore;
+    await writeFile(
+      storePath,
+      JSON.stringify({ ...canonical, entries: [...canonical.entries].reverse() }, null, 2),
+      "utf-8",
+    );
+
+    const before = (await stat(storePath)).mtimeMs;
+    await sleep(20);
+    const loaded = await loadWorkspaceMemory(root);
+    const after = (await stat(storePath)).mtimeMs;
+
+    assert.deepEqual(loaded.entries.map(memory => memory.id), ["feedback-first", "reference-second"]);
+    assert.equal(after, before, "order-only normalization should not write during load");
+  } finally {
+    if (previousXdgDataHome === undefined) {
+      delete process.env.XDG_DATA_HOME;
+    } else {
+      process.env.XDG_DATA_HOME = previousXdgDataHome;
+    }
+    await rm(sandbox, { recursive: true, force: true });
+  }
+});
+
+test("loadWorkspaceMemory persists redaction changes and is stable afterward", async () => {
+  const sandbox = await mkdtemp(join(tmpdir(), "wm-redact-stable-"));
+  const dataHome = join(sandbox, "xdg-data-home");
+  const root = join(sandbox, "workspace");
+  const previousXdgDataHome = process.env.XDG_DATA_HOME;
+  process.env.XDG_DATA_HOME = dataHome;
+
+  try {
+    await mkdir(root, { recursive: true });
+    const now = "2026-04-28T00:00:00.000Z";
+    const unredactedStore: WorkspaceMemoryStore = {
+      version: 1,
+      workspace: { root, key: "test" },
+      limits: {
+        maxRenderedChars: LONG_TERM_LIMITS.maxRenderedChars,
+        maxEntries: LONG_TERM_LIMITS.maxEntries,
+      },
+      entries: [
+        {
+          id: "bearer-secret",
+          text: "Authorization: Bearer sk-test-123",
+          rationale: "password: sushi",
+          type: "reference",
+          source: "manual",
+          confidence: 0.9,
+          status: "active",
+          createdAt: now,
+          updatedAt: now,
+        },
+      ],
+      migrations: ["2026-04-26-p0-cleanup"],
+      updatedAt: now,
+    };
+
+    const storePath = await workspaceMemoryPath(root);
+    await mkdir(dirname(storePath), { recursive: true });
+    await writeFile(storePath, JSON.stringify(unredactedStore, null, 2), "utf-8");
+
+    const loaded = await loadWorkspaceMemory(root);
+    assert.equal(loaded.entries[0].text, "Authorization: Bearer [REDACTED]");
+    assert.equal(loaded.entries[0].rationale, "password: [REDACTED]");
+
+    const persistedAfterFirstLoad = await readFile(storePath, "utf-8");
+    assert.equal(persistedAfterFirstLoad.includes("sk-test-123"), false);
+    assert.equal(persistedAfterFirstLoad.includes("sushi"), false);
+
+    const beforeSecondLoad = (await stat(storePath)).mtimeMs;
+    await sleep(20);
+    await loadWorkspaceMemory(root);
+    const afterSecondLoad = (await stat(storePath)).mtimeMs;
+    assert.equal(afterSecondLoad, beforeSecondLoad, "second load should not rewrite redacted content");
+  } finally {
+    if (previousXdgDataHome === undefined) {
+      delete process.env.XDG_DATA_HOME;
+    } else {
+      process.env.XDG_DATA_HOME = previousXdgDataHome;
+    }
+    await rm(sandbox, { recursive: true, force: true });
+  }
 });
 
 test("loadWorkspaceMemory normalizes and persists credentials from legacy unredacted store", async () => {

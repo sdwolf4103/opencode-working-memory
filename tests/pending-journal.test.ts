@@ -6,16 +6,20 @@
 
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert";
-import { mkdir, rm } from "fs/promises";
+import { mkdir, mkdtemp as fsMkdtemp, rm } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
 import {
   loadPendingJournal,
   savePendingJournal,
   appendPendingMemories,
+  clearPendingMemories,
+  recordPromotionRejections,
+  memoryKey,
   PENDING_JOURNAL_LIMITS,
 } from "../src/pending-journal.ts";
 import type { LongTermMemoryEntry } from "../src/types.ts";
+import { PROMOTION_RETRY_LIMITS } from "../src/types.ts";
 
 describe("pending journal retention", () => {
   let testDir: string;
@@ -193,22 +197,38 @@ describe("pending journal retention", () => {
     );
   });
 
-  it("savePendingJournal prunes stale entries regardless of source", async () => {
+  it("retains old explicit and manual pending entries while under cap", async () => {
     const now = new Date();
     const staleDate = new Date(now.getTime() - 35 * 24 * 60 * 60 * 1000);
 
     const entries: LongTermMemoryEntry[] = [
       {
-        type: "decision",
-        text: "Stale explicit entry",
+        id: "explicit_old",
+        type: "feedback",
+        text: "Old explicit preference",
         source: "explicit",
+        confidence: 1,
+        status: "active",
         createdAt: staleDate.toISOString(),
         updatedAt: staleDate.toISOString(),
       },
       {
-        type: "decision",
-        text: "Stale compaction entry",
+        id: "manual_old",
+        type: "reference",
+        text: "Old manual reference",
+        source: "manual",
+        confidence: 1,
+        status: "active",
+        createdAt: staleDate.toISOString(),
+        updatedAt: staleDate.toISOString(),
+      },
+      {
+        id: "compaction_old",
+        type: "reference",
+        text: "Old compaction reference",
         source: "compaction",
+        confidence: 0.75,
+        status: "active",
         createdAt: staleDate.toISOString(),
         updatedAt: staleDate.toISOString(),
       },
@@ -223,13 +243,173 @@ describe("pending journal retention", () => {
 
     const loaded = await loadPendingJournal(testDir);
 
-    // Both explicit and compaction entries past maxAgeDays are pruned
-    // Retention does not differentiate by source
-    assert.strictEqual(
-      loaded.entries.length,
-      0,
-      "Stale entries should be pruned regardless of source"
+    assert.deepEqual(loaded.entries.map(entry => entry.id), ["explicit_old", "manual_old"]);
+  });
+
+  it("clears only entries matching both key and owner when owner is supplied", async () => {
+    const now = new Date().toISOString();
+    await appendPendingMemories(testDir, [
+      {
+        id: "a",
+        type: "feedback",
+        text: "Session A preference",
+        source: "explicit",
+        confidence: 1,
+        status: "active",
+        createdAt: now,
+        updatedAt: now,
+        pendingOwnerSessionID: "session-a",
+      },
+      {
+        id: "b",
+        type: "feedback",
+        text: "Session B preference",
+        source: "explicit",
+        confidence: 1,
+        status: "active",
+        createdAt: now,
+        updatedAt: now,
+        pendingOwnerSessionID: "session-b",
+      },
+    ]);
+
+    await clearPendingMemories(
+      testDir,
+      new Set(["feedback:session a preference", "feedback:session b preference"]),
+      { ownerSessionID: "session-a" },
     );
+
+    const loaded = await loadPendingJournal(testDir);
+    assert.deepEqual(loaded.entries.map(entry => entry.pendingOwnerSessionID), ["session-b"]);
+  });
+
+  it("retains same-key pending entries owned by different sessions", async () => {
+    const now = new Date().toISOString();
+    await appendPendingMemories(testDir, [
+      {
+        id: "same-a",
+        type: "feedback",
+        text: "Prefer owner-scoped promotion.",
+        source: "explicit",
+        confidence: 1,
+        status: "active",
+        createdAt: now,
+        updatedAt: now,
+        pendingOwnerSessionID: "session-a",
+      },
+      {
+        id: "same-b",
+        type: "feedback",
+        text: "Prefer owner-scoped promotion.",
+        source: "explicit",
+        confidence: 1,
+        status: "active",
+        createdAt: now,
+        updatedAt: now,
+        pendingOwnerSessionID: "session-b",
+      },
+    ]);
+
+    const loaded = await loadPendingJournal(testDir);
+
+    assert.deepEqual(
+      loaded.entries.map(entry => entry.pendingOwnerSessionID).sort(),
+      ["session-a", "session-b"],
+      "same memory key must remain separately retryable/clearable per owner",
+    );
+  });
+
+  it("records bounded promotion rejection attempts and exhausts only matching owner", async () => {
+    const now = new Date().toISOString();
+    const sessionA: LongTermMemoryEntry = {
+      id: "reject-a",
+      type: "reference",
+      text: "Capacity rejected explicit reference.",
+      source: "explicit",
+      confidence: 0.1,
+      status: "active",
+      createdAt: now,
+      updatedAt: now,
+      pendingOwnerSessionID: "session-a",
+    };
+    const sessionB: LongTermMemoryEntry = {
+      ...sessionA,
+      id: "reject-b",
+      pendingOwnerSessionID: "session-b",
+    };
+    await appendPendingMemories(testDir, [sessionA, sessionB]);
+
+    for (let attempt = 1; attempt < PROMOTION_RETRY_LIMITS.maxExplicitAttempts; attempt += 1) {
+      const exhausted = await recordPromotionRejections(
+        testDir,
+        new Set([memoryKey(sessionA)]),
+        "rejected_capacity",
+        { ownerSessionID: "session-a" },
+      );
+
+      assert.equal(exhausted.size, 0, "entry should not exhaust before the max attempt");
+      const loaded = await loadPendingJournal(testDir);
+      const ownedA = loaded.entries.find(entry => entry.pendingOwnerSessionID === "session-a");
+      const ownedB = loaded.entries.find(entry => entry.pendingOwnerSessionID === "session-b");
+      assert.equal(ownedA?.promotionAttempts, attempt);
+      assert.equal(ownedA?.lastPromotionFailureReason, "rejected_capacity");
+      assert.equal(ownedB?.promotionAttempts, undefined,
+        "same-key entry for another owner must not be mutated");
+    }
+
+    const exhausted = await recordPromotionRejections(
+      testDir,
+      new Set([memoryKey(sessionA)]),
+      "rejected_capacity",
+      { ownerSessionID: "session-a" },
+    );
+
+    assert.deepEqual([...exhausted], [memoryKey(sessionA)]);
+    const loaded = await loadPendingJournal(testDir);
+    assert.deepEqual(loaded.entries.map(entry => entry.pendingOwnerSessionID), ["session-b"]);
+  });
+
+  it("drops invalid timestamp entries for every source as corruption safety", async () => {
+    await savePendingJournal(testDir, {
+      version: 1,
+      workspace: { root: testDir, key: "test" },
+      updatedAt: new Date().toISOString(),
+      entries: [
+        {
+          id: "bad_explicit",
+          type: "feedback",
+          text: "Bad explicit timestamp",
+          source: "explicit",
+          confidence: 1,
+          status: "active",
+          createdAt: "not-a-date",
+          updatedAt: "also-bad",
+        },
+        {
+          id: "bad_manual",
+          type: "reference",
+          text: "Bad manual timestamp",
+          source: "manual",
+          confidence: 1,
+          status: "active",
+          createdAt: "",
+          updatedAt: "",
+        },
+        {
+          id: "bad_compaction",
+          type: "reference",
+          text: "Bad compaction timestamp",
+          source: "compaction",
+          confidence: 0.75,
+          status: "active",
+          createdAt: "bad",
+          updatedAt: "bad",
+        },
+      ],
+    });
+
+    const loaded = await loadPendingJournal(testDir);
+    assert.equal(loaded.entries.length, 0);
   });
 
   it("savePendingJournal uses updatedAt when createdAt is missing", async () => {
@@ -275,5 +455,5 @@ describe("pending journal retention", () => {
 async function mkdtemp(): Promise<string> {
   const base = join(tmpdir(), "pending-journal-test");
   await mkdir(base, { recursive: true });
-  return base;
+  return fsMkdtemp(join(base, "case-"));
 }
