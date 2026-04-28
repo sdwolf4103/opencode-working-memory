@@ -2,7 +2,7 @@ import type { LongTermMemoryEntry, WorkspaceMemoryStore } from "./types.ts";
 import { LONG_TERM_LIMITS } from "./types.ts";
 import { workspaceKey, workspaceMemoryPath } from "./paths.ts";
 import { atomicWriteJSON, readJSON, updateJSON } from "./storage.ts";
-import { assessMemoryQuality } from "./memory-quality.ts";
+import { assessMemoryQuality, isProgressSnapshotViolation } from "./memory-quality.ts";
 
 // Minimum length for workspace_memory envelope: <workspace_memory>\n...\n</workspace_memory>
 const MIN_ENVELOPE_LENGTH = 80;
@@ -254,28 +254,6 @@ export function redactCredentials(text: string): string {
   return result;
 }
 
-export function isProjectSnapshotViolation(text: string): boolean {
-  // Test/suite counts
-  if (/\d+\s+tests?\s+pass(?:ed)?/i.test(text)) return true;
-  if (/\d+\s+suites?\s+(?:pass|fail)/i.test(text)) return true;
-
-  // File counts with snapshot context, excluding limit statements
-  if (/\d+\s*(?:個|个)?\s*(?:files?|文件)/i.test(text)) {
-    const hasSnapshotContext = /同步|synced|uploaded|downloaded|completed|generated|created|modified|processed|完成/i.test(text);
-    const hasLimitContext = /limit|max|maximum|min|minimum|supports?|allowed|per\s+(?:batch|request|upload)/i.test(text);
-    if (hasSnapshotContext && !hasLimitContext) return true;
-  }
-
-  // Phase/Wave/Sprint/Milestone/Task progress
-  if (/(?:phases?|waves?|sprints?|milestones?|tasks?)\s*\d+(?:\s*[-–]\s*\d+)?/i.test(text)) {
-    if (/completed|done|finished|完成/i.test(text)) return true;
-  }
-
-  if (/(?:已完成|完成).{0,30}(?:phases?|waves?|sprints?|milestones?|tasks?)/i.test(text)) return true;
-
-  return false;
-}
-
 export function runMigrationP0Cleanup(
   store: WorkspaceMemoryStore,
   nowIso: string,
@@ -288,7 +266,7 @@ export function runMigrationP0Cleanup(
     if (entry.source !== "compaction") return entry;
     if (entry.type !== "project") return entry;
 
-    if (isProjectSnapshotViolation(entry.text)) {
+    if (isProgressSnapshotViolation(entry.text)) {
       return {
         ...entry,
         status: "superseded" as const,

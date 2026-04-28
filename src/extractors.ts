@@ -224,8 +224,8 @@ function extractFirstPath(text: string): string | undefined {
 }
 
 /**
- * Quality gate for workspace memory candidates.
- * Rejects low-quality entries like git hashes, error messages, etc.
+ * Acceptance gate for workspace memory candidates.
+ * Keeps extraction-specific checks local and delegates memory quality rules to memory-quality.ts.
  */
 function shouldAcceptWorkspaceMemoryCandidate(
   entry: {
@@ -246,33 +246,11 @@ function shouldAcceptWorkspaceMemoryCandidate(
     return false;
   }
 
-  // Git history / commit hash
-  if (/\b[0-9a-f]{7,40}\b/.test(text)) return false;
-  if (/^(fix|feat|chore|docs|refactor|test):/i.test(text)) return false;
-
-  // Raw error / stack trace
-  if (/^\s*(Error|TypeError|ReferenceError|SyntaxError):/i.test(text)) return false;
-  if (/at \S+ \([^)]+:\d+:\d+\)/.test(text)) return false;
-
-  // Active file list
-  if (/^(modified|created|deleted|renamed)\s+\S+\.\S+$/i.test(text)) return false;
-
-  // Temporary progress
-  if (/^(currently|now|pending|in progress|todo|wip):/i.test(text)) return false;
-
-  // Code signature / API doc
-  if (/^(function|class|interface|type|const|let|var)\s+\w+/.test(text)) return false;
-  if (/^(GET|POST|PUT|DELETE|PATCH)\s+\//.test(text)) return false;
-
   // Indirect Prompt Injection / Adversarial Instructions
   // Rejects attempts to overwrite system behavior or "ignore" rules.
   // comparative "instead of" is allowed.
   if (/\b(ignore\s+all|ignore\s+previous|ignore\s+instruction|overwrite\s+system|overwrite\s+rules|forget\s+all|delete\s+root)\b/i.test(text)) return false;
   if (/\b(ignore|instruction|overwrite)\b/i.test(text) && /\b(previous|all|rules|behavior|prompt|system)\b/i.test(text)) return false;
-
-  // Path-heavy facts (rediscoverable from repo)
-  const pathCount = (text.match(/\/[\w.-]+(\/[\w.-]+)+/g) || []).length;
-  if (pathCount > 2) return false;
 
   const quality = assessMemoryQuality({ type: entry.type, text, source: "compaction" });
   if (!quality.accepted) return false;
