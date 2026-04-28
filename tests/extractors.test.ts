@@ -223,7 +223,7 @@ test("parseWorkspaceMemoryCandidates accepts bracketless candidate format", () =
 Memory candidates:
 - project Backend health improvements organized into phased milestones
 - reference Scrypt 參數必須是 N=16384, r=8, p=1
-- feedback 端口 9473 可能被舊進程佔用，需殺掉後重啟
+- feedback User prefers Traditional Chinese memory summaries
 - decision Use output.prompt to replace the default compaction template
 `;
 
@@ -451,14 +451,14 @@ test("parseWorkspaceMemoryCandidates allows benign ignore/instruction wording", 
 Memory candidates:
 - [project] Use .gitignore to ignore generated files.
 - [reference] Instruction parser supports Markdown sections and bracketed memory types.
-- [decision] Prompt context uses a frozen workspace snapshot plus hot session state.
+- [decision] Use a frozen workspace snapshot plus hot session state for prompt context.
 `;
   const items = parseWorkspaceMemoryCandidates(summary);
 
   assert.equal(items.length, 3);
   assert.equal(items[0].text, "Use .gitignore to ignore generated files.");
   assert.equal(items[1].text, "Instruction parser supports Markdown sections and bracketed memory types.");
-  assert.equal(items[2].text, "Prompt context uses a frozen workspace snapshot plus hot session state.");
+  assert.equal(items[2].text, "Use a frozen workspace snapshot plus hot session state for prompt context.");
 });
 
 test("parseWorkspaceMemoryCandidates rejects direct system prompt override attempts", () => {

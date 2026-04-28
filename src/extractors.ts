@@ -1,6 +1,7 @@
 import { createHash } from "crypto";
 import type { ActiveFile, LongTermMemoryEntry, LongTermType, OpenError } from "./types.ts";
 import { LONG_TERM_LIMITS } from "./types.ts";
+import { assessMemoryQuality } from "./memory-quality.ts";
 
 function id(prefix: string): string {
   return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -51,7 +52,7 @@ export function extractExplicitMemories(text: string): LongTermMemoryEntry[] {
     // 韓文（長詞優先）：기억해줘/메모해줘 must come before 기억해/메모해
     /(?:^|\n)\s*(?:기억해줘|기억해|잊지 마|잊지마|메모해줘|메모해)[:：,，]?\s*(.+)$/gim,
     // 英文：remember this/that - 必須在行首，避免 "to remember" 非指令匹配
-    /(?:^|\n)\s*(?:please\s+)?remember\s+(?:this|that)?[:：,，]?\s*(.+)$/gim,
+    /(?:^|\n)\s*(?:please\s+)?remember(?:\s+(?:this|that))?[:：,，]?\s*(.+)$/gim,
     // save/add to memory
     /(?:^|\n)\s*(?:please\s+)?(?:save|add)\s+(?:this|that)?\s*(?:to|in)\s+memory[:：,，]?\s*(.+)$/gim,
     // commit to memory
@@ -199,7 +200,7 @@ function normalizeCandidateBody(body: string): { text: string; hadTrigger: boole
     /(?:请|請)?(?:帮我|幫我)?(?:记住|記住|记得|記得|记下来|記下來)(?:这一点|這一點|这点|這點|这个|這個)?[:：,，]?\s*(.+)$/im,
     /(?:覚えておいて|覚えて|忘れないで|メモして)[:：,，]?\s*(.+)$/im,
     /(?:기억해줘|기억해|잊지 마|잊지마|메모해줘|메모해)[:：,，]?\s*(.+)$/im,
-    /(?:please\s+)?remember\s+(?:this|that)?[:：,，]?\s*(.+)$/im,
+    /(?:please\s+)?remember(?:\s+(?:this|that))?[:：,，]?\s*(.+)$/im,
     /(?:please\s+)?(?:save|add)\s+(?:this|that)?\s*(?:to|in)\s+memory[:：,，]?\s*(.+)$/im,
     /(?:please\s+)?commit\s+(?:this|that)?\s*to memory[:：,，]?\s*(.+)$/im,
   ];
@@ -273,33 +274,10 @@ function shouldAcceptWorkspaceMemoryCandidate(
   const pathCount = (text.match(/\/[\w.-]+(\/[\w.-]+)+/g) || []).length;
   if (pathCount > 2) return false;
 
-  // Session-specific progress snapshots for project type
-  if (entry.type === "project") {
-    if (isProjectSnapshotViolation(text)) return false;
-  }
+  const quality = assessMemoryQuality({ type: entry.type, text, source: "compaction" });
+  if (!quality.accepted) return false;
 
   return true;
-}
-
-function isProjectSnapshotViolation(text: string): boolean {
-  // Test/suite counts
-  if (/\d+\s+tests?\s+pass(?:ed)?/i.test(text)) return true;
-  if (/\d+\s+suites?\s+(?:pass|fail)/i.test(text)) return true;
-
-  // File counts with snapshot/process context only, not static limits
-  if (/\d+\s*(?:個|个)?\s*(?:files?|文件)/i.test(text)) {
-    const hasSnapshotContext = /同步|synced|uploaded|downloaded|completed|generated|created|modified|processed|完成/i.test(text);
-    const hasLimitContext = /limit|max|maximum|min|minimum|supports?|allowed|per\s+(?:batch|request|upload)/i.test(text);
-    if (hasSnapshotContext && !hasLimitContext) return true;
-  }
-
-  // Phase/Wave/Sprint/Milestone/Task progress
-  if (/(?:phases?|waves?|sprints?|milestones?|tasks?)\s*\d+(?:\s*[-–]\s*\d+)?/i.test(text)) {
-    if (/completed|done|finished|完成/i.test(text)) return true;
-  }
-  if (/(?:已完成|完成).{0,30}(?:phases?|waves?|sprints?|milestones?|tasks?)/i.test(text)) return true;
-
-  return false;
 }
 
 /**
