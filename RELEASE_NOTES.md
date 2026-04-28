@@ -1,5 +1,55 @@
 # Release Notes
 
+## 1.4.0 (2026-04-28)
+
+### Memory Quality Cleanup
+
+This minor release automatically improves memory quality for all existing users on upgrade. Low-quality compaction memories are identified and superseded without requiring manual cleanup.
+
+### What Changed
+
+- **Unified quality gate**: All memory types (feedback, decision, project, reference) now share the same quality rules instead of only project entries having a quality check.
+- **Hardened compaction prompt**: The model is explicitly instructed that most compactions should produce zero memories, with clear good/bad examples.
+- **Auto-supersede migration**: On first load after upgrade, existing low-quality `compaction` memories are automatically marked as `superseded` with quality tags. Explicit and manual memories are never affected.
+
+### What Gets Cleaned Up
+
+Low-quality memory patterns that are now rejected/superseded:
+
+- Progress snapshots: "Wave 1 completed successfully", "180 tests passed"
+- Session-internal notes: "The assistant reviewed feedback and updated the plan"
+- Implementation notes: "Implemented X in plugin.ts"
+- Commit/CI references: "Commit a762e86 contains the fix"
+- Raw errors and stack traces
+- Temporary status: "Currently running npm test"
+
+### Migration Behavior
+
+- Runs exactly once per workspace (idempotent, non-destructive)
+- Only affects `source: "compaction"` entries
+- Explicit/manual memories are protected
+- Superseded entries retain `status: "superseded"` and quality tags for audit
+- No user action required
+
+### Upgrade Notes
+
+- No configuration changes required.
+- Existing workspace memory files are automatically cleaned on first load.
+- The OpenCode config entry stays the same:
+
+```json
+{
+  "plugin": ["opencode-working-memory"]
+}
+```
+
+### Validation
+
+- `npm test` (196 tests)
+- `npm run typecheck`
+
+---
+
 ## 1.3.2 (2026-04-27)
 
 ### CI Compatibility Patch

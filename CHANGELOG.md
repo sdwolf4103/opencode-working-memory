@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-04-28
+
+### Added
+
+- Unified memory quality gate in `src/memory-quality.ts` as the single source of truth for all memory quality rules.
+- CRITICAL MEMORY RULES in compaction prompt with explicit good/bad examples.
+- Auto-supersede migration `2026-04-28-quality-cleanup` that marks low-quality compaction memories as superseded on first load.
+
+### Changed
+
+- Memory quality rules now apply to all memory types, not just project entries.
+- Compaction prompt explicitly instructs model that most compactions should produce zero memories.
+- Low-quality compaction memories (progress snapshots, implementation notes, session-internal notes) are automatically superseded during workspace memory normalization.
+
+### Migration Notes
+
+- Existing low-quality `source: "compaction"` entries will be marked as `superseded` once on first load after upgrade.
+- Explicit and manual memories are never affected by quality cleanup.
+- Superseded entries are retained on disk with `quality_cleanup` tags for audit purposes.
+- Migration is idempotent and runs exactly once per workspace.
+
 ## [1.3.3] - 2026-04-28
 
 ### Fixed
