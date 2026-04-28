@@ -283,6 +283,35 @@ describe("pending journal retention", () => {
     assert.deepEqual(loaded.entries.map(entry => entry.pendingOwnerSessionID), ["session-b"]);
   });
 
+  it("global unowned clear keeps owned entries with the same key", async () => {
+    const now = new Date().toISOString();
+    const unowned: LongTermMemoryEntry = {
+      id: "clear-unowned",
+      type: "feedback",
+      text: "Prefer scoped cleanup.",
+      source: "explicit",
+      confidence: 1,
+      status: "active",
+      createdAt: now,
+      updatedAt: now,
+    };
+    const owned: LongTermMemoryEntry = {
+      ...unowned,
+      id: "clear-owned",
+      pendingOwnerSessionID: "session-owned",
+    };
+
+    await appendPendingMemories(testDir, [unowned, owned]);
+
+    await clearPendingMemories(testDir, new Set([memoryKey(unowned)]), {
+      clearUnowned: true,
+    });
+
+    const loaded = await loadPendingJournal(testDir);
+    assert.deepEqual(loaded.entries.map(entry => entry.id), ["clear-owned"]);
+    assert.equal(loaded.entries[0].pendingOwnerSessionID, "session-owned");
+  });
+
   it("retains same-key pending entries owned by different sessions", async () => {
     const now = new Date().toISOString();
     await appendPendingMemories(testDir, [
@@ -367,6 +396,45 @@ describe("pending journal retention", () => {
     assert.deepEqual([...exhausted], [memoryKey(sessionA)]);
     const loaded = await loadPendingJournal(testDir);
     assert.deepEqual(loaded.entries.map(entry => entry.pendingOwnerSessionID), ["session-b"]);
+  });
+
+  it("global unowned rejection exhausts only unowned entries with the same key", async () => {
+    const now = new Date().toISOString();
+    const unowned: LongTermMemoryEntry = {
+      id: "reject-unowned",
+      type: "reference",
+      text: "Capacity rejected unowned reference.",
+      source: "explicit",
+      confidence: 0.1,
+      status: "active",
+      createdAt: now,
+      updatedAt: now,
+      promotionAttempts: PROMOTION_RETRY_LIMITS.maxExplicitAttempts - 1,
+    };
+    const owned: LongTermMemoryEntry = {
+      ...unowned,
+      id: "reject-owned",
+      pendingOwnerSessionID: "session-owned",
+      promotionAttempts: undefined,
+    };
+    await appendPendingMemories(testDir, [unowned, owned]);
+
+    const exhausted = await recordPromotionRejections(
+      testDir,
+      new Set([memoryKey(unowned)]),
+      "rejected_capacity",
+      { includeUnownedOnly: true },
+    );
+
+    assert.deepEqual([...exhausted], [memoryKey(unowned)]);
+    const loaded = await loadPendingJournal(testDir);
+    assert.deepEqual(loaded.entries.map(entry => entry.id), ["reject-owned"]);
+    assert.equal(
+      loaded.entries[0].promotionAttempts,
+      undefined,
+      "owned same-key entry must not be mutated by global unowned rejection",
+    );
+    assert.equal(loaded.entries[0].lastPromotionFailureReason, undefined);
   });
 
   it("drops invalid timestamp entries for every source as corruption safety", async () => {

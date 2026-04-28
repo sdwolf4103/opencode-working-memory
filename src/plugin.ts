@@ -347,7 +347,10 @@ export const MemoryV2Plugin: Plugin = async (input) => {
       directory,
       accounting.retryableRejectedKeys,
       "rejected_capacity",
-      { ownerSessionID: sessionID },
+      {
+        ownerSessionID: sessionID,
+        includeUnownedOnly: !sessionID,
+      },
     );
 
     const sessionRemovalKeys = new Set([
