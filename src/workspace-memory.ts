@@ -208,14 +208,23 @@ export async function normalizeWorkspaceMemoryWithAccounting(
   // One-time migrations for legacy/low-quality snapshot violations.
   // Run quality cleanup first so hard violations receive quality audit tags
   // before the older P0 project-only cleanup marks progress snapshots.
+  const beforeQualityCleanup = result;
   const qualityCleanup = runMigrationQualityCleanup(result, nowIso);
   result = qualityCleanup.store;
+  let skipRemainingMigrations = false;
   if (qualityCleanup.events.length > 0) {
-    await appendQualityCleanupMigrationLog(qualityCleanup.events).catch(error => {
+    try {
+      await appendQualityCleanupMigrationLog(qualityCleanup.events);
+    } catch (error) {
       console.error("[memory] failed to write quality cleanup migration log:", error);
-    });
+      console.error("[memory] aborting migration to maintain audit trail integrity");
+      result = beforeQualityCleanup;
+      skipRemainingMigrations = true;
+    }
   }
-  result = runMigrationP0Cleanup(result, nowIso);
+  if (!skipRemainingMigrations) {
+    result = runMigrationP0Cleanup(result, nowIso);
+  }
 
   // P0 accounting only considers active entries. Entries that were already
   // superseded before this normalization are preserved in storage; entries that

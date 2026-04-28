@@ -1080,6 +1080,89 @@ test("quality cleanup migration writes audit log for hard supersedes", async () 
   }
 });
 
+test("quality cleanup migration aborts supersede when audit log cannot be written", async () => {
+  const sandbox = await mkdtemp(join(tmpdir(), "wm-quality-audit-fail-"));
+  const dataHome = join(sandbox, "xdg-data-home");
+  const root = join(sandbox, "workspace");
+  const previousXdgDataHome = process.env.XDG_DATA_HOME;
+  const previousConsoleError = console.error;
+  process.env.XDG_DATA_HOME = dataHome;
+  console.error = () => {};
+
+  try {
+    await mkdir(root, { recursive: true });
+    const now = "2026-04-28T00:00:00.000Z";
+    const storePath = await workspaceMemoryPath(root);
+    await mkdir(dirname(storePath), { recursive: true });
+    await writeFile(storePath, JSON.stringify({
+      version: 1,
+      workspace: { root, key: await workspaceKey(root) },
+      limits: { maxRenderedChars: LONG_TERM_LIMITS.maxRenderedChars, maxEntries: LONG_TERM_LIMITS.maxEntries },
+      entries: [{
+        id: "hard_progress",
+        type: "project",
+        text: "Test suite: 1237 tests pass, 226 suites",
+        source: "compaction",
+        confidence: 0.75,
+        status: "active",
+        createdAt: now,
+        updatedAt: now,
+        staleAfterDays: 60,
+      }],
+      migrations: [],
+      updatedAt: now,
+    }, null, 2), "utf8");
+
+    const blockedLogDir = join(dataHome, "opencode-working-memory", "migration-logs");
+    await writeFile(blockedLogDir, "not a directory", "utf8");
+
+    const loaded = await loadWorkspaceMemory(root);
+    const persisted = JSON.parse(await readFile(storePath, "utf8")) as WorkspaceMemoryStore;
+
+    assert.equal(loaded.entries.find(entry => entry.id === "hard_progress")?.status, "active");
+    assert.equal(persisted.entries.find(entry => entry.id === "hard_progress")?.status, "active");
+    assert.equal(loaded.migrations?.includes("2026-04-28-quality-cleanup"), false);
+    assert.equal(persisted.migrations?.includes("2026-04-28-quality-cleanup"), false);
+  } finally {
+    console.error = previousConsoleError;
+    if (previousXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
+    else process.env.XDG_DATA_HOME = previousXdgDataHome;
+    await rm(sandbox, { recursive: true, force: true });
+  }
+});
+
+test("real workspace regression fixture is de-identified and English-only", () => {
+  const cjkText = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
+  const identifyingTerms = [
+    "medical-atlas",
+    "opencode-record",
+    "agent-reports",
+    "pdf-extraction",
+    "self-repo",
+    "OpenCode Working Memory",
+  ];
+  const failures: string[] = [];
+
+  for (const [workspaceName, fixtureEntries] of Object.entries(REAL_WORKSPACE_FIXTURES)) {
+    if (identifyingTerms.some(term => workspaceName.includes(term))) {
+      failures.push(`${workspaceName}: workspace key should be generalized`);
+    }
+
+    for (const entry of fixtureEntries) {
+      if (cjkText.test(entry.text)) {
+        failures.push(`${workspaceName}/${entry.id}: text must be English-only`);
+      }
+      for (const term of identifyingTerms) {
+        if (entry.text.includes(term)) {
+          failures.push(`${workspaceName}/${entry.id}: text contains identifying term ${term}`);
+        }
+      }
+    }
+  }
+
+  assert.equal(failures.length, 0, `Fixture privacy failures:\n${failures.join("\n")}`);
+});
+
 test("quality cleanup migration regression against real workspace samples", async () => {
   const failures: string[] = [];
   const now = "2026-04-28T00:00:00.000Z";
