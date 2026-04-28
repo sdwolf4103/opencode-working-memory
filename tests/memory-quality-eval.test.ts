@@ -136,6 +136,23 @@ test("decision must be future-facing rule, not completed implementation note", (
   assert.equal(assessMemoryQuality({ type: "decision", text: "Added semantic merge tests in the previous wave", source: "compaction" }).accepted, false);
 });
 
+test("shared quality gate owns extractor low-quality syntax rejections", () => {
+  const rejected = [
+    { type: "project" as const, text: "fix: add new feature" },
+    { type: "reference" as const, text: "modified src/plugin.ts" },
+    { type: "reference" as const, text: "function buildCompactionPrompt(privateContext: string): string" },
+    { type: "reference" as const, text: "GET /api/sessions" },
+  ];
+
+  for (const entry of rejected) {
+    assert.equal(
+      assessMemoryQuality({ ...entry, source: "compaction" }).accepted,
+      false,
+      `${entry.type}: ${entry.text}`,
+    );
+  }
+});
+
 test("explicit memories bypass extraction quality gate", () => {
   const entries = extractExplicitMemories("remember: Wave 1 completed successfully and all tests passed");
   assert.equal(entries.length, 1);

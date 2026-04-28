@@ -15,12 +15,12 @@ import {
   workspaceMemoryExactKey,
   workspaceMemoryIdentityKey,
   redactCredentials,
-  isProjectSnapshotViolation,
   runMigrationP0Cleanup,
   loadWorkspaceMemory,
   saveWorkspaceMemory,
   updateWorkspaceMemoryWithAccounting,
 } from "../src/workspace-memory.ts";
+import { isProgressSnapshotViolation } from "../src/memory-quality.ts";
 import { reviewerCurrent28Fixture, expectedAcceptedFixtureIds } from "./fixtures/memory-quality-current-28.ts";
 
 function entry(id: string, text: string, type: LongTermMemoryEntry["type"] = "decision"): LongTermMemoryEntry {
@@ -890,13 +890,13 @@ test("redactCredentials is idempotent and also redacts rationale text", () => {
   assert.equal(migrated.entries[0].rationale, "password: [REDACTED]");
 });
 
-test("isProjectSnapshotViolation detects wave progress and avoids limit context false positives", () => {
-  assert.equal(isProjectSnapshotViolation("1237 tests pass, 226 suites"), true);
-  assert.equal(isProjectSnapshotViolation("USB 同步：37 個文件"), true);
-  assert.equal(isProjectSnapshotViolation("Waves 1-5 已完成，Wave 6 deferred"), true);
+test("shared progress snapshot rule detects wave progress and avoids limit context false positives", () => {
+  assert.equal(isProgressSnapshotViolation("1237 tests pass, 226 suites"), true);
+  assert.equal(isProgressSnapshotViolation("USB 同步：37 個文件"), true);
+  assert.equal(isProgressSnapshotViolation("Waves 1-5 已完成，Wave 6 deferred"), true);
 
-  assert.equal(isProjectSnapshotViolation("Upload limit is 10 files"), false);
-  assert.equal(isProjectSnapshotViolation("Project supports 5 test suites"), false);
+  assert.equal(isProgressSnapshotViolation("Upload limit is 10 files"), false);
+  assert.equal(isProgressSnapshotViolation("Project supports 5 test suites"), false);
 });
 
 test("runMigrationP0Cleanup marks only non-explicit project snapshots and runs once", () => {

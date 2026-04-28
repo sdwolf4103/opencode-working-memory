@@ -19,6 +19,8 @@ export function assessMemoryQuality(entry: MemoryQualityInput): MemoryQualityRes
   if (isCommitOrCiViolation(text)) reasons.push("commit_or_ci_snapshot");
   if (isPathHeavyViolation(text)) reasons.push("path_heavy");
   if (isTemporaryStatusViolation(text)) reasons.push("temporary_status");
+  if (isActiveFileSnapshotViolation(text)) reasons.push("active_file_snapshot");
+  if (isCodeOrApiSignatureViolation(text)) reasons.push("code_or_api_signature");
   if (entry.type === "feedback" && isFeedbackQualityViolation(text)) reasons.push("bad_feedback");
   if (entry.type === "decision" && isDecisionQualityViolation(text)) reasons.push("bad_decision");
 
@@ -77,6 +79,7 @@ function isRawErrorViolation(text: string): boolean {
 }
 
 function isCommitOrCiViolation(text: string): boolean {
+  if (/^(fix|feat|chore|docs|refactor|test):/i.test(text)) return true;
   if (/\b[0-9a-f]{7,40}\b/.test(text)) return true;
   if (/\bCI\b.*\b(?:passed|failed|run|compatibility|flaky)\b/i.test(text)) return true;
   if (/\b(?:passed|failed|run|compatibility|flaky)\b.*\bCI\b/i.test(text)) return true;
@@ -92,5 +95,15 @@ function isPathHeavyViolation(text: string): boolean {
 function isTemporaryStatusViolation(text: string): boolean {
   if (/^(currently|now|pending|in progress|todo|wip)\b/i.test(text)) return true;
   if (/\b(?:run npm test|tests? are running|next reply|before continuing)\b/i.test(text)) return true;
+  return false;
+}
+
+function isActiveFileSnapshotViolation(text: string): boolean {
+  return /^(modified|created|deleted|renamed)\s+\S+\.\S+$/i.test(text);
+}
+
+function isCodeOrApiSignatureViolation(text: string): boolean {
+  if (/^(function|class|interface|type|const|let|var)\s+\w+/.test(text)) return true;
+  if (/^(GET|POST|PUT|DELETE|PATCH)\s+\//.test(text)) return true;
   return false;
 }
