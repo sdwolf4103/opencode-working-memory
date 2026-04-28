@@ -20,8 +20,8 @@ import {
   saveWorkspaceMemory,
   updateWorkspaceMemoryWithAccounting,
 } from "../src/workspace-memory.ts";
-import { isProgressSnapshotViolation } from "../src/memory-quality.ts";
-import { reviewerCurrent28Fixture, expectedAcceptedFixtureIds } from "./fixtures/memory-quality-current-28.ts";
+import { assessMemoryQuality, isHardQualityReason, isProgressSnapshotViolation } from "../src/memory-quality.ts";
+import { reviewerCurrent28Fixture } from "./fixtures/memory-quality-current-28.ts";
 
 function entry(id: string, text: string, type: LongTermMemoryEntry["type"] = "decision"): LongTermMemoryEntry {
   const now = new Date().toISOString();
@@ -954,7 +954,84 @@ test("runMigrationP0Cleanup marks only non-explicit project snapshots and runs o
   assert.equal(twice.entries.find(e => e.id === "project-snapshot")?.updatedAt, once.entries.find(e => e.id === "project-snapshot")?.updatedAt);
 });
 
-test("quality cleanup migration supersedes low-quality compaction memories from current-28 fixture", async () => {
+test("quality cleanup migration preserves soft-only feedback and decision violations", async () => {
+  const root = await mkdtemp(join(tmpdir(), "wm-quality-soft-preserve-"));
+  try {
+    const now = new Date().toISOString();
+    await saveWorkspaceMemory(root, {
+      version: 1,
+      workspace: { root, key: await workspaceKey(root) },
+      limits: { maxRenderedChars: LONG_TERM_LIMITS.maxRenderedChars, maxEntries: LONG_TERM_LIMITS.maxEntries },
+      entries: [
+        {
+          id: "soft_feedback",
+          type: "feedback",
+          text: "UI 要統一風格：兩個表格都要 scrollable，約 20 rows",
+          source: "compaction",
+          confidence: 0.75,
+          status: "active",
+          createdAt: now,
+          updatedAt: now,
+        },
+        {
+          id: "soft_decision",
+          type: "decision",
+          text: "Product branding is \"OpenCode Working Memory\" without \"Plugin\" in the name",
+          source: "compaction",
+          confidence: 0.75,
+          status: "active",
+          createdAt: now,
+          updatedAt: now,
+          staleAfterDays: 45,
+        },
+      ],
+      migrations: [],
+      updatedAt: now,
+    });
+
+    const loaded = await loadWorkspaceMemory(root);
+    assert.equal(loaded.entries.find(e => e.id === "soft_feedback")?.status, "active");
+    assert.equal(loaded.entries.find(e => e.id === "soft_decision")?.status, "active");
+    assert.ok(loaded.migrations?.includes("2026-04-28-quality-cleanup"));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("quality cleanup migration supersedes hard quality violations", async () => {
+  const root = await mkdtemp(join(tmpdir(), "wm-quality-hard-supersede-"));
+  try {
+    const now = new Date().toISOString();
+    await saveWorkspaceMemory(root, {
+      version: 1,
+      workspace: { root, key: await workspaceKey(root) },
+      limits: { maxRenderedChars: LONG_TERM_LIMITS.maxRenderedChars, maxEntries: LONG_TERM_LIMITS.maxEntries },
+      entries: [{
+        id: "hard_progress",
+        type: "project",
+        text: "測試套件：1237 tests pass, 226 suites",
+        source: "compaction",
+        confidence: 0.75,
+        status: "active",
+        createdAt: now,
+        updatedAt: now,
+        staleAfterDays: 60,
+      }],
+      migrations: [],
+      updatedAt: now,
+    });
+
+    const loaded = await loadWorkspaceMemory(root);
+    const entry = loaded.entries.find(e => e.id === "hard_progress");
+    assert.equal(entry?.status, "superseded");
+    assert.ok(entry?.tags?.includes("quality_cleanup"));
+    assert.ok(entry?.tags?.includes("quality:progress_snapshot"));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("quality cleanup migration supersedes only hard violations from current fixture", async () => {
   const root = await mkdtemp(join(tmpdir(), "wm-quality-cleanup-"));
   try {
     const now = new Date().toISOString();
@@ -972,10 +1049,12 @@ test("quality cleanup migration supersedes low-quality compaction memories from 
     const supersededIds = new Set(loaded.entries.filter(entry => entry.status === "superseded").map(entry => entry.id));
 
     for (const entry of reviewerCurrent28Fixture) {
-      if (expectedAcceptedFixtureIds.has(entry.id)) {
-        assert.equal(activeIds.has(entry.id), true, `${entry.id} should remain active`);
-      } else {
+      const quality = assessMemoryQuality(entry);
+      const hasHardReason = quality.reasons.some(isHardQualityReason);
+      if (entry.source === "compaction" && !quality.accepted && hasHardReason) {
         assert.equal(supersededIds.has(entry.id), true, `${entry.id} should be superseded`);
+      } else {
+        assert.equal(activeIds.has(entry.id), true, `${entry.id} should remain active`);
       }
     }
 

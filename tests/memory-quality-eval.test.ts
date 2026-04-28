@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { extractExplicitMemories, parseWorkspaceMemoryCandidates } from "../src/extractors.ts";
-import { assessMemoryQuality } from "../src/memory-quality.ts";
+import { assessMemoryQuality, isHardQualityReason } from "../src/memory-quality.ts";
 import { expectedAcceptedFixtureIds, reviewerCurrent28Fixture } from "./fixtures/memory-quality-current-28.ts";
 
 const acceptedCases = [
@@ -158,4 +158,18 @@ test("explicit memories bypass extraction quality gate", () => {
   assert.equal(entries.length, 1);
   assert.equal(entries[0].source, "explicit");
   assert.match(entries[0].text, /Wave 1 completed/);
+});
+
+test("hard quality reasons exclude soft whitelist failures", () => {
+  assert.equal(isHardQualityReason("progress_snapshot"), true);
+  assert.equal(isHardQualityReason("raw_error"), true);
+  assert.equal(isHardQualityReason("commit_or_ci_snapshot"), true);
+  assert.equal(isHardQualityReason("temporary_status"), true);
+  assert.equal(isHardQualityReason("active_file_snapshot"), true);
+  assert.equal(isHardQualityReason("code_or_api_signature"), true);
+  assert.equal(isHardQualityReason("path_heavy"), true);
+  assert.equal(isHardQualityReason("empty"), true);
+
+  assert.equal(isHardQualityReason("bad_feedback"), false);
+  assert.equal(isHardQualityReason("bad_decision"), false);
 });
