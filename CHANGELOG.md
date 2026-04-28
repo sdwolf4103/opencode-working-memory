@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.3] - 2026-04-28
+
+### Fixed
+
+- Added atomic cross-process storage writes with stale-lock recovery and heartbeat refresh to prevent concurrent memory-file corruption.
+- Scoped pending-memory promotion by owner/session so global unowned cleanup no longer removes active owned entries.
+- Retained source-aware pending memories until they are actually promoted, absorbed, superseded, or rejected.
+- Persisted load-time security redaction and expanded Bearer-token redaction to reduce secret retention risk.
+- Hardened workspace normalization, cache bounds, rejected-entry retention, and session cleanup behavior.
+
 ## [1.3.2] - 2026-04-27
 
 ### Fixed
