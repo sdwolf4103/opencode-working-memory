@@ -14,13 +14,13 @@ import {
   normalizeWorkspaceMemoryWithAccounting,
   workspaceMemoryExactKey,
   workspaceMemoryIdentityKey,
-  redactCredentials,
   runMigrationP0Cleanup,
   runMigrationQualityCleanup,
   loadWorkspaceMemory,
   saveWorkspaceMemory,
   updateWorkspaceMemoryWithAccounting,
 } from "../src/workspace-memory.ts";
+import { redactCredentials } from "../src/redaction.ts";
 import { assessMemoryQuality, isHardQualityReason, isProgressSnapshotViolation } from "../src/memory-quality.ts";
 import { reviewerCurrent28Fixture } from "./fixtures/memory-quality-current-28.ts";
 import { REAL_WORKSPACE_FIXTURES } from "./fixtures/real-workspaces-snapshot.ts";
