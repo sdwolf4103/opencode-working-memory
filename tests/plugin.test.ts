@@ -782,6 +782,64 @@ test("session.compacted promotes pending memories to workspace memory and clears
   }
 });
 
+test("session.compacted reinforces existing exact workspace memory", async () => {
+  const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-test-"));
+
+  try {
+    const now = new Date().toISOString();
+    const oldRetentionClock = Date.now() - 10 * 24 * 60 * 60 * 1000;
+    await updateWorkspaceMemory(tmpDir, store => {
+      store.entries.push({
+        id: "existing-memory",
+        type: "decision",
+        text: "Use frozen rendered snapshots for cache stability.",
+        source: "explicit",
+        confidence: 1,
+        status: "active",
+        createdAt: now,
+        updatedAt: now,
+        retentionClock: oldRetentionClock,
+      });
+      return store;
+    });
+
+    await saveSessionState(tmpDir, {
+      version: 1,
+      sessionID: "reinforce-existing-session",
+      turn: 1,
+      updatedAt: now,
+      activeFiles: [],
+      openErrors: [],
+      recentDecisions: [],
+      pendingMemories: [{
+        id: "pending-duplicate",
+        type: "decision",
+        text: "Use frozen rendered snapshots for cache stability.",
+        source: "explicit",
+        confidence: 1,
+        status: "active",
+        createdAt: now,
+        updatedAt: now,
+      }],
+    });
+
+    const plugin = await MemoryV2Plugin({ directory: tmpDir, client: mockRootClient() });
+    await (plugin as Record<string, Function>)["event"]({
+      event: { type: "session.compacted", properties: { sessionID: "reinforce-existing-session" } },
+    });
+
+    const workspace = await loadWorkspaceMemory(tmpDir);
+    const existing = workspace.entries.find(entry => entry.id === "existing-memory");
+    assert.equal(workspace.entries.filter(entry => /frozen rendered/.test(entry.text)).length, 1);
+    assert.equal(existing?.reinforcementCount, 1);
+    assert.equal(existing?.lastReinforcedSessionID, "reinforce-existing-session");
+    assert.ok((existing?.retentionClock ?? 0) > oldRetentionClock);
+    assert.equal((await loadSessionState(tmpDir, "reinforce-existing-session")).pendingMemories.length, 0);
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
 test("integration: explicit memory flows from user message through pending journal into workspace", async () => {
   const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-test-"));
 

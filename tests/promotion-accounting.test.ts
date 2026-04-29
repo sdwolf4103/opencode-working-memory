@@ -229,20 +229,3 @@ test("accountPendingPromotions marks manual capacity rejection as retryable", ()
   assert.equal(result.clearableKeys.size, 0);
   assert.deepEqual([...result.retryableRejectedKeys], [memoryKey(pending[0])]);
 });
-
-test("accountPendingPromotions clears compaction stale rejection from accounting", () => {
-  const pending = [mem("pending_stale", "Stale compaction reference should be terminal.", {
-    type: "reference",
-    source: "compaction",
-  })];
-
-  const result = accountPendingPromotions({
-    pending,
-    before: [],
-    after: [],
-    events: [event(pending[0], "rejected_stale")],
-  });
-
-  assert.deepEqual([...result.rejectedKeys], [memoryKey(pending[0])]);
-  assert.deepEqual([...result.clearableKeys], [memoryKey(pending[0])]);
-});

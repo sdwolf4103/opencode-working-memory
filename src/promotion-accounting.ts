@@ -59,7 +59,7 @@ export function accountPendingPromotions(input: {
         continue;
       }
 
-      if (terminal.reason === "rejected_capacity" || terminal.reason === "rejected_stale") {
+      if (terminal.reason === "rejected_capacity") {
         rejectedKeys.add(key);
         continue;
       }
@@ -80,10 +80,7 @@ export function accountPendingPromotions(input: {
     ...input.pending
       .filter(memory => {
         const terminal = terminalEventByKey.get(memoryKey(memory));
-        return memory.source === "compaction" && (
-          terminal?.reason === "rejected_capacity" ||
-          terminal?.reason === "rejected_stale"
-        );
+        return memory.source === "compaction" && terminal?.reason === "rejected_capacity";
       })
       .map(memory => memoryKey(memory)),
   ]);
