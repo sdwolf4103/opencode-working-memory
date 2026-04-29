@@ -22,6 +22,8 @@ import {
   calculateInitialStrength,
   calculateEffectiveHalfLife,
   calculateRetentionStrength,
+  calculateDormantDays,
+  reinforceMemory,
 } from "../src/workspace-memory.ts";
 import { redactCredentials } from "../src/redaction.ts";
 import { assessMemoryQuality, isHardQualityReason, isProgressSnapshotViolation } from "../src/memory-quality.ts";
@@ -310,6 +312,71 @@ test("calculateRetentionStrength falls back to updatedAt when retentionClock is 
 
   const initialStrength = 2.25 * 1.4;
   assert.equal(calculateRetentionStrength(memory, now, 0), initialStrength / 2);
+});
+
+test("calculateDormantDays applies fourteen day workspace activity grace", () => {
+  const now = Date.UTC(2026, 3, 29);
+  const activeWithinGrace: WorkspaceMemoryStore = {
+    version: 1,
+    workspace: { root: "/repo", key: "abc" },
+    limits: { maxRenderedChars: LONG_TERM_LIMITS.maxRenderedChars, maxEntries: LONG_TERM_LIMITS.maxEntries },
+    entries: [],
+    updatedAt: new Date(now).toISOString(),
+    lastActivityAt: new Date(now - 13 * 24 * 60 * 60 * 1000).toISOString(),
+  };
+  const dormantPastGrace: WorkspaceMemoryStore = {
+    ...activeWithinGrace,
+    lastActivityAt: new Date(now - 20 * 24 * 60 * 60 * 1000).toISOString(),
+  };
+
+  assert.equal(calculateDormantDays(activeWithinGrace, now), 0);
+  assert.equal(calculateDormantDays(dormantPastGrace, now), 6);
+});
+
+test("normalizeWorkspaceMemoryWithAccounting uses dormant workspace days for strength ordering", async () => {
+  const now = Date.now();
+  const reinforcedOldReference: LongTermMemoryEntry = {
+    ...entry("reinforced-old", "Reinforced legacy docs live at https://example.com/legacy", "reference"),
+    retentionClock: now - 100 * 24 * 60 * 60 * 1000,
+    reinforcementCount: 6,
+  };
+  const freshReference: LongTermMemoryEntry = {
+    ...entry("fresh", "Fresh docs live at https://example.com/fresh", "reference"),
+    retentionClock: now,
+  };
+  const store: WorkspaceMemoryStore = {
+    version: 1,
+    workspace: { root: "/repo", key: "abc" },
+    limits: { maxRenderedChars: LONG_TERM_LIMITS.maxRenderedChars, maxEntries: LONG_TERM_LIMITS.maxEntries },
+    entries: [freshReference, reinforcedOldReference],
+    updatedAt: new Date(now).toISOString(),
+    lastActivityAt: new Date(now - (14 + 1000) * 24 * 60 * 60 * 1000).toISOString(),
+  };
+
+  const result = await normalizeWorkspaceMemoryWithAccounting("/repo", store);
+
+  assert.deepEqual(result.kept.map(memory => memory.id), ["reinforced-old", "fresh"]);
+});
+
+test("reinforceMemory enforces session interval and max guards", () => {
+  const now = Date.UTC(2026, 3, 29);
+  const base = entry("reinforce", "Durable memory should reinforce only when gated");
+  const reinforced = reinforceMemory(base, "session-a", now);
+
+  assert.notEqual(reinforced, base);
+  assert.equal(reinforced.reinforcementCount, 1);
+  assert.equal(reinforced.lastReinforcedAt, now);
+  assert.equal(reinforced.lastReinforcedSessionID, "session-a");
+
+  assert.equal(reinforceMemory(reinforced, "session-a", now + 2 * 60 * 60 * 1000), reinforced);
+  assert.equal(reinforceMemory(reinforced, "session-b", now + 30 * 60 * 1000), reinforced);
+
+  const atMax: LongTermMemoryEntry = {
+    ...base,
+    reinforcementCount: 6,
+    lastReinforcedAt: now - 2 * 60 * 60 * 1000,
+  };
+  assert.equal(reinforceMemory(atMax, "session-c", now), atMax);
 });
 
 test("enforceLongTermLimits orders entries by retention strength", () => {
@@ -1457,7 +1524,7 @@ test("renderWorkspaceMemory excludes superseded entries", () => {
   assert.doesNotMatch(rendered, /Waves 1-5 已完成/);
 });
 
-test("loadWorkspaceMemory does not rewrite an already normalized store", async () => {
+test("loadWorkspaceMemory records activity for an already normalized store", async () => {
   const sandbox = await mkdtemp(join(tmpdir(), "wm-normalized-"));
   const dataHome = join(sandbox, "xdg-data-home");
   const root = join(sandbox, "workspace");
@@ -1491,11 +1558,12 @@ test("loadWorkspaceMemory does not rewrite an already normalized store", async (
     const before = (await stat(storePath)).mtimeMs;
     await sleep(20);
 
-    await loadWorkspaceMemory(root);
+    const loaded = await loadWorkspaceMemory(root);
     await loadWorkspaceMemory(root);
 
     const after = (await stat(storePath)).mtimeMs;
-    assert.equal(after, before, "normalized loads should not touch the store file");
+    assert.ok(after > before, "normalized loads should update workspace activity timestamp");
+    assert.ok(loaded.lastActivityAt, "load should expose last activity timestamp");
   } finally {
     if (previousXdgDataHome === undefined) {
       delete process.env.XDG_DATA_HOME;
@@ -1506,7 +1574,7 @@ test("loadWorkspaceMemory does not rewrite an already normalized store", async (
   }
 });
 
-test("loadWorkspaceMemory does not persist pure ordering normalization", async () => {
+test("loadWorkspaceMemory preserves ordering while recording activity", async () => {
   const sandbox = await mkdtemp(join(tmpdir(), "wm-ordering-"));
   const dataHome = join(sandbox, "xdg-data-home");
   const root = join(sandbox, "workspace");
@@ -1557,7 +1625,7 @@ test("loadWorkspaceMemory does not persist pure ordering normalization", async (
     const after = (await stat(storePath)).mtimeMs;
 
     assert.deepEqual(loaded.entries.map(memory => memory.id), ["feedback-first", "reference-second"]);
-    assert.equal(after, before, "order-only normalization should not write during load");
+    assert.ok(after > before, "load should write updated workspace activity timestamp");
   } finally {
     if (previousXdgDataHome === undefined) {
       delete process.env.XDG_DATA_HOME;
@@ -1618,7 +1686,10 @@ test("loadWorkspaceMemory persists redaction changes and is stable afterward", a
     await sleep(20);
     await loadWorkspaceMemory(root);
     const afterSecondLoad = (await stat(storePath)).mtimeMs;
-    assert.equal(afterSecondLoad, beforeSecondLoad, "second load should not rewrite redacted content");
+    assert.ok(afterSecondLoad > beforeSecondLoad, "second load should update workspace activity timestamp");
+    const persistedAfterSecondLoad = await readFile(storePath, "utf-8");
+    assert.equal(persistedAfterSecondLoad.includes("sk-test-123"), false);
+    assert.equal(persistedAfterSecondLoad.includes("sushi"), false);
   } finally {
     if (previousXdgDataHome === undefined) {
       delete process.env.XDG_DATA_HOME;

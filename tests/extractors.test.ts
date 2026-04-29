@@ -91,9 +91,13 @@ test("extractExplicitMemories does not treat always as memory trigger", () => {
 });
 
 test("extractExplicitMemories still captures going forward", () => {
+  const before = Date.now();
   const items = extractExplicitMemories("going forward: use pnpm instead of npm");
+  const after = Date.now();
   assert.equal(items.length, 1);
   assert.match(items[0].text, /pnpm/);
+  assert.ok(typeof items[0].retentionClock === "number");
+  assert.ok(items[0].retentionClock >= before && items[0].retentionClock <= after);
 });
 
 test("extractExplicitMemories captures from now on", () => {
@@ -200,14 +204,18 @@ test("parseWorkspaceMemoryCandidates rejects path-heavy facts", () => {
 });
 
 test("parseWorkspaceMemoryCandidates accepts valid decision", () => {
+  const before = Date.now();
   const summary = `
 ## Memory Candidates
 - [decision] Use pnpm instead of npm for package management
 `;
   const items = parseWorkspaceMemoryCandidates(summary);
+  const after = Date.now();
   assert.equal(items.length, 1);
   assert.equal(items[0].type, "decision");
   assert.match(items[0].text, /pnpm/);
+  assert.ok(typeof items[0].retentionClock === "number");
+  assert.ok(items[0].retentionClock >= before && items[0].retentionClock <= after);
 });
 
 test("parseWorkspaceMemoryCandidates accepts valid project info", () => {

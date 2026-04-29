@@ -68,7 +68,8 @@ export function extractExplicitMemories(text: string): LongTermMemoryEntry[] {
     /(?:^|\n)\s*(?:my preference is|i prefer)[:：,，]?\s*(.+)$/gim,
   ];
 
-  const now = new Date().toISOString();
+  const nowMs = Date.now();
+  const now = new Date(nowMs).toISOString();
   const entries: LongTermMemoryEntry[] = [];
   const seen = new Set<string>();
 
@@ -101,6 +102,7 @@ export function extractExplicitMemories(text: string): LongTermMemoryEntry[] {
         status: "active",
         createdAt: now,
         updatedAt: now,
+        retentionClock: nowMs,
         staleAfterDays: staleAfterDaysFor(type),
       });
     }
@@ -317,7 +319,8 @@ export function parseWorkspaceMemoryCandidates(summary: string): LongTermMemoryE
   const block = extractCandidateBlock(summary);
   if (!block) return [];
 
-  const now = new Date().toISOString();
+  const nowMs = Date.now();
+  const now = new Date(nowMs).toISOString();
   const entries: LongTermMemoryEntry[] = [];
 
   for (const line of block.split("\n")) {
@@ -348,6 +351,7 @@ export function parseWorkspaceMemoryCandidates(summary: string): LongTermMemoryE
       status: "active",
       createdAt: now,
       updatedAt: now,
+      retentionClock: nowMs,
       staleAfterDays: staleAfterDaysFor(type),
     });
   }

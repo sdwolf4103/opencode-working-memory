@@ -317,10 +317,14 @@ export const MemoryV2Plugin: Plugin = async (input) => {
           .map(memory => memoryKey(memory)),
       );
 
+      const promotedAt = Date.now();
       for (const memory of pending) {
         const key = memoryKey(memory);
         if (!existingKeys.has(key)) {
-          workspaceMemory.entries.push(memory);
+          workspaceMemory.entries.push({
+            ...memory,
+            retentionClock: memory.retentionClock ?? promotedAt,
+          });
           existingKeys.add(key);
         }
       }
