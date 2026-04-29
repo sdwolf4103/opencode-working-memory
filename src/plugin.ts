@@ -36,6 +36,7 @@ import {
   updateWorkspaceMemory,
   updateWorkspaceMemoryWithAccounting,
   renderWorkspaceMemory,
+  reinforceMemory,
 } from "./workspace-memory.ts";
 import {
   appendPendingMemories,
@@ -311,21 +312,35 @@ export const MemoryV2Plugin: Plugin = async (input) => {
 
     const updateResult = await updateWorkspaceMemoryWithAccounting(directory, workspaceMemory => {
       beforeEntries = [...workspaceMemory.entries];
-      const existingKeys = new Set(
-        workspaceMemory.entries
-          .filter(memory => memory.status !== "superseded")
-          .map(memory => memoryKey(memory)),
-      );
+      const existingByKey = new Map<string, { memory: typeof workspaceMemory.entries[number]; index: number }>();
+      workspaceMemory.entries.forEach((memory, index) => {
+        if (memory.status === "superseded") return;
+        existingByKey.set(memoryKey(memory), { memory, index });
+      });
 
       const promotedAt = Date.now();
       for (const memory of pending) {
         const key = memoryKey(memory);
-        if (!existingKeys.has(key)) {
+        const existing = existingByKey.get(key);
+        if (existing) {
+          const reinforced = reinforceMemory(
+            existing.memory,
+            sessionID ?? memory.pendingOwnerSessionID ?? "workspace-promotion",
+            promotedAt,
+          );
+          if (reinforced !== existing.memory) {
+            workspaceMemory.entries[existing.index] = reinforced;
+            existingByKey.set(key, { memory: reinforced, index: existing.index });
+          }
+        } else {
           workspaceMemory.entries.push({
             ...memory,
             retentionClock: memory.retentionClock ?? promotedAt,
           });
-          existingKeys.add(key);
+          existingByKey.set(key, {
+            memory: workspaceMemory.entries[workspaceMemory.entries.length - 1],
+            index: workspaceMemory.entries.length - 1,
+          });
         }
       }
 

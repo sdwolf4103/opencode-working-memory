@@ -23,6 +23,7 @@ import {
   calculateEffectiveHalfLife,
   calculateRetentionStrength,
   calculateDormantDays,
+  calculateEffectiveAgeDays,
   reinforceMemory,
 } from "../src/workspace-memory.ts";
 import { redactCredentials } from "../src/redaction.ts";
@@ -286,20 +287,32 @@ test("calculateEffectiveHalfLife clamps reinforcement count at configured maximu
   );
 });
 
-test("calculateRetentionStrength decays from retentionClock and applies dormant age", () => {
+test("calculateRetentionStrength slows decay for dormancy after activity grace", () => {
   const now = Date.UTC(2026, 3, 29);
-  const fiveDaysAgo = now - 5 * 24 * 60 * 60 * 1000;
+  const nineteenDaysAgo = now - 19 * 24 * 60 * 60 * 1000;
   const memory: LongTermMemoryEntry = {
     ...entry("retention-clock", "Use TypeScript for plugin code", "reference"),
     source: "compaction",
-    retentionClock: fiveDaysAgo,
+    retentionClock: nineteenDaysAgo,
     updatedAt: new Date(now).toISOString(),
   };
 
-  const expectedEffectiveAgeDays = 5 + 4 * 0.25;
+  // 19 wall-clock days since last activity: 14 active days + 5 dormant days at 25% = 15.25 effective days.
+  const lastActivityAt = new Date(nineteenDaysAgo).toISOString();
+  const expectedEffectiveAgeDays = 14 + 5 * 0.25;
   const expected = Math.pow(2, -expectedEffectiveAgeDays / 45);
 
-  assert.equal(calculateRetentionStrength(memory, now, 4), expected);
+  assert.equal(calculateRetentionStrength(memory, now, lastActivityAt), expected);
+});
+
+test("calculateEffectiveAgeDays matches plan worked dormant example", () => {
+  const now = Date.UTC(2026, 3, 29);
+  const twentyEightDaysAgo = now - 28 * 24 * 60 * 60 * 1000;
+
+  assert.equal(
+    calculateEffectiveAgeDays(twentyEightDaysAgo, now, new Date(twentyEightDaysAgo).toISOString()),
+    17.5,
+  );
 });
 
 test("calculateRetentionStrength falls back to updatedAt when retentionClock is absent", () => {
@@ -311,7 +324,7 @@ test("calculateRetentionStrength falls back to updatedAt when retentionClock is 
   };
 
   const initialStrength = 2.25 * 1.4;
-  assert.equal(calculateRetentionStrength(memory, now, 0), initialStrength / 2);
+  assert.equal(calculateRetentionStrength(memory, now), initialStrength / 2);
 });
 
 test("calculateDormantDays applies fourteen day workspace activity grace", () => {
@@ -329,14 +342,14 @@ test("calculateDormantDays applies fourteen day workspace activity grace", () =>
     lastActivityAt: new Date(now - 20 * 24 * 60 * 60 * 1000).toISOString(),
   };
 
-  assert.equal(calculateDormantDays(activeWithinGrace, now), 0);
-  assert.equal(calculateDormantDays(dormantPastGrace, now), 6);
+  assert.equal(calculateDormantDays(activeWithinGrace, now), 13);
+  assert.equal(calculateDormantDays(dormantPastGrace, now), 20);
 });
 
 test("normalizeWorkspaceMemoryWithAccounting uses dormant workspace days for strength ordering", async () => {
   const now = Date.now();
   const reinforcedOldReference: LongTermMemoryEntry = {
-    ...entry("reinforced-old", "Reinforced legacy docs live at https://example.com/legacy", "reference"),
+    ...entry("reinforced-old", "Project uses the legacy local plugin architecture", "project"),
     retentionClock: now - 100 * 24 * 60 * 60 * 1000,
     reinforcementCount: 6,
   };
@@ -367,6 +380,7 @@ test("reinforceMemory enforces session interval and max guards", () => {
   assert.equal(reinforced.reinforcementCount, 1);
   assert.equal(reinforced.lastReinforcedAt, now);
   assert.equal(reinforced.lastReinforcedSessionID, "session-a");
+  assert.equal(reinforced.retentionClock, now);
 
   assert.equal(reinforceMemory(reinforced, "session-a", now + 2 * 60 * 60 * 1000), reinforced);
   assert.equal(reinforceMemory(reinforced, "session-b", now + 30 * 60 * 1000), reinforced);
@@ -377,6 +391,30 @@ test("reinforceMemory enforces session interval and max guards", () => {
     lastReinforcedAt: now - 2 * 60 * 60 * 1000,
   };
   assert.equal(reinforceMemory(atMax, "session-c", now), atMax);
+});
+
+test("dedupeLongTermEntriesWithAccounting reinforces absorbed exact duplicates", () => {
+  const now = Date.now();
+  const retained: LongTermMemoryEntry = {
+    ...entry("retained", "Use pnpm for package management", "decision"),
+    retentionClock: now - 10 * 24 * 60 * 60 * 1000,
+    createdAt: new Date(now - 10 * 24 * 60 * 60 * 1000).toISOString(),
+    updatedAt: new Date(now - 10 * 24 * 60 * 60 * 1000).toISOString(),
+  };
+  const duplicate: LongTermMemoryEntry = {
+    ...entry("duplicate", "use pnpm for package management!!!", "decision"),
+    pendingOwnerSessionID: "reinforce-session",
+    createdAt: new Date(now).toISOString(),
+    updatedAt: new Date(now).toISOString(),
+  };
+
+  const result = dedupeLongTermEntriesWithAccounting([retained, duplicate]);
+
+  assert.equal(result.kept.length, 1);
+  assert.equal(result.kept[0].id, "duplicate");
+  assert.equal(result.kept[0].reinforcementCount, 1);
+  assert.equal(result.kept[0].lastReinforcedSessionID, "reinforce-session");
+  assert.ok(typeof result.kept[0].retentionClock === "number");
 });
 
 test("enforceLongTermLimits orders entries by retention strength", () => {
@@ -631,7 +669,7 @@ test("normalizeWorkspaceMemoryWithAccounting reports overflow capacity drops", a
   assert.equal(result.dropped.filter(event => event.reason === "rejected_capacity").length, 1);
 });
 
-test("normalizeWorkspaceMemoryWithAccounting reports stale entry removal", async () => {
+test("normalizeWorkspaceMemoryWithAccounting retains stale entries for cap competition", async () => {
   const root = "/repo";
   const now = new Date().toISOString();
   const stale = agedEntry(
@@ -651,10 +689,10 @@ test("normalizeWorkspaceMemoryWithAccounting reports stale entry removal", async
 
   const result = await normalizeWorkspaceMemoryWithAccounting(root, store);
 
-  assert.equal(result.kept.length, 0);
-  assert.equal(result.store.entries.length, 0);
-  assert.deepEqual(result.dropped.map(event => event.reason), ["rejected_stale"]);
-  assert.equal(result.dropped[0].memory.id, "stale_normalize");
+  assert.equal(result.kept.length, 1);
+  assert.equal(result.store.entries.length, 1);
+  assert.equal(result.dropped.length, 0);
+  assert.equal(result.kept[0].id, "stale_normalize");
 });
 
 test("updateWorkspaceMemoryWithAccounting emits accounting events for persisted updates", async () => {
@@ -809,14 +847,13 @@ test("enforceLongTermLimits feedback: exact canonical duplicates still collapse"
   assert.equal(feedbackEntries.length, 1, "Exact canonical feedback duplicates should still collapse");
 });
 
-test("enforceLongTermLimits stale: compaction entry older than staleAfterDays+grace is pruned", () => {
-  // decision with staleAfterDays=45, 76 days old (> 45+30 grace=75)
+test("enforceLongTermLimits stale: old compaction entry remains eligible for cap competition", () => {
   const entries = [
     agedEntry("stale", "Compaction output contract changed from XML to HTML comments to avoid Markdown rendering issues", "decision", { daysAgo: 76, staleAfterDays: 45 }),
   ];
 
   const kept = enforceLongTermLimits(entries);
-  assert.equal(kept.length, 0, "Stale compaction entry should be pruned");
+  assert.equal(kept.length, 1, "Stale compaction entry should decay but not be hard-pruned");
 });
 
 test("enforceLongTermLimits stale: explicit entry is retained even if old", () => {

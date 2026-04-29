@@ -19,6 +19,7 @@ const REINFORCEMENT_MAX_COUNT = 6;
 const REINFORCEMENT_MIN_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
 const WORKSPACE_DORMANT_AFTER_DAYS = 14;
 const DORMANT_DECAY_MULTIPLIER = 0.25;
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 const TYPE_FACTOR = {
   reference: 1.0,
@@ -69,7 +70,7 @@ export function calculateEffectiveHalfLife(memory: LongTermMemoryEntry): number 
 export function calculateRetentionStrength(
   memory: LongTermMemoryEntry,
   now: number,
-  dormantDays: number,
+  lastActivityAt?: string,
 ): number {
   const initialStrength = calculateInitialStrength(memory);
   const effectiveHalfLife = calculateEffectiveHalfLife(memory);
@@ -77,15 +78,7 @@ export function calculateRetentionStrength(
   // Use retentionClock if available, fallback to updatedAt.
   const retentionStart = memory.retentionClock ?? memory.updatedAt;
   const createdAtMs = new Date(retentionStart).getTime();
-  const ageMs = now - createdAtMs;
-  const ageDays = ageMs / (24 * 60 * 60 * 1000);
-
-  // Apply dormant boost to effective age.
-  let effectiveAgeDays = ageDays;
-  if (dormantDays > 0) {
-    // Dormant workspace ages faster.
-    effectiveAgeDays += dormantDays * DORMANT_DECAY_MULTIPLIER;
-  }
+  const effectiveAgeDays = calculateEffectiveAgeDays(createdAtMs, now, lastActivityAt);
 
   // Calculate strength using exponential decay.
   const strength = initialStrength * Math.pow(2, -effectiveAgeDays / effectiveHalfLife);
@@ -99,8 +92,28 @@ export function calculateDormantDays(store: WorkspaceMemoryStore, now: number): 
     : now;
   if (!Number.isFinite(lastActivity)) return 0;
 
-  const daysSinceActivity = (now - lastActivity) / (24 * 60 * 60 * 1000);
-  return Math.max(0, daysSinceActivity - WORKSPACE_DORMANT_AFTER_DAYS);
+  const daysSinceActivity = (now - lastActivity) / DAY_MS;
+  return Math.max(0, daysSinceActivity);
+}
+
+export function calculateEffectiveAgeDays(
+  entryStartMs: number,
+  now: number,
+  lastActivityAt?: string,
+): number {
+  const wallAgeDays = Math.max(0, (now - entryStartMs) / DAY_MS);
+
+  if (!lastActivityAt) return wallAgeDays;
+
+  const lastActivityMs = new Date(lastActivityAt).getTime();
+  if (!Number.isFinite(lastActivityMs)) return wallAgeDays;
+
+  const dormantStartMs = lastActivityMs + WORKSPACE_DORMANT_AFTER_DAYS * DAY_MS;
+  const overlapStartMs = Math.max(entryStartMs, dormantStartMs);
+  const dormantOverlapDays = Math.max(0, (now - overlapStartMs) / DAY_MS);
+  const activeDays = wallAgeDays - dormantOverlapDays;
+
+  return activeDays + dormantOverlapDays * DORMANT_DECAY_MULTIPLIER;
 }
 
 export function reinforceMemory(
@@ -125,6 +138,7 @@ export function reinforceMemory(
     reinforcementCount: (memory.reinforcementCount ?? 0) + 1,
     lastReinforcedAt: now,
     lastReinforcedSessionID: sessionId,
+    retentionClock: now,
   };
 }
 
@@ -133,8 +147,7 @@ export type MemoryConsolidationReason =
   | "absorbed_exact"
   | "absorbed_identity"
   | "superseded_existing"
-  | "rejected_capacity"
-  | "rejected_stale";
+  | "rejected_capacity";
 
 export type MemoryConsolidationEvent = {
   memoryKey: string;
@@ -568,19 +581,6 @@ function consolidationEvent(
   };
 }
 
-/** Check if entry should be pruned by age (for compaction/manual entries only) */
-function isPrunableByAge(entry: LongTermMemoryEntry, now: number): boolean {
-  // Never prune feedback or explicit entries
-  if (entry.type === "feedback") return false;
-  if (entry.source === "explicit") return false;
-  if (!entry.staleAfterDays) return false;
-
-  const createdAt = new Date(entry.createdAt).getTime();
-  const ageDays = (now - createdAt) / 86400000;
-  const grace = 30; // 30-day grace period
-  return ageDays > entry.staleAfterDays + grace;
-}
-
 /** Choose better memory when identity/topic keys conflict */
 function chooseBetterMemory(
   a: LongTermMemoryEntry,
@@ -621,22 +621,18 @@ export function enforceLongTermLimitsWithAccounting(
   store?: WorkspaceMemoryStore,
 ): LongTermLimitResult {
   const now = Date.now();
-  const dormantDays = store ? calculateDormantDays(store, now) : 0;
-  const staleDropped: MemoryConsolidationEvent[] = [];
+  const lastActivityAt = store?.lastActivityAt;
 
-  // Phase 1: filter active, prune by age
+  // Phase 1: filter active entries and trim text. Retention removal is by
+  // strength/cap competition, not hard stale pruning.
   const phase1: LongTermMemoryEntry[] = [];
   for (const entry of entries) {
     if (entry.status === "superseded") continue;
-    if (isPrunableByAge(entry, now)) {
-      staleDropped.push(consolidationEvent(entry, "rejected_stale"));
-      continue;
-    }
     phase1.push({ ...entry, text: entry.text.slice(0, LONG_TERM_LIMITS.maxEntryTextChars) });
   }
 
   const dedupeResult = dedupeLongTermEntriesWithAccounting(phase1);
-  const sorted = [...dedupeResult.kept].sort((a, b) => compareLongTermMemoryForRetention(a, b, now, dormantDays));
+  const sorted = [...dedupeResult.kept].sort((a, b) => compareLongTermMemoryForRetention(a, b, now, lastActivityAt));
   const capped = applyTypeMaxCaps(sorted);
   const kept = capped.slice(0, LONG_TERM_LIMITS.maxEntries);
   const keptIds = new Set(kept.map(entry => entry.id));
@@ -646,7 +642,7 @@ export function enforceLongTermLimitsWithAccounting(
 
   return {
     kept,
-    dropped: [...staleDropped, ...dedupeResult.dropped, ...capacityDropped],
+    dropped: [...dedupeResult.dropped, ...capacityDropped],
     absorbed: dedupeResult.absorbed,
     superseded: dedupeResult.superseded,
   };
@@ -674,6 +670,7 @@ function applyTypeMaxCaps(entries: LongTermMemoryEntry[]): LongTermMemoryEntry[]
 }
 
 export function dedupeLongTermEntriesWithAccounting(entries: LongTermMemoryEntry[]): LongTermLimitResult {
+  const now = Date.now();
   const absorbed: MemoryConsolidationEvent[] = [];
   const superseded: MemoryConsolidationEvent[] = [];
 
@@ -694,12 +691,14 @@ export function dedupeLongTermEntriesWithAccounting(entries: LongTermMemoryEntry
       const reason = workspaceMemoryExactKey(entry) === workspaceMemoryExactKey(existing)
         ? "absorbed_exact" as const
         : "absorbed_identity" as const;
+      const reinforced = reinforceMemory(
+        retained,
+        reinforcementSessionId(retained, dropped),
+        now,
+      );
 
-      absorbed.push(consolidationEvent(dropped, reason, retained));
-
-      if (retained === entry) {
-        entityDeduped.set(key, entry);
-      }
+      absorbed.push(consolidationEvent(dropped, reason, reinforced));
+      entityDeduped.set(key, reinforced);
     }
   }
 
@@ -718,16 +717,19 @@ export function dedupeLongTermEntriesWithAccounting(entries: LongTermMemoryEntry
       const reason = workspaceMemoryExactKey(entry) === workspaceMemoryExactKey(existing)
         ? "absorbed_exact" as const
         : "superseded_existing" as const;
+      const reinforced = reinforceMemory(
+        retained,
+        reinforcementSessionId(retained, dropped),
+        now,
+      );
 
       if (reason === "superseded_existing") {
-        superseded.push(consolidationEvent(dropped, reason, retained));
+        superseded.push(consolidationEvent(dropped, reason, reinforced));
       } else {
-        absorbed.push(consolidationEvent(dropped, reason, retained));
+        absorbed.push(consolidationEvent(dropped, reason, reinforced));
       }
 
-      if (retained === entry) {
-        decisionDeduped.set(key, entry);
-      }
+      decisionDeduped.set(key, reinforced);
     }
   }
 
@@ -745,14 +747,18 @@ export function dedupeLongTermEntriesWithAccounting(entries: LongTermMemoryEntry
   };
 }
 
+function reinforcementSessionId(retained: LongTermMemoryEntry, dropped: LongTermMemoryEntry): string {
+  return dropped.pendingOwnerSessionID ?? retained.pendingOwnerSessionID ?? "workspace-dedupe";
+}
+
 function compareLongTermMemoryForRetention(
   a: LongTermMemoryEntry,
   b: LongTermMemoryEntry,
   now: number,
-  dormantDays: number,
+  lastActivityAt?: string,
 ): number {
-  const strengthA = calculateRetentionStrength(a, now, dormantDays);
-  const strengthB = calculateRetentionStrength(b, now, dormantDays);
+  const strengthA = calculateRetentionStrength(a, now, lastActivityAt);
+  const strengthB = calculateRetentionStrength(b, now, lastActivityAt);
   if (strengthB !== strengthA) return strengthB - strengthA;
 
   const sourceDiff = sourcePriority(b.source) - sourcePriority(a.source);
