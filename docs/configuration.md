@@ -8,8 +8,8 @@ OpenCode Working Memory works out-of-the-box with sensible defaults. Configurati
 
 ```typescript
 const LONG_TERM_LIMITS = {
-  maxRenderedChars: 5200,    // Maximum characters in system prompt
-  targetRenderedChars: 4200, // Target characters (leave buffer)
+  maxRenderedChars: 3600,    // Maximum characters in system prompt
+  targetRenderedChars: 3000, // Target characters (leave buffer)
   maxEntries: 28,            // Maximum number of entries
   maxEntryTextChars: 260,    // Maximum characters per entry text
   maxRationaleChars: 180,    // Maximum characters per entry rationale
@@ -18,14 +18,40 @@ const LONG_TERM_LIMITS = {
 
 **Recommendations**:
 - Keep `maxRenderedChars` under 5500 to avoid context bloat
+- Defaults are calibrated from observed rendered usage that was typically under ~2000 characters
 - `maxEntries` of 28 provides good coverage without overwhelming
 - Entry text limits ensure entries stay concise
+
+## Retention Model Defaults
+
+Workspace memory retention uses strength-based decay. These constants live in `src/workspace-memory.ts`:
+
+```typescript
+const BASE_HALF_LIFE_DAYS = 45;
+const REINFORCEMENT_HALFLIFE_FACTOR = 0.85;
+const REINFORCEMENT_MAX_COUNT = 6;
+const WORKSPACE_DORMANT_AFTER_DAYS = 14;
+const DORMANT_DECAY_MULTIPLIER = 0.25;
+```
+
+Initial strength uses type, source, user importance, and safety-critical factors. Confidence is stored for compatibility but is not used for retention scoring.
+
+Rendered type caps prevent one type from filling all workspace memory slots:
+
+| Type | Rendered cap |
+|------|--------------|
+| `feedback` | 10 |
+| `decision` | 10 |
+| `project` | 8 |
+| `reference` | 6 |
+
+Safety-critical memories are exempt from type caps but still compete under the global `maxEntries` limit. Old or stale-marked memories are not hard-pruned by age; they lose rendered space through strength and cap competition.
 
 ## Hot Session State Limits
 
 ```typescript
 const HOT_STATE_LIMITS = {
-  maxRenderedChars: 1200,       // Maximum characters in system prompt
+  maxRenderedChars: 700,        // Maximum characters in system prompt
   maxActiveFilesStored: 20,    // Maximum files tracked in state
   maxActiveFilesRendered: 8,   // Maximum files shown in prompt
   maxOpenErrorsStored: 5,      // Maximum errors tracked
@@ -36,6 +62,7 @@ const HOT_STATE_LIMITS = {
 
 **Recommendations**:
 - Keep `maxRenderedChars` under 1500 for fast prompts
+- Defaults are calibrated from observed rendered usage around ~500 characters or less
 - `maxActiveFilesRendered` of 8 provides good context coverage
 - `maxOpenErrorsRendered` of 3 avoids overwhelming error lists
 
@@ -43,12 +70,12 @@ const HOT_STATE_LIMITS = {
 
 ### Long-Term Memory Types
 
-| Type | Purpose | Stale After (days) |
-|------|---------|---------------------|
-| `feedback` | User preferences for workspace | 90 |
-| `project` | Project-level information | 60 |
-| `decision` | Important decisions | 45 |
-| `reference` | Key references | 90 |
+| Type | Purpose | Rendered cap |
+|------|---------|--------------|
+| `feedback` | User preferences for workspace | 10 |
+| `project` | Project-level information | 8 |
+| `decision` | Important decisions | 10 |
+| `reference` | Key references | 6 |
 
 ### Memory Sources
 
@@ -114,7 +141,7 @@ To customize limits, edit the constants in `src/types.ts`:
 ```typescript
 // Example: Increase workspace memory limit
 export const LONG_TERM_LIMITS = {
-  maxRenderedChars: 6000,  // Increased from 5200
+  maxRenderedChars: 6000,  // Increased from 3600
   maxEntries: 35,          // Increased from 28
   // ...
 };
@@ -144,7 +171,7 @@ const HOT_STATE_LIMITS = {
 // Preserve more context
 const LONG_TERM_LIMITS = {
   maxEntries: 40,              // Increased
-  targetRenderedChars: 5000,    // Increased
+  targetRenderedChars: 5000,   // Increased
 };
 ```
 
@@ -174,6 +201,16 @@ cat ~/.local/share/opencode-working-memory/workspaces/*/workspace-memory.json | 
 # Session state
 cat ~/.local/share/opencode-working-memory/workspaces/*/sessions/*.json | jq
 ```
+
+### Inspect Retention Health
+
+From a source checkout, maintainers can inspect stored vs rendered memory behavior:
+
+```bash
+bun scripts/memory-diag.ts health
+```
+
+The health output includes stored active memories, rendered candidates, type caps, global cap overflow, dormancy status, retention monitoring alerts, and strength-ranked top/weakest entries.
 
 ### Clear Workspace Memory
 

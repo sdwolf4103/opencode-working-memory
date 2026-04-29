@@ -1,5 +1,106 @@
 # Release Notes
 
+## 1.5.0 (2026-04-29)
+
+### Retention Decay Model
+
+This release changes workspace memory retention from hard stale pruning and additive priority scoring to a strength-based decay model.
+
+Think of it like a forgetting curve: memories fade over time, but important, reinforced, and safety-critical memories decay slower. Weak entries fall out of rendered prompt context by cap competition, not hard deletion.
+
+> **Memory should fade, so the agent can keep learning.**
+> Important memories decay slower, but every memory must leave room for newer project reality and avoid long-term memory pollution.
+
+```text
+  strength
+    │
+ ██ │╲____   reinforced: slower decline
+    │     ╲______
+ ▒▒ │            ╲__ ordinary memory
+    │               ╲
+    ├ ─ ─ ─ ─ ─ ─ ─ ─╲─ dynamic cap competition zone
+ ░░ │                 ╲  easier for new memories to replace
+    │                  ↑ still stored, not deleted
+    └──────────────────────────────→ time / sessions
+```
+
+### What Changed
+
+- **Strength-based retention**: workspace memory now uses exponential decay: initial strength × age decay.
+- **Better initial strength**: type, source, user importance, and safety-critical status now determine how strong a memory starts.
+- **No confidence scoring**: confidence remains in stored data for compatibility, but it no longer affects retention ranking.
+- **Type caps**: rendered workspace memory now caps feedback, decisions, project facts, and references separately so one type cannot monopolize all 28 slots.
+- **Safety-critical protection**: safety-critical entries get stronger retention and are exempt from per-type caps, while still competing under the global rendered cap.
+- **Dormant-aware age**: after 14 inactive days, additional dormant workspace time counts at 0.25x so paused projects do not forget too aggressively.
+- **Reinforcement**: repeated matching memories reinforce the survivor and slow future decay, with same-session and one-hour guards to avoid accidental spam.
+- **No hard stale pruning**: old or stale-marked memories are no longer automatically dropped by age; they lose rendered space only through cap competition.
+- **Calibrated prompt budgets**: observed rendered output was typically under ~2000 characters for workspace memory and ~500 characters for hot session state, so defaults were reduced to 3600 and 700 characters to keep overhead lower while retaining buffer.
+- **Clearer health output**: `memory-diag health` now reports stored vs rendered counts, type caps, global cap overflow, dormancy, retention monitoring, and strength-ranked top/weakest entries.
+
+### Why This Helps
+
+- User preferences and explicit memories are less likely to disappear just because inferred project facts are newer.
+- Feedback, decisions, project facts, and references share prompt space more fairly.
+- Returning to an old workspace is less punishing because dormant time decays more slowly.
+- Maintainers can see why memories are rendered or capped instead of guessing from a single active-memory count.
+- Stale entries can fade out of prompt context without destructive cleanup.
+
+### Diagnostics
+
+Maintainers can inspect retention behavior with:
+
+```bash
+bun scripts/memory-diag.ts health
+```
+
+The health output now includes sections like:
+
+```txt
+Stored active memories: 28
+Rendered candidates: 20
+
+By type:
+  feedback  stored=17  rendered=10  typeCap=10
+  decision  stored=11  rendered=10  typeCap=10
+
+Retention caps:
+  type-capped entries: 8
+  global-cap overflow: 0
+
+Dormancy:
+  dormant discount active: no
+
+Retention monitoring:
+  high_importance_ratio: 0.0% (alert > 30%)
+```
+
+### Not Included Yet
+
+- Delete tombstones are not implemented in this release.
+- Explicit `supersedes` chain enforcement is still deferred.
+- Hot/warm/cold tiered storage remains future work.
+
+### Upgrade Notes
+
+- No configuration changes required.
+- Existing workspace memory files remain compatible.
+- Existing entries without a `retentionClock` fall back safely to existing timestamps.
+- The OpenCode config entry stays the same:
+
+```json
+{
+  "plugin": ["opencode-working-memory"]
+}
+```
+
+### Validation
+
+- `npm run typecheck`
+- `npm test` — 237 tests passing
+- `bun scripts/memory-diag.ts health`
+
+---
+
 ## 1.4.0 (2026-04-28)
 
 ### Memory Quality Cleanup

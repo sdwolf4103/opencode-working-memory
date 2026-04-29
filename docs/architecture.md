@@ -10,7 +10,7 @@ OpenCode Working Memory implements a **three-layer memory architecture** designe
 │  • Persistent storage: ~/.local/share/opencode-working-...  │
 │  • Types: feedback | project | decision | reference        │
 │  • Sources: explicit | compaction | manual                  │
-│  • Limits: 5200 chars / 28 entries                          │
+│  • Render limits: 3600 chars / 28 entries                    │
 │  • Survives: session reset, compaction (same workspace)    │
 └─────────────────────────────────────────────────────────────┘
                               ↓
@@ -48,8 +48,9 @@ Long-term memory that persists across sessions within the same workspace. Perfec
   {
     version: 1,
     workspace: { root: string, key: string },
-    limits: { maxRenderedChars: 5200, maxEntries: 28 },
+    limits: { maxRenderedChars: 3600, maxEntries: 28 },
     entries: LongTermMemoryEntry[],
+    lastActivityAt?: string,
     updatedAt: string
   }
   ```
@@ -90,17 +91,46 @@ Memory candidates:
 - Path-heavy facts (>50% paths)
 - Very short text (<20 chars)
 
-### Consolidation and Deduplication
+### Consolidation, Deduplication, and Retention
 
 Memories are deduplicated and consolidated with accounting:
 
 1. Normalize exact text: lowercase, strip punctuation, collapse whitespace.
 2. Group project/reference entries by identity where possible.
-3. Group decisions and feedback by topic where possible.
-4. Keep the best surviving entry by source, confidence, type, and freshness rules.
+3. Keep decision and feedback entries on exact canonical matching to avoid broad semantic merges.
+4. Keep the best surviving entry by source, confidence, specificity, and freshness tie-breakers.
 5. Emit accounting events so pending memories can be classified as promoted, absorbed, superseded, or rejected.
 
 This prevents absorbed or superseded pending memories from retrying forever while still preserving the active surviving memory.
+
+Retention then decides which active memories are rendered into prompt context. It does not hard-delete old memories by age.
+
+```typescript
+strength = initialStrength * 2 ** (-effectiveAgeDays / effectiveHalfLifeDays)
+```
+
+Initial strength is based on memory type, source, optional user importance, and safety-critical status. Confidence remains stored for compatibility but is not part of retention scoring.
+
+Rendered candidates are selected in this order:
+
+1. Exclude `status: "superseded"` entries.
+2. Compute current retention strength.
+3. Sort by strength descending.
+4. Apply per-type caps, with safety-critical entries exempt from type caps.
+5. Keep the top 28 rendered entries under the workspace memory character budget.
+
+Default type caps:
+
+| Type | Rendered cap |
+|------|--------------|
+| `feedback` | 10 |
+| `decision` | 10 |
+| `project` | 8 |
+| `reference` | 6 |
+
+The type-cap total is 34, intentionally above the global 28-entry cap. These are maximums, not quotas.
+
+Dormant workspaces age more slowly: after 14 inactive days, additional dormant time counts at 0.25x for retention decay. Repeated duplicate memories reinforce the surviving entry and slow future decay, but same-session and under-one-hour repeats do not stack reinforcement.
 
 ### System Prompt Injection
 
@@ -241,7 +271,7 @@ Applies quality gate, redaction, migration, consolidation accounting, deduplicat
 - `session.compacted`: Promote session decisions to workspace memory
 - `session.deleted`: Clean up session state files
 
-Promotion uses accounting results from workspace memory normalization. Pending memories that are kept are promoted; duplicate memories are absorbed; obsolete same-topic memories are superseded; stale or over-capacity compaction memories are rejected.
+Promotion uses accounting results from workspace memory normalization. Pending memories that are kept are promoted; duplicate memories are absorbed; exact decision replacements can be superseded; over-capacity compaction memories are rejected. Stale-marked memories are not hard-pruned by age; they lose rendered space through retention strength and cap competition.
 
 ## Quality Guarantees
 
@@ -319,14 +349,14 @@ const workspaceKey = sha256(realpath(workspaceRoot)).slice(0, 16)
 
 | Layer | Max Chars | Max Entries |
 |-------|-----------|-------------|
-| Workspace Memory | 5200 | 28 |
-| Hot Session State | 1200 | 8 files, 3 errors |
+| Workspace Memory | 3600 | 28 |
+| Hot Session State | 700 | 8 files, 3 errors |
 
 ### Injection Overhead
 
-- Workspace memory: ~200-500 chars per message
-- Hot session state: ~200-400 chars per message
-- Total: ~400-900 chars per message (minimal)
+- Workspace memory: usually under ~2000 chars in observed rendered output
+- Hot session state: usually under ~500 chars in observed rendered output
+- Total: typically well below the configured maximums
 
 ### Storage Footprint
 
