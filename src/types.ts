@@ -20,6 +20,11 @@ export type LongTermMemoryEntry = {
   promotionAttempts?: number;
   lastPromotionAttemptAt?: string;
   lastPromotionFailureReason?: string;
+  retentionClock?: number;        // Unix timestamp when retention started
+  reinforcementCount?: number;    // Number of times this memory was reinforced
+  lastReinforcedAt?: number;      // Unix timestamp of last reinforcement
+  userImportance?: "low" | "normal" | "high";
+  safetyCritical?: boolean;
 };
 
 export type WorkspaceMemoryStore = {
