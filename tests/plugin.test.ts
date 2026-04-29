@@ -772,6 +772,11 @@ test("session.compacted promotes pending memories to workspace memory and clears
 
     const workspacePrompt = after.system.find((part: string) => part.startsWith("Workspace memory"));
     assert.match(workspacePrompt ?? "", /Use frozen rendered snapshots for cache stability/);
+
+    const workspace = await loadWorkspaceMemory(tmpDir);
+    const promoted = workspace.entries.find(entry => entry.id === "mem_pending_1");
+    assert.ok(typeof promoted?.retentionClock === "number",
+      "legacy pending memory should receive a retention clock when promoted");
   } finally {
     await rm(tmpDir, { recursive: true, force: true });
   }

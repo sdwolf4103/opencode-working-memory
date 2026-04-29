@@ -23,6 +23,7 @@ export type LongTermMemoryEntry = {
   retentionClock?: number;        // Unix timestamp when retention started
   reinforcementCount?: number;    // Number of times this memory was reinforced
   lastReinforcedAt?: number;      // Unix timestamp of last reinforcement
+  lastReinforcedSessionID?: string;
   userImportance?: "low" | "normal" | "high";
   safetyCritical?: boolean;
 };
@@ -40,6 +41,7 @@ export type WorkspaceMemoryStore = {
   entries: LongTermMemoryEntry[];
   migrations?: string[];
   updatedAt: string;
+  lastActivityAt?: string;
 };
 
 export type PendingMemoryJournalStore = {

@@ -93,6 +93,41 @@ export function calculateRetentionStrength(
   return Math.max(0, strength);
 }
 
+export function calculateDormantDays(store: WorkspaceMemoryStore, now: number): number {
+  const lastActivity = store.lastActivityAt
+    ? new Date(store.lastActivityAt).getTime()
+    : now;
+  if (!Number.isFinite(lastActivity)) return 0;
+
+  const daysSinceActivity = (now - lastActivity) / (24 * 60 * 60 * 1000);
+  return Math.max(0, daysSinceActivity - WORKSPACE_DORMANT_AFTER_DAYS);
+}
+
+export function reinforceMemory(
+  memory: LongTermMemoryEntry,
+  sessionId: string,
+  now: number,
+): LongTermMemoryEntry {
+  if (memory.lastReinforcedSessionID === sessionId) {
+    return memory;
+  }
+
+  if (memory.lastReinforcedAt && now - memory.lastReinforcedAt < REINFORCEMENT_MIN_INTERVAL_MS) {
+    return memory;
+  }
+
+  if ((memory.reinforcementCount ?? 0) >= REINFORCEMENT_MAX_COUNT) {
+    return memory;
+  }
+
+  return {
+    ...memory,
+    reinforcementCount: (memory.reinforcementCount ?? 0) + 1,
+    lastReinforcedAt: now,
+    lastReinforcedSessionID: sessionId,
+  };
+}
+
 export type MemoryConsolidationReason =
   | "promoted"
   | "absorbed_exact"
@@ -138,6 +173,7 @@ export type QualityCleanupMigrationLogEntry = {
 };
 
 export async function emptyWorkspaceMemory(root: string): Promise<WorkspaceMemoryStore> {
+  const nowIso = new Date().toISOString();
   return {
     version: 1,
     workspace: { root, key: await workspaceKey(root) },
@@ -147,7 +183,8 @@ export async function emptyWorkspaceMemory(root: string): Promise<WorkspaceMemor
     },
     entries: [],
     migrations: [],
-    updatedAt: new Date().toISOString(),
+    updatedAt: nowIso,
+    lastActivityAt: nowIso,
   };
 }
 
@@ -166,6 +203,7 @@ export async function loadWorkspaceMemory(root: string): Promise<WorkspaceMemory
     entries: Array.isArray(loaded.entries) ? loaded.entries : [],
     migrations: Array.isArray(loaded.migrations) ? loaded.migrations : [],
     updatedAt: loaded.updatedAt ?? fallback.updatedAt,
+    lastActivityAt: loaded.lastActivityAt ?? loaded.updatedAt ?? fallback.lastActivityAt,
   };
 
   // Always normalize on load so redaction/migrations are always-on.
@@ -195,6 +233,7 @@ function hasSecurityOrMigrationChange(
 
   const beforeMigrations = JSON.stringify(before.migrations ?? []);
   const afterMigrations = JSON.stringify(after.migrations ?? []);
+  if ((before.lastActivityAt ?? "") !== (after.lastActivityAt ?? "")) return true;
   return beforeMigrations !== afterMigrations;
 }
 
@@ -302,12 +341,13 @@ export async function normalizeWorkspaceMemoryWithAccounting(
   // archived as superseded records in this wave.
   const activeEntries = result.entries.filter(entry => entry.status !== "superseded");
   const supersededEntries = result.entries.filter(entry => entry.status === "superseded");
-  const accounting = enforceLongTermLimitsWithAccounting(activeEntries);
+  const accounting = enforceLongTermLimitsWithAccounting(activeEntries, result);
 
   const normalizedStore = {
     ...result,
     entries: [...accounting.kept, ...supersededEntries],
     updatedAt: nowIso,
+    lastActivityAt: nowIso,
   };
 
   return {
@@ -576,11 +616,12 @@ export function enforceLongTermLimits(entries: LongTermMemoryEntry[]): LongTermM
   return enforceLongTermLimitsWithAccounting(entries).kept;
 }
 
-export function enforceLongTermLimitsWithAccounting(entries: LongTermMemoryEntry[]): LongTermLimitResult {
+export function enforceLongTermLimitsWithAccounting(
+  entries: LongTermMemoryEntry[],
+  store?: WorkspaceMemoryStore,
+): LongTermLimitResult {
   const now = Date.now();
-  // Store-level last activity tracking is not available yet; dormant handling
-  // will be wired in a later wave.
-  const dormantDays = 0;
+  const dormantDays = store ? calculateDormantDays(store, now) : 0;
   const staleDropped: MemoryConsolidationEvent[] = [];
 
   // Phase 1: filter active, prune by age
@@ -731,7 +772,7 @@ function wouldFit(
 }
 
 export function renderWorkspaceMemory(store: WorkspaceMemoryStore): string {
-  const active = enforceLongTermLimits(store.entries);
+  const active = enforceLongTermLimitsWithAccounting(store.entries, store).kept;
   if (active.length === 0) return "";
 
   const maxChars = Math.min(
