@@ -31,6 +31,8 @@ import { assessMemoryQuality, isHardQualityReason, isProgressSnapshotViolation }
 import { reviewerCurrent28Fixture } from "./fixtures/memory-quality-current-28.ts";
 import { REAL_WORKSPACE_FIXTURES } from "./fixtures/real-workspaces-snapshot.ts";
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+
 function entry(id: string, text: string, type: LongTermMemoryEntry["type"] = "decision"): LongTermMemoryEntry {
   const now = new Date().toISOString();
   return {
@@ -289,7 +291,7 @@ test("calculateEffectiveHalfLife clamps reinforcement count at configured maximu
 
 test("calculateRetentionStrength slows decay for dormancy after activity grace", () => {
   const now = Date.UTC(2026, 3, 29);
-  const nineteenDaysAgo = now - 19 * 24 * 60 * 60 * 1000;
+  const nineteenDaysAgo = now - 19 * DAY_MS;
   const memory: LongTermMemoryEntry = {
     ...entry("retention-clock", "Use TypeScript for plugin code", "reference"),
     source: "compaction",
@@ -307,7 +309,7 @@ test("calculateRetentionStrength slows decay for dormancy after activity grace",
 
 test("calculateEffectiveAgeDays matches plan worked dormant example", () => {
   const now = Date.UTC(2026, 3, 29);
-  const twentyEightDaysAgo = now - 28 * 24 * 60 * 60 * 1000;
+  const twentyEightDaysAgo = now - 28 * DAY_MS;
 
   assert.equal(
     calculateEffectiveAgeDays(twentyEightDaysAgo, now, new Date(twentyEightDaysAgo).toISOString()),
@@ -320,11 +322,57 @@ test("calculateRetentionStrength falls back to updatedAt when retentionClock is 
   const memory: LongTermMemoryEntry = {
     ...entry("updated-at", "Prefer concise verification summaries", "feedback"),
     source: "manual",
-    updatedAt: new Date(now - 45 * 24 * 60 * 60 * 1000).toISOString(),
+    updatedAt: new Date(now - 45 * DAY_MS).toISOString(),
   };
 
   const initialStrength = 2.25 * 1.4;
   assert.equal(calculateRetentionStrength(memory, now), initialStrength / 2);
+});
+
+test("calculateEffectiveAgeDays does not charge old dormancy to fresh entries", () => {
+  const now = Date.UTC(2026, 3, 29);
+  const lastActivityAt = new Date(now - 180 * DAY_MS).toISOString();
+
+  assert.equal(calculateEffectiveAgeDays(now, now, lastActivityAt), 0);
+});
+
+test("calculateEffectiveAgeDays discounts dormant overlap since entry creation", () => {
+  const now = Date.UTC(2026, 3, 29);
+  const entryCreatedSevenDaysAgo = now - 7 * DAY_MS;
+  const lastActivityAt = new Date(now - 180 * DAY_MS).toISOString();
+
+  assert.equal(
+    calculateEffectiveAgeDays(entryCreatedSevenDaysAgo, now, lastActivityAt),
+    1.75,
+  );
+});
+
+test("calculateRetentionStrength returns finite value for invalid updatedAt fallback", () => {
+  const now = Date.UTC(2026, 3, 29);
+  const memory: LongTermMemoryEntry = {
+    ...entry("bad-updated-at", "Invalid timestamps should not corrupt sorting", "feedback"),
+    updatedAt: "not-a-date",
+    retentionClock: undefined,
+  };
+
+  const strength = calculateRetentionStrength(memory, now);
+
+  assert.equal(Number.isFinite(strength), true);
+  assert.ok(strength >= 0);
+});
+
+test("calculateRetentionStrength returns finite value for invalid retentionClock", () => {
+  const now = Date.UTC(2026, 3, 29);
+  const memory: LongTermMemoryEntry = {
+    ...entry("bad-retention-clock", "Invalid retention clocks should fall back safely", "decision"),
+    retentionClock: Number.NaN,
+    updatedAt: new Date(now - 45 * DAY_MS).toISOString(),
+  };
+
+  const strength = calculateRetentionStrength(memory, now);
+
+  assert.equal(Number.isFinite(strength), true);
+  assert.ok(strength >= 0);
 });
 
 test("calculateDormantDays applies fourteen day workspace activity grace", () => {
@@ -335,11 +383,11 @@ test("calculateDormantDays applies fourteen day workspace activity grace", () =>
     limits: { maxRenderedChars: LONG_TERM_LIMITS.maxRenderedChars, maxEntries: LONG_TERM_LIMITS.maxEntries },
     entries: [],
     updatedAt: new Date(now).toISOString(),
-    lastActivityAt: new Date(now - 13 * 24 * 60 * 60 * 1000).toISOString(),
+    lastActivityAt: new Date(now - 13 * DAY_MS).toISOString(),
   };
   const dormantPastGrace: WorkspaceMemoryStore = {
     ...activeWithinGrace,
-    lastActivityAt: new Date(now - 20 * 24 * 60 * 60 * 1000).toISOString(),
+    lastActivityAt: new Date(now - 20 * DAY_MS).toISOString(),
   };
 
   assert.equal(calculateDormantDays(activeWithinGrace, now), 13);
@@ -350,7 +398,7 @@ test("normalizeWorkspaceMemoryWithAccounting uses dormant workspace days for str
   const now = Date.now();
   const reinforcedOldReference: LongTermMemoryEntry = {
     ...entry("reinforced-old", "Project uses the legacy local plugin architecture", "project"),
-    retentionClock: now - 100 * 24 * 60 * 60 * 1000,
+    retentionClock: now - 100 * DAY_MS,
     reinforcementCount: 6,
   };
   const freshReference: LongTermMemoryEntry = {
@@ -363,7 +411,7 @@ test("normalizeWorkspaceMemoryWithAccounting uses dormant workspace days for str
     limits: { maxRenderedChars: LONG_TERM_LIMITS.maxRenderedChars, maxEntries: LONG_TERM_LIMITS.maxEntries },
     entries: [freshReference, reinforcedOldReference],
     updatedAt: new Date(now).toISOString(),
-    lastActivityAt: new Date(now - (14 + 1000) * 24 * 60 * 60 * 1000).toISOString(),
+    lastActivityAt: new Date(now - (14 + 1000) * DAY_MS).toISOString(),
   };
 
   const result = await normalizeWorkspaceMemoryWithAccounting("/repo", store);
@@ -417,6 +465,73 @@ test("dedupeLongTermEntriesWithAccounting reinforces absorbed exact duplicates",
   assert.ok(typeof result.kept[0].retentionClock === "number");
 });
 
+test("reinforced memory with same initial strength and age ranks above unreinforced memory", () => {
+  const now = Date.now();
+  const age = now - 120 * DAY_MS;
+  const unreinforced: LongTermMemoryEntry = {
+    ...entry("unreinforced", "Always run typecheck before commit", "feedback"),
+    retentionClock: age,
+    createdAt: new Date(age).toISOString(),
+    updatedAt: new Date(age).toISOString(),
+  };
+  const reinforced: LongTermMemoryEntry = {
+    ...entry("reinforced", "Prefer functional composition over inheritance", "feedback"),
+    retentionClock: age,
+    createdAt: new Date(age).toISOString(),
+    updatedAt: new Date(age).toISOString(),
+    reinforcementCount: 6,
+  };
+
+  const kept = enforceLongTermLimits([unreinforced, reinforced]);
+
+  assert.deepEqual(kept.map(memory => memory.id), ["reinforced", "unreinforced"]);
+});
+
+test("dedupe reinforcement does not increment for same session", () => {
+  const now = Date.now();
+  const existing: LongTermMemoryEntry = {
+    ...entry("existing", "Use pnpm for package management", "decision"),
+    source: "manual",
+    pendingOwnerSessionID: "same-session",
+    reinforcementCount: 1,
+    lastReinforcedAt: now - 2 * 60 * 60 * 1000,
+    lastReinforcedSessionID: "same-session",
+  };
+  const duplicate: LongTermMemoryEntry = {
+    ...entry("duplicate", "use pnpm for package management!!!", "decision"),
+    pendingOwnerSessionID: "same-session",
+  };
+
+  const result = dedupeLongTermEntriesWithAccounting([existing, duplicate]);
+  const retained = result.kept.find(memory => memory.id === "existing");
+
+  assert.ok(retained, "existing manual memory should be retained");
+  assert.equal(retained.reinforcementCount, 1);
+  assert.equal(retained.lastReinforcedSessionID, "same-session");
+});
+
+test("dedupe reinforcement does not increment under one hour", () => {
+  const now = Date.now();
+  const existing: LongTermMemoryEntry = {
+    ...entry("existing", "Prefer deterministic consolidation accounting", "feedback"),
+    source: "manual",
+    reinforcementCount: 1,
+    lastReinforcedAt: now - 30 * 60 * 1000,
+    lastReinforcedSessionID: "old-session",
+  };
+  const duplicate: LongTermMemoryEntry = {
+    ...entry("duplicate", "prefer deterministic consolidation accounting!!!", "feedback"),
+    pendingOwnerSessionID: "new-session",
+  };
+
+  const result = dedupeLongTermEntriesWithAccounting([existing, duplicate]);
+  const retained = result.kept.find(memory => memory.id === "existing");
+
+  assert.ok(retained, "existing manual memory should be retained");
+  assert.equal(retained.reinforcementCount, 1);
+  assert.equal(retained.lastReinforcedSessionID, "old-session");
+});
+
 test("enforceLongTermLimits orders entries by retention strength", () => {
   const now = Date.now();
   const freshFeedback: LongTermMemoryEntry = {
@@ -460,6 +575,81 @@ test("enforceLongTermLimits exempts safety-critical entries from type caps", () 
   assert.equal(kept.length, 11);
   assert.ok(kept.some(memory => memory.id === "safety-feedback"));
   assert.equal(kept.filter(memory => memory.type === "feedback" && !memory.safetyCritical).length, 10);
+});
+
+test("mixed retention scenario applies caps, safety exemption, and reinforcement ordering", () => {
+  const now = Date.now();
+  const oldAge = now - 120 * DAY_MS;
+  const ordinaryFeedback = Array.from({ length: 17 }, (_, i) =>
+    entry(`mixed-feedback-${i}`, `Unique mixed ordinary feedback preference ${i}`, "feedback")
+  );
+  const decisions = Array.from({ length: 11 }, (_, i) =>
+    entry(`mixed-decision-${i}`, `Unique mixed durable decision ${i}`, "decision")
+  );
+  const safetyCriticalFeedback: LongTermMemoryEntry = {
+    ...entry("mixed-safety-feedback", "Never store production credentials in memory", "feedback"),
+    safetyCritical: true,
+  };
+  const oldReinforcedReference: LongTermMemoryEntry = {
+    ...entry("old-reinforced", "Legacy reinforced reference lives at https://example.com/reinforced", "reference"),
+    retentionClock: oldAge,
+    createdAt: new Date(oldAge).toISOString(),
+    updatedAt: new Date(oldAge).toISOString(),
+    reinforcementCount: 6,
+  };
+  const oldUnreinforcedReference: LongTermMemoryEntry = {
+    ...entry("old-unreinforced", "Legacy unreinforced reference lives at https://example.com/unreinforced", "reference"),
+    retentionClock: oldAge,
+    createdAt: new Date(oldAge).toISOString(),
+    updatedAt: new Date(oldAge).toISOString(),
+  };
+  const entries = [
+    ...ordinaryFeedback,
+    ...decisions,
+    safetyCriticalFeedback,
+    oldReinforcedReference,
+    oldUnreinforcedReference,
+  ];
+  const store: WorkspaceMemoryStore = {
+    version: 1,
+    workspace: { root: "/repo", key: "abc" },
+    limits: { maxRenderedChars: LONG_TERM_LIMITS.maxRenderedChars, maxEntries: LONG_TERM_LIMITS.maxEntries },
+    entries,
+    updatedAt: new Date(now).toISOString(),
+    lastActivityAt: new Date(now).toISOString(),
+  };
+
+  assert.ok(entries.filter(memory => memory.type === "feedback" && !memory.safetyCritical).length > 10);
+  assert.ok(entries.filter(memory => memory.type === "decision" && !memory.safetyCritical).length > 10);
+
+  const result = enforceLongTermLimitsWithAccounting(entries, store);
+
+  assert.ok(result.kept.length <= 28);
+  assert.ok(result.kept.filter(memory => memory.type === "feedback" && !memory.safetyCritical).length <= 10);
+  assert.ok(result.kept.filter(memory => memory.type === "decision" && !memory.safetyCritical).length <= 10);
+  assert.ok(result.kept.some(memory => memory.safetyCritical));
+  assert.equal(result.kept.filter(memory => memory.type === "feedback" && !memory.safetyCritical).length, 10);
+  assert.equal(result.kept.filter(memory => memory.type === "feedback" && memory.safetyCritical).length, 1);
+  assert.equal(result.kept.filter(memory => memory.type === "feedback").length, 11);
+  const reinforcedIndex = result.kept.findIndex(memory => memory.id === "old-reinforced");
+  const unreinforcedIndex = result.kept.findIndex(memory => memory.id === "old-unreinforced");
+  assert.ok(reinforcedIndex >= 0, "old reinforced reference should be kept");
+  assert.ok(unreinforcedIndex >= 0, "old unreinforced reference should be kept");
+  assert.ok(reinforcedIndex < unreinforcedIndex);
+});
+
+test("type max sum above global cap still respects maxEntries", () => {
+  const entries: LongTermMemoryEntry[] = [
+    ...Array.from({ length: 10 }, (_, i) => entry(`feedback-${i}`, `Unique feedback preference ${i}`, "feedback")),
+    ...Array.from({ length: 10 }, (_, i) => entry(`decision-${i}`, `Unique durable decision ${i}`, "decision")),
+    ...Array.from({ length: 8 }, (_, i) => entry(`project-${i}`, `Unique project fact ${i}`, "project")),
+    ...Array.from({ length: 6 }, (_, i) => entry(`reference-${i}`, `Unique reference fact ${i}`, "reference")),
+  ];
+
+  const kept = enforceLongTermLimits(entries);
+
+  assert.equal(entries.length, 34);
+  assert.equal(kept.length, LONG_TERM_LIMITS.maxEntries);
 });
 
 test("normalization ordering is deterministic for retention ties", () => {

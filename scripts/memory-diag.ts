@@ -12,7 +12,7 @@ import { dataHome, extractionRejectionLogPath, migrationLogPath, workspaceKey, w
 import { assessMemoryQuality, HARD_QUALITY_REASONS } from "../src/memory-quality.ts";
 import { redactCredentials } from "../src/redaction.ts";
 import { scanWorkspaceResidues } from "../src/workspace-cleanup.ts";
-import { renderWorkspaceMemory } from "../src/workspace-memory.ts";
+import { calculateRetentionStrength, renderWorkspaceMemory } from "../src/workspace-memory.ts";
 import type { LongTermMemoryEntry, LongTermSource, LongTermType, PendingMemoryJournalStore, WorkspaceMemoryStore } from "../src/types.ts";
 import { LONG_TERM_LIMITS, PROMOTION_RETRY_LIMITS } from "../src/types.ts";
 
@@ -65,6 +65,14 @@ type MigrationLogRecord = {
 };
 
 const TYPES: LongTermType[] = ["feedback", "decision", "project", "reference"];
+const TYPE_MAX_FOR_DIAG: Record<LongTermType, number> = {
+  feedback: 10,
+  decision: 10,
+  project: 8,
+  reference: 6,
+};
+const WORKSPACE_DORMANT_AFTER_DAYS_FOR_DIAG = 14;
+const DORMANT_DECAY_MULTIPLIER_FOR_DIAG = 0.25;
 const SUSPICIOUS_REASONS = [
   "progress_snapshot",
   "active_file_snapshot",
@@ -229,6 +237,68 @@ function ageDays(entry: LongTermMemoryEntry): number | null {
   return Math.floor((Date.now() - time) / 86_400_000);
 }
 
+function formatStrength(value: number): string {
+  return Number.isFinite(value) ? value.toFixed(3) : "0.000";
+}
+
+function daysSinceIso(value: string | undefined, now = Date.now()): number | null {
+  if (!value) return null;
+  const ms = new Date(value).getTime();
+  if (!Number.isFinite(ms)) return null;
+  return Math.max(0, (now - ms) / 86_400_000);
+}
+
+function formatPercent(ratio: number): string {
+  return `${(ratio * 100).toFixed(1)}%`;
+}
+
+type RetentionDiagItem = {
+  entry: LongTermMemoryEntry;
+  strength: number;
+};
+
+function isSafetyCriticalForDiag(entry: LongTermMemoryEntry): boolean {
+  return entry.safetyCritical === true;
+}
+
+function retentionCandidatesForDiag(store: WorkspaceMemoryStore): {
+  sorted: RetentionDiagItem[];
+  rendered: RetentionDiagItem[];
+  typeCapped: RetentionDiagItem[];
+  globalCapped: RetentionDiagItem[];
+} {
+  const now = Date.now();
+  const active = store.entries.filter(entry => entry.status !== "superseded");
+  const sorted = active
+    .map(entry => ({ entry, strength: calculateRetentionStrength(entry, now, store.lastActivityAt) }))
+    .sort((a, b) => b.strength - a.strength || a.entry.id.localeCompare(b.entry.id));
+
+  const rendered: RetentionDiagItem[] = [];
+  const typeCapped: RetentionDiagItem[] = [];
+  const globalCapped: RetentionDiagItem[] = [];
+  const typeCounts: Partial<Record<LongTermType, number>> = {};
+
+  for (const item of sorted) {
+    if (!isSafetyCriticalForDiag(item.entry)) {
+      const count = typeCounts[item.entry.type] ?? 0;
+      const max = TYPE_MAX_FOR_DIAG[item.entry.type] ?? Infinity;
+      if (count >= max) {
+        typeCapped.push(item);
+        continue;
+      }
+      typeCounts[item.entry.type] = count + 1;
+    }
+
+    if (rendered.length < LONG_TERM_LIMITS.maxEntries) {
+      rendered.push(item);
+    } else {
+      globalCapped.push(item);
+    }
+  }
+
+  return { sorted, rendered, typeCapped, globalCapped };
+}
+
 function promotionLimit(source: LongTermSource): number {
   if (source === "manual") return PROMOTION_RETRY_LIMITS.maxManualAttempts;
   return PROMOTION_RETRY_LIMITS.maxExplicitAttempts;
@@ -333,10 +403,13 @@ async function printWorkspaceHealth(input: {
 
   const active = store.entries.filter(entry => entry.status !== "superseded");
   const superseded = store.entries.filter(entry => entry.status === "superseded");
+  const retention = retentionCandidatesForDiag(store);
+  const renderedEntries = retention.rendered.map(item => item.entry);
   const renderedEstimate = renderWorkspaceMemory(store).length;
 
-  console.log(`Active memories: ${active.length}`);
+  console.log(`Stored active memories: ${active.length}`);
   console.log(`Superseded memories: ${superseded.length}`);
+  console.log(`Rendered candidates: ${renderedEntries.length}`);
   console.log(`Rendered estimate: ${renderedEstimate.toLocaleString()} chars`);
   console.log("");
 
@@ -356,10 +429,16 @@ async function printWorkspaceHealth(input: {
 
   console.log("By type:");
   for (const type of TYPES) {
-    const activeCount = active.filter(entry => entry.type === type).length;
+    const storedCount = active.filter(entry => entry.type === type).length;
+    const renderedCount = renderedEntries.filter(entry => entry.type === type).length;
     const supersededCount = superseded.filter(entry => entry.type === type).length;
-    console.log(`  ${type.padEnd(9)} active=${String(activeCount).padEnd(3)} superseded=${supersededCount}`);
+    console.log(`  ${type.padEnd(9)} stored=${String(storedCount).padEnd(3)} rendered=${String(renderedCount).padEnd(3)} typeCap=${TYPE_MAX_FOR_DIAG[type]} superseded=${supersededCount}`);
   }
+  console.log("");
+
+  console.log("Retention caps:");
+  console.log(`  type-capped entries: ${retention.typeCapped.length}`);
+  console.log(`  global-cap overflow: ${retention.globalCapped.length}`);
   console.log("");
 
   const olderThan30 = active.filter(entry => (ageDays(entry) ?? 0) > 30).length;
@@ -372,6 +451,33 @@ async function printWorkspaceHealth(input: {
   console.log(`  stale-marked: ${staleMarked}`);
   console.log(`  older than 30d: ${olderThan30}`);
   console.log(`  older than 90d: ${olderThan90}`);
+  console.log("");
+
+  const wallDaysSinceActivity = daysSinceIso(store.lastActivityAt);
+  const dormantDiscountActive = wallDaysSinceActivity !== null && wallDaysSinceActivity > WORKSPACE_DORMANT_AFTER_DAYS_FOR_DIAG;
+  const dormantDaysPastGrace = wallDaysSinceActivity === null
+    ? 0
+    : Math.max(0, wallDaysSinceActivity - WORKSPACE_DORMANT_AFTER_DAYS_FOR_DIAG);
+  console.log("Dormancy:");
+  console.log(`  lastActivityAt: ${store.lastActivityAt ?? "(missing)"}`);
+  console.log(`  wall days since activity: ${wallDaysSinceActivity === null ? "unknown" : wallDaysSinceActivity.toFixed(1)}`);
+  console.log(`  dormant discount active: ${dormantDiscountActive ? "yes" : "no"}`);
+  console.log(`  dormant days past grace: ${dormantDaysPastGrace.toFixed(1)}`);
+  console.log(`  dormant multiplier: ${DORMANT_DECAY_MULTIPLIER_FOR_DIAG}`);
+  console.log("");
+
+  const highImportanceCount = active.filter(entry => entry.userImportance === "high").length;
+  const safetyCriticalCount = active.filter(isSafetyCriticalForDiag).length;
+  const maxReinforcedCount = active.filter(entry => (entry.reinforcementCount ?? 0) >= 6).length;
+  const highImportanceRatio = active.length === 0 ? 0 : highImportanceCount / active.length;
+  const maxReinforcedRatio = active.length === 0 ? 0 : maxReinforcedCount / active.length;
+  const highImportanceAlert = highImportanceRatio > 0.3;
+  const safetyCriticalAlert = safetyCriticalCount > 5;
+  const maxReinforcedAlert = maxReinforcedRatio > 0.1;
+  console.log("Retention monitoring:");
+  console.log(`  high_importance_ratio: ${formatPercent(highImportanceRatio)} (alert > 30%)${highImportanceAlert ? " ALERT" : ""}`);
+  console.log(`  safety_critical_count: ${safetyCriticalCount} (alert > 5)${safetyCriticalAlert ? " ALERT" : ""}`);
+  console.log(`  max_reinforced_count: ${maxReinforcedAlert ? `${maxReinforcedCount} (${formatPercent(maxReinforcedRatio)}, alert > 10%) ALERT` : `${maxReinforcedCount} (alert > 10% active)`}`);
   console.log("");
 
   const qualityByEntry = active.map(entry => ({ entry, quality: assessMemoryQuality(entry) }));
@@ -400,12 +506,23 @@ async function printWorkspaceHealth(input: {
 
   console.log("");
   console.log("Top rendered candidates:");
-  const top = [...active].sort((a, b) => b.text.length - a.text.length).slice(0, 5);
+  const top = retention.rendered.slice(0, 5);
   if (top.length === 0) {
     console.log("  (none)");
   } else {
-    for (const entry of top) {
-      console.log(`  - [${entry.type}] ${truncate(cleanText(entry.text, input.raw))}`);
+    for (const item of top) {
+      console.log(`  - strength=${formatStrength(item.strength)} [${item.entry.type}] ${truncate(cleanText(item.entry.text, input.raw))}`);
+    }
+  }
+
+  console.log("");
+  console.log("Weakest active memories:");
+  const weakest = retention.sorted.slice(-5).reverse();
+  if (weakest.length === 0) {
+    console.log("  (none)");
+  } else {
+    for (const item of weakest) {
+      console.log(`  - strength=${formatStrength(item.strength)} [${item.entry.type}] ${truncate(cleanText(item.entry.text, input.raw))}`);
     }
   }
 }

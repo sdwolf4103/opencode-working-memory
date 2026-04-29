@@ -67,6 +67,11 @@ export function calculateEffectiveHalfLife(memory: LongTermMemoryEntry): number 
   return BASE_HALF_LIFE_DAYS / factor;
 }
 
+function timestampMs(value: unknown, fallback: number): number {
+  const ms = typeof value === "number" ? value : new Date(String(value)).getTime();
+  return Number.isFinite(ms) ? ms : fallback;
+}
+
 export function calculateRetentionStrength(
   memory: LongTermMemoryEntry,
   now: number,
@@ -76,14 +81,16 @@ export function calculateRetentionStrength(
   const effectiveHalfLife = calculateEffectiveHalfLife(memory);
 
   // Use retentionClock if available, fallback to updatedAt.
-  const retentionStart = memory.retentionClock ?? memory.updatedAt;
-  const createdAtMs = new Date(retentionStart).getTime();
+  const retentionStart = Number.isFinite(memory.retentionClock)
+    ? memory.retentionClock
+    : memory.updatedAt ?? memory.createdAt;
+  const createdAtMs = timestampMs(retentionStart, now);
   const effectiveAgeDays = calculateEffectiveAgeDays(createdAtMs, now, lastActivityAt);
 
   // Calculate strength using exponential decay.
   const strength = initialStrength * Math.pow(2, -effectiveAgeDays / effectiveHalfLife);
 
-  return Math.max(0, strength);
+  return Number.isFinite(strength) ? Math.max(0, strength) : 0;
 }
 
 export function calculateDormantDays(store: WorkspaceMemoryStore, now: number): number {
