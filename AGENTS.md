@@ -111,7 +111,7 @@ export type LongTermSource = "explicit" | "compaction" | "manual";
 
 // ✅ USE: const assertions for limits
 export const LONG_TERM_LIMITS = {
-  maxRenderedChars: 5200,
+  maxRenderedChars: 3600,
   maxEntries: 28,
 } as const;
 ```
@@ -140,8 +140,8 @@ const maxEntries = 28;
 async function loadWorkspaceMemory() { }
 
 // ✅ REQUIRED: SCREAMING_SNAKE_CASE for constants
-const LONG_TERM_LIMITS = { maxRenderedChars: 5200, maxEntries: 28 };
-const HOT_STATE_LIMITS = { maxRenderedChars: 1200 };
+const LONG_TERM_LIMITS = { maxRenderedChars: 3600, maxEntries: 28 };
+const HOT_STATE_LIMITS = { maxRenderedChars: 700 };
 
 // ✅ REQUIRED: PascalCase for types
 type WorkspaceMemoryStore = { ... };
@@ -236,7 +236,7 @@ export default {
 - **Location**: `~/.local/share/opencode-working-memory/workspaces/{workspaceKey}/workspace-memory.json`
 - **Workspace Key**: First 16 chars of `sha256(realpath(workspaceRoot))`
 - **Schema**: See `src/types.ts:WorkspaceMemoryStore`
-- **Limits**: 5200 chars, 28 entries max
+- **Limits**: 3600 chars, 28 entries max
 
 ### Session State Files
 
@@ -299,9 +299,9 @@ Extracts workspace memory candidates from conversation, applies quality gate and
 
 ## Performance Considerations
 
-- **Workspace memory budget**: 5200 chars injected into system prompt
-- **Session state budget**: 1200 chars injected into system prompt
-- **Total overhead**: ~1500-6000 chars per message (minimal)
+- **Workspace memory budget**: 3600 chars injected into system prompt
+- **Session state budget**: 700 chars injected into system prompt
+- **Total overhead**: typically well below configured maximums
 - **Storage footprint**: ~2-5 KB per workspace for memory, ~1-3 KB per session
 
 ## Contributing

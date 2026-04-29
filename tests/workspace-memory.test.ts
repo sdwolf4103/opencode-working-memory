@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import type { LongTermMemoryEntry, WorkspaceMemoryStore } from "../src/types.ts";
-import { LONG_TERM_LIMITS } from "../src/types.ts";
+import { HOT_STATE_LIMITS, LONG_TERM_LIMITS } from "../src/types.ts";
 import { workspaceKey, workspaceMemoryPath } from "../src/paths.ts";
 import {
   renderWorkspaceMemory,
@@ -32,6 +32,12 @@ import { reviewerCurrent28Fixture } from "./fixtures/memory-quality-current-28.t
 import { REAL_WORKSPACE_FIXTURES } from "./fixtures/real-workspaces-snapshot.ts";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+
+test("default prompt budgets use calibrated conservative character caps", () => {
+  assert.equal(LONG_TERM_LIMITS.maxRenderedChars, 3600);
+  assert.equal(LONG_TERM_LIMITS.targetRenderedChars, 3000);
+  assert.equal(HOT_STATE_LIMITS.maxRenderedChars, 700);
+});
 
 function entry(id: string, text: string, type: LongTermMemoryEntry["type"] = "decision"): LongTermMemoryEntry {
   const now = new Date().toISOString();

@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] - 2026-04-29
+
+### Added
+
+- Strength-based workspace memory retention using exponential decay instead of additive priority scoring.
+- Per-type rendered caps for workspace memory candidates: feedback 10, decision 10, project 8, and reference 6.
+- Safety-critical memory weighting and type-cap exemption so important entries survive type floods while still competing under the global rendered cap.
+- Dormant-workspace effective age: after 14 days without activity, additional dormant time counts at 0.25x for retention decay.
+- Reinforcement tracking for repeated memories, with same-session and one-hour guards to prevent accidental reinforcement spam.
+- Memory health diagnostics for stored vs rendered counts, type caps, global cap overflow, dormancy, retention monitoring, and strength-ranked top/weakest entries.
+- CLI smoke tests and regression fixtures covering retention decay, stale-prune removal, type caps, reinforcement, invalid timestamps, and diagnostics.
+
+### Changed
+
+- Workspace memory rendering now ranks entries by retention strength, not the previous priority/penalty model.
+- Confidence is retained for compatibility but no longer affects retention scoring.
+- Old or stale-marked memories are no longer hard-pruned; they remain stored and only fall out of rendered context through strength and cap competition.
+- Existing duplicate promotion and dedupe paths now reinforce the surviving memory instead of only absorbing the duplicate.
+- Health output now separates stored active memories from rendered candidates to make cap behavior easier to understand.
+- Default prompt budgets are lower after calibration against observed rendered output: workspace memory is 3600 characters and hot session state is 700 characters.
+
+### Fixed
+
+- Invalid `updatedAt` or `retentionClock` values no longer produce `NaN` retention strength or unstable sorting.
+- Dormant age calculation only discounts the dormant overlap since an entry was created, so new memories do not inherit old workspace dormancy.
+- Type max totals above the global cap are handled correctly: the global rendered limit still wins.
+
+### Not Included Yet
+
+- Delete tombstones and explicit `supersedes` chain enforcement remain deferred follow-up work.
+- Hot/warm/cold tiered storage remains a future v1.6 direction.
+
 ## [1.4.0] - 2026-04-28
 
 ### Added

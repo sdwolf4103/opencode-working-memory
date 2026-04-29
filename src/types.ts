@@ -95,15 +95,15 @@ export type SessionState = {
 };
 
 export const LONG_TERM_LIMITS = {
-  maxRenderedChars: 5200,
-  targetRenderedChars: 4200,
+  maxRenderedChars: 3600,
+  targetRenderedChars: 3000,
   maxEntries: 28,
   maxEntryTextChars: 260,
   maxRationaleChars: 180,
 } as const;
 
 export const HOT_STATE_LIMITS = {
-  maxRenderedChars: 1200,
+  maxRenderedChars: 700,
   maxActiveFilesStored: 20,
   maxActiveFilesRendered: 8,
   maxOpenErrorsStored: 5,

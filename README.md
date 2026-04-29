@@ -5,9 +5,9 @@
 
 Automatic memory for OpenCode agents.
 
-OpenCode Working Memory helps your agent keep useful context across compactions and sessions: project decisions, preferences, important references, active files, and unresolved errors.
+Working memory is context that **remembers what matters, fades what changes, and stays out of the way.**
 
-It works automatically, without manual memory tools or extra LLM/API calls.
+OpenCode Working Memory preserves project decisions, preferences, and references across compactions and sessions, while keeping active files and unresolved errors fresh for the current session — with no manual tools or extra LLM/API calls.
 
 ## Why This Exists
 
@@ -31,6 +31,7 @@ Use it when you want your agent to remember things like:
 - **Compaction-based extraction** — memory extraction piggybacks on OpenCode’s existing compaction flow.
 - **No manual tools** — memory is injected automatically into the system prompt.
 - **Quality guards** — filters noisy memories, temporary progress snapshots, stack traces, raw errors, and credentials.
+- **Retention decay** — keeps the strongest memories in prompt context while older or weaker memories fade out naturally; important and reinforced memories decay more slowly.
 
 ## Installation
 
@@ -121,6 +122,27 @@ Memory types:
 - `decision` — important implementation or architecture decisions
 - `reference` — useful paths, commands, or configuration references
 
+### Retention Decay
+
+> **Memory should fade, so the agent can keep learning.**
+>
+> Important memories decay more slowly, but every memory must leave room for newer project reality.
+
+Memories decay over time. The strongest stay visible in the prompt; weaker ones fade from context without being deleted.
+
+```text
+  strength
+    │
+ ██ │╲____   reinforced: slower decline
+    │     ╲______
+ ▒▒ │            ╲__ ordinary memory
+    │               ╲
+    ├ ─ ─ ─ ─ ─ ─ ─ ─╲─ dynamic cap competition zone
+ ░░ │                 ╲  easier for new memories to replace
+    │                  ↑ still stored, not deleted
+    └──────────────────────────────→ time / sessions
+```
+
 ## Explicit Memory Triggers
 
 You can explicitly ask the agent to remember durable facts.
@@ -167,12 +189,14 @@ It includes guards for:
 
 - Credential redaction
 - Duplicate memory cleanup
-- Superseding older decisions with newer ones
-- Consolidation accounting so promoted, absorbed, superseded, and rejected memories are handled differently
+- Accounting for promoted, absorbed, superseded, and rejected memories
+- Strength-based retention so useful memories stay visible without hard age pruning
 - Filtering stack traces, git hashes, raw errors, and noisy path-heavy facts
 - Rejecting temporary project progress snapshots
 
 The goal is to remember durable facts, not every detail.
+
+**Good memory is selective memory.**
 
 Historical cleanup is intentionally conservative: extraction-time filtering may reject more aggressively, but one-time migration cleanup only supersedes high-confidence garbage patterns. This protects existing durable memories written in declarative style, such as "API endpoint is X" or "Product branding is Y".
 
@@ -191,21 +215,21 @@ OpenCode Working Memory works out of the box.
 
 Default behavior:
 
-- Workspace memory budget: 5200 characters
+- Workspace memory budget: 3600 characters (~900 tokens)
 - Workspace memory limit: 28 entries
-- Hot session state budget: 1200 characters
+- Hot session state budget: 700 characters (~175 tokens)
 - Active files shown: 8
 - Open errors shown: 3
 
 See [Configuration](docs/configuration.md) for customization options.
 
-## Ongoing Work
+## Roadmap
 
 Current focus:
 
-- Improve memory recording quality so only durable, useful facts are kept.
-- Strengthen deduplication and supersession so stale memories do not pile up.
-- Add better forgetting behavior for obsolete decisions, preferences, and project facts.
+- Add explicit delete tombstones so removed memories do not get re-extracted.
+- Enforce explicit `supersedes` chains for safer replacement of obsolete memories.
+- Explore tiered hot/warm/cold storage after the retention model has more real-world data.
 
 ## Documentation
 
