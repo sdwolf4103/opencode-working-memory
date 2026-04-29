@@ -1422,11 +1422,35 @@ test("session.compacted clears compaction pending memory rejected by workspace e
   try {
     const now = new Date().toISOString();
     await updateWorkspaceMemory(tmpDir, store => {
-      for (let i = 0; i < 28; i += 1) {
+      for (let i = 0; i < 10; i += 1) {
         store.entries.push({
-          id: `mem_high_${i}`,
+          id: `mem_high_feedback_${i}`,
           type: "feedback",
           text: `High priority user feedback memory ${i} that should outrank low priority references.`,
+          source: "explicit",
+          confidence: 1,
+          status: "active",
+          createdAt: now,
+          updatedAt: now,
+        });
+      }
+      for (let i = 0; i < 10; i += 1) {
+        store.entries.push({
+          id: `mem_high_decision_${i}`,
+          type: "decision",
+          text: `High priority decision memory ${i} that should outrank low priority references.`,
+          source: "explicit",
+          confidence: 1,
+          status: "active",
+          createdAt: now,
+          updatedAt: now,
+        });
+      }
+      for (let i = 0; i < 8; i += 1) {
+        store.entries.push({
+          id: `mem_high_project_${i}`,
+          type: "project",
+          text: `High priority project memory ${i} that should outrank low priority references.`,
           source: "explicit",
           confidence: 1,
           status: "active",
@@ -1476,11 +1500,35 @@ test("session.compacted keeps explicit pending memory rejected by workspace entr
   try {
     const now = new Date().toISOString();
     await updateWorkspaceMemory(tmpDir, store => {
-      for (let i = 0; i < 28; i += 1) {
+      for (let i = 0; i < 10; i += 1) {
         store.entries.push({
-          id: `mem_high_explicit_reject_${i}`,
+          id: `mem_high_explicit_reject_feedback_${i}`,
           type: "feedback",
           text: `Pinned high priority feedback for explicit reject ${i}.`,
+          source: "explicit",
+          confidence: 1,
+          status: "active",
+          createdAt: now,
+          updatedAt: now,
+        });
+      }
+      for (let i = 0; i < 10; i += 1) {
+        store.entries.push({
+          id: `mem_high_explicit_reject_decision_${i}`,
+          type: "decision",
+          text: `Pinned high priority decision for explicit reject ${i}.`,
+          source: "explicit",
+          confidence: 1,
+          status: "active",
+          createdAt: now,
+          updatedAt: now,
+        });
+      }
+      for (let i = 0; i < 8; i += 1) {
+        store.entries.push({
+          id: `mem_high_explicit_reject_project_${i}`,
+          type: "project",
+          text: `Pinned high priority project for explicit reject ${i}.`,
           source: "explicit",
           confidence: 1,
           status: "active",
@@ -1531,11 +1579,35 @@ test("explicit capacity rejection records bounded retry metadata", async () => {
   try {
     const now = new Date().toISOString();
     await updateWorkspaceMemory(tmpDir, store => {
-      for (let i = 0; i < 28; i += 1) {
+      for (let i = 0; i < 10; i += 1) {
         store.entries.push({
-          id: `mem_high_bounded_reject_${i}`,
+          id: `mem_high_bounded_reject_feedback_${i}`,
           type: "feedback",
           text: `Pinned high priority feedback for bounded rejection ${i}.`,
+          source: "explicit",
+          confidence: 1,
+          status: "active",
+          createdAt: now,
+          updatedAt: now,
+        });
+      }
+      for (let i = 0; i < 10; i += 1) {
+        store.entries.push({
+          id: `mem_high_bounded_reject_decision_${i}`,
+          type: "decision",
+          text: `Pinned high priority decision for bounded rejection ${i}.`,
+          source: "explicit",
+          confidence: 1,
+          status: "active",
+          createdAt: now,
+          updatedAt: now,
+        });
+      }
+      for (let i = 0; i < 8; i += 1) {
+        store.entries.push({
+          id: `mem_high_bounded_reject_project_${i}`,
+          type: "project",
+          text: `Pinned high priority project for bounded rejection ${i}.`,
           source: "explicit",
           confidence: 1,
           status: "active",
@@ -1614,11 +1686,35 @@ test("session.compacted clears compaction pending memories when all rejected by 
   try {
     const now = new Date().toISOString();
     await updateWorkspaceMemory(tmpDir, store => {
-      for (let i = 0; i < 28; i += 1) {
+      for (let i = 0; i < 10; i += 1) {
         store.entries.push({
-          id: `mem_high_all_rejected_${i}`,
+          id: `mem_high_all_rejected_feedback_${i}`,
           type: "feedback",
           text: `Pinned high priority feedback ${i} that keeps the workspace entry cap full.`,
+          source: "explicit",
+          confidence: 1,
+          status: "active",
+          createdAt: now,
+          updatedAt: now,
+        });
+      }
+      for (let i = 0; i < 10; i += 1) {
+        store.entries.push({
+          id: `mem_high_all_rejected_decision_${i}`,
+          type: "decision",
+          text: `Pinned high priority decision ${i} that keeps the workspace entry cap full.`,
+          source: "explicit",
+          confidence: 1,
+          status: "active",
+          createdAt: now,
+          updatedAt: now,
+        });
+      }
+      for (let i = 0; i < 8; i += 1) {
+        store.entries.push({
+          id: `mem_high_all_rejected_project_${i}`,
+          type: "project",
+          text: `Pinned high priority project ${i} that keeps the workspace entry cap full.`,
           source: "explicit",
           confidence: 1,
           status: "active",

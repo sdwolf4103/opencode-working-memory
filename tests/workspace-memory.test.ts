@@ -19,6 +19,9 @@ import {
   loadWorkspaceMemory,
   saveWorkspaceMemory,
   updateWorkspaceMemoryWithAccounting,
+  calculateInitialStrength,
+  calculateEffectiveHalfLife,
+  calculateRetentionStrength,
 } from "../src/workspace-memory.ts";
 import { redactCredentials } from "../src/redaction.ts";
 import { assessMemoryQuality, isHardQualityReason, isProgressSnapshotViolation } from "../src/memory-quality.ts";
@@ -256,6 +259,104 @@ test("enforceLongTermLimits respects maxEntries limit", () => {
   assert.ok(kept.length <= 28, `Should respect maxEntries. Got: ${kept.length}`);
 });
 
+test("calculateInitialStrength multiplies type, source, importance, and safety factors", () => {
+  const memory: LongTermMemoryEntry = {
+    ...entry("strength", "Never store raw credentials", "reference"),
+    source: "explicit",
+    userImportance: "high",
+    safetyCritical: true,
+  };
+
+  assert.equal(calculateInitialStrength(memory), 18);
+});
+
+test("calculateEffectiveHalfLife clamps reinforcement count at configured maximum", () => {
+  const unreinforced = entry("unreinforced", "Use pnpm for this project");
+  const overReinforced: LongTermMemoryEntry = {
+    ...entry("over-reinforced", "Use npm scripts for verification"),
+    reinforcementCount: 99,
+  };
+
+  assert.equal(calculateEffectiveHalfLife(unreinforced), 45);
+  assert.equal(
+    calculateEffectiveHalfLife(overReinforced),
+    45 / Math.pow(0.85, 6),
+  );
+});
+
+test("calculateRetentionStrength decays from retentionClock and applies dormant age", () => {
+  const now = Date.UTC(2026, 3, 29);
+  const fiveDaysAgo = now - 5 * 24 * 60 * 60 * 1000;
+  const memory: LongTermMemoryEntry = {
+    ...entry("retention-clock", "Use TypeScript for plugin code", "reference"),
+    source: "compaction",
+    retentionClock: fiveDaysAgo,
+    updatedAt: new Date(now).toISOString(),
+  };
+
+  const expectedEffectiveAgeDays = 5 + 4 * 0.25;
+  const expected = Math.pow(2, -expectedEffectiveAgeDays / 45);
+
+  assert.equal(calculateRetentionStrength(memory, now, 4), expected);
+});
+
+test("calculateRetentionStrength falls back to updatedAt when retentionClock is absent", () => {
+  const now = Date.UTC(2026, 3, 29);
+  const memory: LongTermMemoryEntry = {
+    ...entry("updated-at", "Prefer concise verification summaries", "feedback"),
+    source: "manual",
+    updatedAt: new Date(now - 45 * 24 * 60 * 60 * 1000).toISOString(),
+  };
+
+  const initialStrength = 2.25 * 1.4;
+  assert.equal(calculateRetentionStrength(memory, now, 0), initialStrength / 2);
+});
+
+test("enforceLongTermLimits orders entries by retention strength", () => {
+  const now = Date.now();
+  const freshFeedback: LongTermMemoryEntry = {
+    ...entry("fresh-feedback", "User prefers direct concise answers", "feedback"),
+    source: "compaction",
+    updatedAt: new Date(now).toISOString(),
+  };
+  const oldExplicitReference: LongTermMemoryEntry = {
+    ...entry("old-explicit-reference", "Legacy docs are at https://example.com/old", "reference"),
+    source: "explicit",
+    updatedAt: new Date(now - 365 * 24 * 60 * 60 * 1000).toISOString(),
+  };
+
+  const kept = enforceLongTermLimits([oldExplicitReference, freshFeedback]);
+
+  assert.deepEqual(kept.map(memory => memory.id), ["fresh-feedback", "old-explicit-reference"]);
+});
+
+test("enforceLongTermLimits applies per-type caps after strength sorting", () => {
+  const entries = Array.from({ length: 12 }, (_, i) =>
+    entry(`feedback_${i}`, `Unique user feedback preference ${i}`, "feedback")
+  );
+
+  const kept = enforceLongTermLimits(entries);
+
+  assert.equal(kept.length, 10);
+  assert.equal(kept.filter(memory => memory.type === "feedback").length, 10);
+});
+
+test("enforceLongTermLimits exempts safety-critical entries from type caps", () => {
+  const ordinaryFeedback = Array.from({ length: 12 }, (_, i) =>
+    entry(`feedback_${i}`, `Unique safe ordinary feedback preference ${i}`, "feedback")
+  );
+  const safetyCriticalFeedback: LongTermMemoryEntry = {
+    ...entry("safety-feedback", "Never persist raw credentials in memory", "feedback"),
+    safetyCritical: true,
+  };
+
+  const kept = enforceLongTermLimits([safetyCriticalFeedback, ...ordinaryFeedback]);
+
+  assert.equal(kept.length, 11);
+  assert.ok(kept.some(memory => memory.id === "safety-feedback"));
+  assert.equal(kept.filter(memory => memory.type === "feedback" && !memory.safetyCritical).length, 10);
+});
+
 test("normalization ordering is deterministic for retention ties", () => {
   const createdAt = "2026-04-28T00:00:00.000Z";
   const a = {
@@ -378,16 +479,12 @@ test("dedupeLongTermEntriesWithAccounting does not report heuristic topic supers
 
 test("enforceLongTermLimitsWithAccounting reports capacity drops", () => {
   const now = new Date().toISOString();
-  const entries = Array.from({ length: LONG_TERM_LIMITS.maxEntries + 2 }, (_, i) => ({
-    id: `mem_${i}`,
-    type: "reference" as const,
-    text: `Unique low priority reference ${i}`,
-    source: "compaction" as const,
-    confidence: i < LONG_TERM_LIMITS.maxEntries ? 0.8 : 0.1,
-    status: "active" as const,
-    createdAt: now,
-    updatedAt: now,
-  }));
+  const entries = [
+    ...Array.from({ length: 10 }, (_, i) => entry(`feedback_${i}`, `Capacity feedback ${i}`, "feedback")),
+    ...Array.from({ length: 10 }, (_, i) => entry(`decision_${i}`, `Capacity decision ${i}`, "decision")),
+    ...Array.from({ length: 8 }, (_, i) => entry(`project_${i}`, `Capacity project ${i}`, "project")),
+    ...Array.from({ length: 2 }, (_, i) => entry(`reference_${i}`, `Capacity overflow reference ${i}`, "reference")),
+  ].map(memory => ({ ...memory, createdAt: now, updatedAt: now }));
 
   const result = enforceLongTermLimitsWithAccounting(entries);
 
@@ -445,21 +542,18 @@ test("normalizeWorkspaceMemoryWithAccounting redacts credentials before accounti
 test("normalizeWorkspaceMemoryWithAccounting reports overflow capacity drops", async () => {
   const root = "/repo";
   const now = new Date().toISOString();
+  const entries = [
+    ...Array.from({ length: 10 }, (_, i) => entry(`overflow_feedback_${i}`, `Overflow feedback ${i}`, "feedback")),
+    ...Array.from({ length: 10 }, (_, i) => entry(`overflow_decision_${i}`, `Overflow decision ${i}`, "decision")),
+    ...Array.from({ length: 8 }, (_, i) => entry(`overflow_project_${i}`, `Overflow project ${i}`, "project")),
+    entry("overflow_reference", "Overflow low strength reference", "reference"),
+  ].map(memory => ({ ...memory, createdAt: now, updatedAt: now }));
   const store: WorkspaceMemoryStore = {
     version: 1,
     workspace: { root, key: "abc" },
     limits: { maxRenderedChars: LONG_TERM_LIMITS.maxRenderedChars, maxEntries: LONG_TERM_LIMITS.maxEntries },
     migrations: ["2026-04-26-p0-cleanup"],
-    entries: Array.from({ length: LONG_TERM_LIMITS.maxEntries + 1 }, (_, i) => ({
-      id: `overflow_${i}`,
-      type: "reference" as const,
-      text: `Overflow reference ${i}`,
-      source: "compaction" as const,
-      confidence: i < LONG_TERM_LIMITS.maxEntries ? 0.8 : 0.1,
-      status: "active" as const,
-      createdAt: now,
-      updatedAt: now,
-    })),
+    entries,
     updatedAt: now,
   };
 
@@ -506,16 +600,13 @@ test("updateWorkspaceMemoryWithAccounting emits accounting events for persisted 
   try {
     const now = new Date().toISOString();
     const result = await updateWorkspaceMemoryWithAccounting(root, store => {
-      store.entries.push(...Array.from({ length: LONG_TERM_LIMITS.maxEntries + 1 }, (_, i) => ({
-        id: `persisted_${i}`,
-        type: "reference" as const,
-        text: `Persisted accounting reference ${i}`,
-        source: "compaction" as const,
-        confidence: i < LONG_TERM_LIMITS.maxEntries ? 0.8 : 0.1,
-        status: "active" as const,
-        createdAt: now,
-        updatedAt: now,
-      })));
+      store.entries.push(
+        ...Array.from({ length: 10 }, (_, i) => entry(`persisted_feedback_${i}`, `Persisted feedback ${i}`, "feedback")),
+        ...Array.from({ length: 10 }, (_, i) => entry(`persisted_decision_${i}`, `Persisted decision ${i}`, "decision")),
+        ...Array.from({ length: 8 }, (_, i) => entry(`persisted_project_${i}`, `Persisted project ${i}`, "project")),
+        entry("persisted_reference", "Persisted low strength reference", "reference"),
+      );
+      store.entries = store.entries.map(memory => ({ ...memory, createdAt: now, updatedAt: now }));
       return store;
     });
 

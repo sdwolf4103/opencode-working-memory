@@ -12,6 +12,87 @@ const MIN_ENVELOPE_LENGTH = 80;
 const MIGRATION_ID = "2026-04-26-p0-cleanup";
 const QUALITY_CLEANUP_MIGRATION_ID = "2026-04-28-quality-cleanup";
 
+// Retention decay model constants (v1.5)
+const BASE_HALF_LIFE_DAYS = 45;
+const REINFORCEMENT_HALFLIFE_FACTOR = 0.85;
+const REINFORCEMENT_MAX_COUNT = 6;
+const REINFORCEMENT_MIN_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
+const WORKSPACE_DORMANT_AFTER_DAYS = 14;
+const DORMANT_DECAY_MULTIPLIER = 0.25;
+
+const TYPE_FACTOR = {
+  reference: 1.0,
+  project: 1.25,
+  feedback: 2.25,
+  decision: 2.5,
+} as const;
+
+const SOURCE_FACTOR = {
+  compaction: 1.0,
+  manual: 1.4,
+  explicit: 2.0,
+} as const;
+
+const USER_IMPORTANCE_FACTOR = {
+  low: 0.7,
+  normal: 1.0,
+  high: 1.5,
+} as const;
+
+const SAFETY_CRITICAL_FACTOR = 6.0;
+
+const TYPE_MAX = {
+  feedback: 10,
+  decision: 10,
+  project: 8,
+  reference: 6,
+} as const;
+
+export function calculateInitialStrength(memory: LongTermMemoryEntry): number {
+  const typeFactor = TYPE_FACTOR[memory.type] ?? 1.0;
+  const sourceFactor = SOURCE_FACTOR[memory.source] ?? 1.0;
+  const importanceFactor = USER_IMPORTANCE_FACTOR[memory.userImportance ?? "normal"] ?? 1.0;
+  const safetyFactor = memory.safetyCritical ? SAFETY_CRITICAL_FACTOR : 1.0;
+
+  return typeFactor * sourceFactor * importanceFactor * safetyFactor;
+}
+
+export function calculateEffectiveHalfLife(memory: LongTermMemoryEntry): number {
+  const reinforcementCount = Math.min(
+    memory.reinforcementCount ?? 0,
+    REINFORCEMENT_MAX_COUNT,
+  );
+  const factor = Math.pow(REINFORCEMENT_HALFLIFE_FACTOR, reinforcementCount);
+  return BASE_HALF_LIFE_DAYS / factor;
+}
+
+export function calculateRetentionStrength(
+  memory: LongTermMemoryEntry,
+  now: number,
+  dormantDays: number,
+): number {
+  const initialStrength = calculateInitialStrength(memory);
+  const effectiveHalfLife = calculateEffectiveHalfLife(memory);
+
+  // Use retentionClock if available, fallback to updatedAt.
+  const retentionStart = memory.retentionClock ?? memory.updatedAt;
+  const createdAtMs = new Date(retentionStart).getTime();
+  const ageMs = now - createdAtMs;
+  const ageDays = ageMs / (24 * 60 * 60 * 1000);
+
+  // Apply dormant boost to effective age.
+  let effectiveAgeDays = ageDays;
+  if (dormantDays > 0) {
+    // Dormant workspace ages faster.
+    effectiveAgeDays += dormantDays * DORMANT_DECAY_MULTIPLIER;
+  }
+
+  // Calculate strength using exponential decay.
+  const strength = initialStrength * Math.pow(2, -effectiveAgeDays / effectiveHalfLife);
+
+  return Math.max(0, strength);
+}
+
 export type MemoryConsolidationReason =
   | "promoted"
   | "absorbed_exact"
@@ -497,6 +578,9 @@ export function enforceLongTermLimits(entries: LongTermMemoryEntry[]): LongTermM
 
 export function enforceLongTermLimitsWithAccounting(entries: LongTermMemoryEntry[]): LongTermLimitResult {
   const now = Date.now();
+  // Store-level last activity tracking is not available yet; dormant handling
+  // will be wired in a later wave.
+  const dormantDays = 0;
   const staleDropped: MemoryConsolidationEvent[] = [];
 
   // Phase 1: filter active, prune by age
@@ -511,8 +595,9 @@ export function enforceLongTermLimitsWithAccounting(entries: LongTermMemoryEntry
   }
 
   const dedupeResult = dedupeLongTermEntriesWithAccounting(phase1);
-  const sorted = [...dedupeResult.kept].sort(compareLongTermMemoryForRetention);
-  const kept = sorted.slice(0, LONG_TERM_LIMITS.maxEntries);
+  const sorted = [...dedupeResult.kept].sort((a, b) => compareLongTermMemoryForRetention(a, b, now, dormantDays));
+  const capped = applyTypeMaxCaps(sorted);
+  const kept = capped.slice(0, LONG_TERM_LIMITS.maxEntries);
   const keptIds = new Set(kept.map(entry => entry.id));
   const capacityDropped = sorted
     .filter(entry => !keptIds.has(entry.id))
@@ -524,6 +609,27 @@ export function enforceLongTermLimitsWithAccounting(entries: LongTermMemoryEntry
     absorbed: dedupeResult.absorbed,
     superseded: dedupeResult.superseded,
   };
+}
+
+function applyTypeMaxCaps(entries: LongTermMemoryEntry[]): LongTermMemoryEntry[] {
+  const capped: LongTermMemoryEntry[] = [];
+  const typeCounts: Partial<Record<LongTermMemoryEntry["type"], number>> = {};
+
+  for (const entry of entries) {
+    if (entry.safetyCritical) {
+      capped.push(entry);
+      continue;
+    }
+
+    const count = typeCounts[entry.type] ?? 0;
+    const max = TYPE_MAX[entry.type] ?? Infinity;
+    if (count >= max) continue;
+
+    capped.push(entry);
+    typeCounts[entry.type] = count + 1;
+  }
+
+  return capped;
 }
 
 export function dedupeLongTermEntriesWithAccounting(entries: LongTermMemoryEntry[]): LongTermLimitResult {
@@ -598,27 +704,21 @@ export function dedupeLongTermEntriesWithAccounting(entries: LongTermMemoryEntry
   };
 }
 
-function compareLongTermMemoryForRetention(a: LongTermMemoryEntry, b: LongTermMemoryEntry): number {
-  const pA = priority(a);
-  const pB = priority(b);
-  if (pB !== pA) return pB - pA;
+function compareLongTermMemoryForRetention(
+  a: LongTermMemoryEntry,
+  b: LongTermMemoryEntry,
+  now: number,
+  dormantDays: number,
+): number {
+  const strengthA = calculateRetentionStrength(a, now, dormantDays);
+  const strengthB = calculateRetentionStrength(b, now, dormantDays);
+  if (strengthB !== strengthA) return strengthB - strengthA;
+
   const sourceDiff = sourcePriority(b.source) - sourcePriority(a.source);
   if (sourceDiff !== 0) return sourceDiff;
   const createdDiff = new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
   if (createdDiff !== 0) return createdDiff;
   return a.id.localeCompare(b.id);
-}
-
-function priority(entry: LongTermMemoryEntry): number {
-  const typeWeight = {
-    feedback: 400,
-    decision: 300,
-    project: 200,
-    reference: 100,
-  }[entry.type];
-
-  const sourceWeight = entry.source === "explicit" ? 1000 : 0;
-  return sourceWeight + typeWeight + entry.confidence * 10;
 }
 
 function wouldFit(
