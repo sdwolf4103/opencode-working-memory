@@ -6,6 +6,7 @@ import { LONG_TERM_LIMITS } from "./types.ts";
 import { assessMemoryQuality } from "./memory-quality.ts";
 import { extractionRejectionLogPath } from "./paths.ts";
 import { redactCredentials } from "./redaction.ts";
+import type { EvidenceEventInput } from "./evidence-log.ts";
 
 function id(prefix: string): string {
   return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -46,6 +47,34 @@ function isNegatedMemoryRequest(text: string, matchIndex: number): boolean {
 }
 
 export function extractExplicitMemories(text: string): LongTermMemoryEntry[] {
+  return extractExplicitMemoriesWithEvidence(text).entries;
+}
+
+export type WorkspaceMemoryParseResult = {
+  entries: LongTermMemoryEntry[];
+  evidence: EvidenceEventInput[];
+};
+
+function evidenceTextPreview(text: string, maxChars = 120): string {
+  return redactCredentials(text).replace(/\s+/g, " ").trim().slice(0, maxChars);
+}
+
+function memoryEvidence(memory: LongTermMemoryEntry): EvidenceEventInput["memory"] {
+  return {
+    memoryId: memory.id,
+    type: memory.type,
+    source: memory.source,
+    status: memory.status,
+  };
+}
+
+function extractionEvidence(
+  input: Pick<EvidenceEventInput, "type" | "phase" | "outcome" | "reasonCodes" | "textPreview" | "memory" | "details">,
+): EvidenceEventInput {
+  return input;
+}
+
+export function extractExplicitMemoriesWithEvidence(text: string): WorkspaceMemoryParseResult {
   // 注意：所有pattern必須有 g flag，因為使用 matchAll()
   // Pattern 必須在行首匹配，避免匹配到句子中間的非指令式用法
   const patterns = [
@@ -71,29 +100,74 @@ export function extractExplicitMemories(text: string): LongTermMemoryEntry[] {
   const nowMs = Date.now();
   const now = new Date(nowMs).toISOString();
   const entries: LongTermMemoryEntry[] = [];
+  const evidence: EvidenceEventInput[] = [];
   const seen = new Set<string>();
+  const negatedLinePattern = /(?:^|\n)\s*(?:(?:please\s+)?(?:do\s+not|don't|dont|never)\s+remember(?:\s+(?:this|that))?|不要\s*(?:記住|记住)|別\s*(?:記住|记住)|别\s*(?:記住|记住))[:：,，]?\s*(.+)$/gim;
+  for (const match of text.matchAll(negatedLinePattern)) {
+    evidence.push(extractionEvidence({
+      type: "explicit_memory_ignored",
+      phase: "explicit",
+      outcome: "rejected",
+      reasonCodes: ["negated_request"],
+      textPreview: evidenceTextPreview(match[1] ?? match[0], 80),
+    }));
+  }
 
   for (const pattern of patterns) {
     for (const match of text.matchAll(pattern)) {
       const body = match[1]?.trim();
-      if (!body || body.length < 8) continue;
+      if (body && /^(再说|再說|later|next time)$/i.test(body)) {
+        evidence.push(extractionEvidence({
+          type: "explicit_memory_ignored",
+          phase: "explicit",
+          outcome: "rejected",
+          reasonCodes: ["deferral"],
+          textPreview: evidenceTextPreview(body, 80),
+        }));
+        continue;
+      }
+      if (!body || body.length < 8) {
+        evidence.push(extractionEvidence({
+          type: "explicit_memory_ignored",
+          phase: "explicit",
+          outcome: "rejected",
+          reasonCodes: ["too_short"],
+          textPreview: evidenceTextPreview(body ?? match[0], 80),
+        }));
+        continue;
+      }
       
       // Calculate actual trigger position (after possible newline)
       const triggerIndex = match.index! + (match[0].match(/^[\s\n]*/)?.[0]?.length || 0);
       
       // Check if this is a negated request (e.g., "不要記住")
-      if (isNegatedMemoryRequest(text, triggerIndex)) continue;
+      if (isNegatedMemoryRequest(text, triggerIndex)) {
+        evidence.push(extractionEvidence({
+          type: "explicit_memory_ignored",
+          phase: "explicit",
+          outcome: "rejected",
+          reasonCodes: ["negated_request"],
+          textPreview: evidenceTextPreview(body, 80),
+        }));
+        continue;
+      }
       
-      // Check if it's a deferral (e.g., "later", "next time")
-      if (/^(再说|再說|later|next time)$/i.test(body)) continue;
-
       // Dedupe by canonical body
       const key = body.toLowerCase().replace(/\s+/g, " ").trim();
-      if (seen.has(key)) continue;
+      if (seen.has(key)) {
+        evidence.push(extractionEvidence({
+          type: "explicit_memory_ignored",
+          phase: "explicit",
+          outcome: "rejected",
+          reasonCodes: ["duplicate_in_message"],
+          textPreview: evidenceTextPreview(body, 80),
+        }));
+        continue;
+      }
       seen.add(key);
 
       const type = classifyExplicitMemory(body);
-      entries.push({
+      const memory: LongTermMemoryEntry = {
         id: id("mem"),
         type,
         text: body.slice(0, LONG_TERM_LIMITS.maxEntryTextChars),
@@ -104,11 +178,20 @@ export function extractExplicitMemories(text: string): LongTermMemoryEntry[] {
         updatedAt: now,
         retentionClock: nowMs,
         staleAfterDays: staleAfterDaysFor(type),
-      });
+      };
+      entries.push(memory);
+      evidence.push(extractionEvidence({
+        type: "explicit_memory_detected",
+        phase: "explicit",
+        outcome: "accepted",
+        reasonCodes: ["explicit_trigger_matched"],
+        memory: memoryEvidence(memory),
+        textPreview: evidenceTextPreview(memory.text),
+      }));
     }
   }
 
-  return entries;
+  return { entries, evidence };
 }
 
 function classifyExplicitMemory(text: string): LongTermType {
@@ -251,7 +334,7 @@ async function logExtractionRejection(entry: ExtractionRejectionLogEntry): Promi
   }
 }
 
-function shouldAcceptWorkspaceMemoryCandidate(
+function evaluateWorkspaceMemoryCandidate(
   entry: {
     type: LongTermType;
     text: string;
@@ -259,7 +342,7 @@ function shouldAcceptWorkspaceMemoryCandidate(
   options: {
     fromMemoryTrigger?: boolean;
   } = {},
-): boolean {
+): { accepted: boolean; reasons: string[] } {
   const text = entry.text.trim();
   const minLength = options.fromMemoryTrigger ? 6 : 20;
 
@@ -267,14 +350,14 @@ function shouldAcceptWorkspaceMemoryCandidate(
   if (entry.type === "reference" && /\b(?:admin\s+)?pin\s|scrypt|n=\d+|r=\d+|p=\d+/i.test(text)) {
     // Stable config values can be short — allow below generic min length
   } else if (text.length < minLength) {
-    return false;
+    return { accepted: false, reasons: ["too_short"] };
   }
 
   // Indirect Prompt Injection / Adversarial Instructions
   // Rejects attempts to overwrite system behavior or "ignore" rules.
   // comparative "instead of" is allowed.
-  if (/\b(ignore\s+all|ignore\s+previous|ignore\s+instruction|overwrite\s+system|overwrite\s+rules|forget\s+all|delete\s+root)\b/i.test(text)) return false;
-  if (/\b(ignore|instruction|overwrite)\b/i.test(text) && /\b(previous|all|rules|behavior|prompt|system)\b/i.test(text)) return false;
+  if (/\b(ignore\s+all|ignore\s+previous|ignore\s+instruction|overwrite\s+system|overwrite\s+rules|forget\s+all|delete\s+root)\b/i.test(text)) return { accepted: false, reasons: ["prompt_injection"] };
+  if (/\b(ignore|instruction|overwrite)\b/i.test(text) && /\b(previous|all|rules|behavior|prompt|system)\b/i.test(text)) return { accepted: false, reasons: ["prompt_injection"] };
 
   const quality = assessMemoryQuality({ type: entry.type, text, source: "compaction" });
   if (!quality.accepted) {
@@ -285,10 +368,22 @@ function shouldAcceptWorkspaceMemoryCandidate(
       reasons: quality.reasons,
       source: "compaction",
     });
-    return false;
+    return { accepted: false, reasons: quality.reasons };
   }
 
-  return true;
+  return { accepted: true, reasons: ["quality_gate_passed"] };
+}
+
+function shouldAcceptWorkspaceMemoryCandidate(
+  entry: {
+    type: LongTermType;
+    text: string;
+  },
+  options: {
+    fromMemoryTrigger?: boolean;
+  } = {},
+): boolean {
+  return evaluateWorkspaceMemoryCandidate(entry, options).accepted;
 }
 
 /**
@@ -316,12 +411,17 @@ function extractCandidateBlock(summary: string): string | null {
 }
 
 export function parseWorkspaceMemoryCandidates(summary: string): LongTermMemoryEntry[] {
+  return parseWorkspaceMemoryCandidatesWithEvidence(summary).entries;
+}
+
+export function parseWorkspaceMemoryCandidatesWithEvidence(summary: string): WorkspaceMemoryParseResult {
   const block = extractCandidateBlock(summary);
-  if (!block) return [];
+  if (!block) return { entries: [], evidence: [] };
 
   const nowMs = Date.now();
   const now = new Date(nowMs).toISOString();
   const entries: LongTermMemoryEntry[] = [];
+  const evidence: EvidenceEventInput[] = [];
 
   for (const line of block.split("\n")) {
     // Accept both "- [type] text" (bracketed) and "- type text" (bracketless)
@@ -331,18 +431,49 @@ export function parseWorkspaceMemoryCandidates(summary: string): LongTermMemoryE
     if (!item) continue;
     const type = (item[1] ?? item[2]).toLowerCase() as LongTermType;
     const normalizedBody = normalizeCandidateBody(item[3]);
-    if (!normalizedBody) continue;
+    if (!normalizedBody) {
+      evidence.push(extractionEvidence({
+        type: "extraction_candidate_rejected",
+        phase: "extraction",
+        outcome: "rejected",
+        reasonCodes: ["negated_request"],
+        memory: { type, source: "compaction" },
+        textPreview: evidenceTextPreview(item[3], 80),
+      }));
+      continue;
+    }
 
     const minLength = normalizedBody.hadTrigger ? 6 : 12;
-    if (normalizedBody.text.length < minLength) continue;
+    if (normalizedBody.text.length < minLength) {
+      evidence.push(extractionEvidence({
+        type: "extraction_candidate_rejected",
+        phase: "extraction",
+        outcome: "rejected",
+        reasonCodes: ["too_short"],
+        memory: { type, source: "compaction" },
+        textPreview: evidenceTextPreview(normalizedBody.text, 80),
+      }));
+      continue;
+    }
 
     // Apply quality gate
-    if (!shouldAcceptWorkspaceMemoryCandidate(
+    const quality = evaluateWorkspaceMemoryCandidate(
       { type, text: normalizedBody.text },
       { fromMemoryTrigger: normalizedBody.hadTrigger },
-    )) continue;
+    );
+    if (!quality.accepted) {
+      evidence.push(extractionEvidence({
+        type: "extraction_candidate_rejected",
+        phase: "extraction",
+        outcome: "rejected",
+        reasonCodes: quality.reasons,
+        memory: { type, source: "compaction" },
+        textPreview: evidenceTextPreview(normalizedBody.text, 80),
+      }));
+      continue;
+    }
 
-    entries.push({
+    const memory: LongTermMemoryEntry = {
       id: id("mem"),
       type,
       text: normalizedBody.text.slice(0, LONG_TERM_LIMITS.maxEntryTextChars),
@@ -353,8 +484,17 @@ export function parseWorkspaceMemoryCandidates(summary: string): LongTermMemoryE
       updatedAt: now,
       retentionClock: nowMs,
       staleAfterDays: staleAfterDaysFor(type),
-    });
+    };
+    entries.push(memory);
+    evidence.push(extractionEvidence({
+      type: "extraction_candidate_accepted",
+      phase: "extraction",
+      outcome: "accepted",
+      reasonCodes: ["quality_gate_passed", "valid_candidate_format"],
+      memory: memoryEvidence(memory),
+      textPreview: evidenceTextPreview(memory.text),
+    }));
   }
 
-  return entries;
+  return { entries, evidence };
 }

@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { appendFile, mkdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
-import { workspaceEvidenceLogPath, workspaceKey } from "./paths.ts";
+import { dirname, join } from "node:path";
+import { dataHome, workspaceEvidenceLogPath, workspaceKey } from "./paths.ts";
 import { redactCredentials } from "./redaction.ts";
 
 export type EvidenceEventType =
@@ -309,6 +309,17 @@ export async function appendEvidenceEvents(root: string, events: EvidenceEventIn
   }
 
   return records;
+}
+
+export async function appendEvidenceEventForWorkspaceKey(
+  workspaceKeyValue: string,
+  event: EvidenceEventInput,
+): Promise<EvidenceEventV1> {
+  const path = join(dataHome(), "opencode-working-memory", "workspaces", workspaceKeyValue, "evidence", "events.jsonl");
+  const record = buildEvidenceEvent(event, workspaceKeyValue, workspaceKeyValue);
+  await safeAppendEvidenceLine(path, JSON.stringify(record));
+  await maybePruneEvidenceLog(path);
+  return record;
 }
 
 type ParsedEvidenceLine = {

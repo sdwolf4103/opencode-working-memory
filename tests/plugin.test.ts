@@ -8,9 +8,10 @@ import { loadSessionState, saveSessionState } from "../src/session-state.ts";
 import { parseWorkspaceMemoryCandidates } from "../src/extractors.ts";
 import type { OpenError } from "../src/types.ts";
 import { PROMOTION_RETRY_LIMITS, WORKSPACE_MEMORY_CACHE_LIMITS } from "../src/types.ts";
-import { workspaceMemoryPath, workspacePendingJournalPath } from "../src/paths.ts";
+import { sessionStatePath, workspaceMemoryPath, workspacePendingJournalPath } from "../src/paths.ts";
 import { loadPendingJournal, savePendingJournal, memoryKey } from "../src/pending-journal.ts";
 import { loadWorkspaceMemory, updateWorkspaceMemory } from "../src/workspace-memory.ts";
+import { queryEvidenceEvents } from "../src/evidence-log.ts";
 
 // Mock client for root session (not a sub-agent)
 function mockRootClient() {
@@ -477,6 +478,35 @@ test("chat system transform degrades gracefully when workspace memory JSON is co
   }
 });
 
+test("hook failure emits hook_failed evidence without raw tool output", async () => {
+  const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-test-"));
+
+  try {
+    const statePath = await sessionStatePath(tmpDir, "hook-failure-session");
+    await mkdir(dirname(statePath), { recursive: true });
+    await mkdir(statePath, { recursive: true });
+
+    const plugin = await MemoryV2Plugin({ directory: tmpDir, client: mockRootClient() });
+    await (plugin as Record<string, Function>)["tool.execute.after"](
+      {
+        tool: "bash",
+        sessionID: "hook-failure-session",
+        args: { command: "cat secret-output.txt" },
+      },
+      { output: "raw tool output password: sushi should not be in evidence", exitCode: 1 },
+    );
+
+    const events = await queryEvidenceEvents(tmpDir, { types: ["hook_failed"] });
+    const raw = JSON.stringify(events);
+    assert.equal(events.length, 1);
+    assert.equal(events[0].reasonCodes.includes("tool.execute.after"), true);
+    assert.equal(raw.includes("raw tool output"), false);
+    assert.equal(raw.includes("sushi"), false);
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
 test("no compaction: owned explicit memory is not promoted by unrelated next session start", async () => {
   const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-test-"));
 
@@ -898,6 +928,44 @@ test("integration: explicit memory flows from user message through pending journ
     );
 
     assert.match(output.system.join("\n"), /Prefer deterministic consolidation accounting/);
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("explicit memory lifecycle emits detected appended and promoted evidence", async () => {
+  const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-test-"));
+
+  try {
+    const plugin = await MemoryV2Plugin({
+      directory: tmpDir,
+      client: mockClientWithLatestUser("remember this: Prefer evidence-backed lifecycle tests.", "msg-evidence-life"),
+    });
+
+    await (plugin as Record<string, Function>)["experimental.chat.system.transform"](
+      { sessionID: "evidence-life-session", model: {} },
+      { system: ["base header"] },
+    );
+
+    await (plugin as Record<string, Function>)["event"]({
+      event: { type: "session.compacted", properties: { sessionID: "evidence-life-session" } },
+    });
+
+    const events = await queryEvidenceEvents(tmpDir, { newestFirst: false });
+    const eventTypes = events.map(event => event.type);
+
+    assert.ok(eventTypes.includes("explicit_memory_detected"));
+    assert.ok(eventTypes.includes("pending_memory_appended"));
+    assert.ok(eventTypes.includes("promotion_promoted"));
+
+    const output = { system: ["base header"] };
+    await (plugin as Record<string, Function>)["experimental.chat.system.transform"](
+      { sessionID: "evidence-life-session", model: {} },
+      output,
+    );
+
+    const finalEvents = await queryEvidenceEvents(tmpDir, { newestFirst: false });
+    assert.ok(finalEvents.map(event => event.type).includes("render_selected"));
   } finally {
     await rm(tmpDir, { recursive: true, force: true });
   }

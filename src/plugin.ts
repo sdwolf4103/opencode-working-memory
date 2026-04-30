@@ -26,16 +26,17 @@
 import { rm } from "fs/promises";
 import type { Plugin } from "@opencode-ai/plugin";
 import {
-  extractExplicitMemories,
+  extractExplicitMemoriesWithEvidence,
   extractActiveFiles,
   extractErrorsFromBash,
-  parseWorkspaceMemoryCandidates,
+  parseWorkspaceMemoryCandidatesWithEvidence,
 } from "./extractors.ts";
 import {
   loadWorkspaceMemory,
   updateWorkspaceMemory,
   updateWorkspaceMemoryWithAccounting,
-  renderWorkspaceMemory,
+  accountWorkspaceMemoryRender,
+  workspaceMemoryIdentityKey,
 } from "./workspace-memory.ts";
 import { reinforceMemory } from "./retention.ts";
 import {
@@ -62,7 +63,8 @@ import {
   latestCompactionSummary,
   pendingTodos,
 } from "./opencode.ts";
-import { accountPendingPromotions } from "./promotion-accounting.ts";
+import { accountPendingPromotions, promotionAccountingEvidenceEvents } from "./promotion-accounting.ts";
+import { appendEvidenceEvent, appendEvidenceEvents, type EvidenceEventInput, type MemoryEvidenceRef } from "./evidence-log.ts";
 import { type LongTermMemoryEntry, WORKSPACE_MEMORY_CACHE_LIMITS } from "./types.ts";
 
 /**
@@ -162,9 +164,23 @@ function renderTodosForCompaction(todos: Array<{ content: string; status: string
   return lines.join("\n");
 }
 
-function warnMemoryHook(scope: string, error: unknown): void {
+function safeErrorMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
+  return message.replace(/\s+/g, " ").slice(0, 240);
+}
+
+async function warnMemoryHook(scope: string, error: unknown, root?: string): Promise<void> {
+  const message = safeErrorMessage(error);
   console.error(`[memory] ${scope} failed: ${message}`);
+  if (root) {
+    await appendEvidenceEvent(root, {
+      type: "hook_failed",
+      phase: "hook",
+      outcome: "failed",
+      reasonCodes: [scope],
+      details: { message },
+    }).catch(() => undefined);
+  }
 }
 
 export const MemoryV2Plugin: Plugin = async (input) => {
@@ -202,6 +218,29 @@ export const MemoryV2Plugin: Plugin = async (input) => {
 
   // Cache for processed user message IDs (to avoid duplicate processing)
   const processedUserMessages = new Map<string, Set<string>>();
+
+  function memoryEvidenceRef(memory: LongTermMemoryEntry): MemoryEvidenceRef {
+    return {
+      memoryId: memory.id,
+      memoryKeyHash: memoryKey(memory),
+      identityKeyHash: workspaceMemoryIdentityKey(memory),
+      type: memory.type,
+      source: memory.source,
+      status: memory.status,
+    };
+  }
+
+  function pendingAppendedEvidence(memory: LongTermMemoryEntry): EvidenceEventInput {
+    return {
+      type: "pending_memory_appended",
+      phase: "pending_journal",
+      outcome: "accepted",
+      memory: memoryEvidenceRef(memory),
+      relations: [{ role: "pending", memory: memoryEvidenceRef(memory) }],
+      reasonCodes: ["pending_journal_append"],
+      textPreview: memory.text,
+    };
+  }
 
   function pruneFrozenWorkspaceMemoryCache(now = Date.now()): void {
     for (const [sessionID, cached] of frozenWorkspaceMemoryCache) {
@@ -259,7 +298,14 @@ export const MemoryV2Plugin: Plugin = async (input) => {
 
     if (!latestMessage?.id || processedForSession.has(latestMessage.id)) return;
 
-    const memories = extractExplicitMemories(latestMessage.text).map(memory => ({
+    const extraction = extractExplicitMemoriesWithEvidence(latestMessage.text);
+    await appendEvidenceEvents(directory, extraction.evidence.map(event => ({
+      ...event,
+      sessionHash: sessionID,
+      messageHash: latestMessage.id,
+    })));
+
+    const memories = extraction.entries.map(memory => ({
       ...memory,
       pendingOwnerSessionID: sessionID,
       pendingMessageID: latestMessage.id,
@@ -272,6 +318,11 @@ export const MemoryV2Plugin: Plugin = async (input) => {
         return state;
       });
       await appendPendingMemories(directory, memories);
+      await appendEvidenceEvents(directory, memories.map(memory => ({
+        ...pendingAppendedEvidence(memory),
+        sessionHash: sessionID,
+        messageHash: latestMessage.id,
+      })));
     }
 
     if (decisions.length > 0) {
@@ -385,6 +436,20 @@ export const MemoryV2Plugin: Plugin = async (input) => {
       },
     );
 
+    await appendEvidenceEvents(directory, [
+      ...updateResult.evidence,
+      ...promotionAccountingEvidenceEvents({
+        pending,
+        after: updateResult.store.entries,
+        events: updateResult.events,
+        accounting,
+        exhaustedRejectedKeys,
+      }),
+    ].map(event => ({
+      ...event,
+      sessionHash: sessionID,
+    })));
+
     const sessionRemovalKeys = new Set([
       ...accounting.clearableKeys,
       ...exhaustedRejectedKeys,
@@ -459,7 +524,12 @@ export const MemoryV2Plugin: Plugin = async (input) => {
     }
 
     const store = await loadWorkspaceMemory(root);
-    const renderedPrompt = renderWorkspaceMemory(store);
+    const renderAccounting = accountWorkspaceMemoryRender(store);
+    const renderedPrompt = renderAccounting.prompt;
+    await appendEvidenceEvents(root, renderAccounting.evidence.map(event => ({
+      ...event,
+      sessionHash: sessionID,
+    })));
     frozenWorkspaceMemoryCache.set(sessionID, { store, renderedPrompt, loadedAt: now });
     pruneFrozenWorkspaceMemoryCache(now);
     return { store, renderedPrompt };
@@ -518,7 +588,7 @@ export const MemoryV2Plugin: Plugin = async (input) => {
           output.system.push(hotPrompt);
         }
       } catch (error) {
-        warnMemoryHook("chat.system.transform", error);
+        await warnMemoryHook("chat.system.transform", error, directory);
       }
     },
 
@@ -577,7 +647,7 @@ export const MemoryV2Plugin: Plugin = async (input) => {
         // Only process once per message ID
         await processLatestUserMessage(sessionID);
       } catch (error) {
-        warnMemoryHook("tool.execute.after", error);
+        await warnMemoryHook("tool.execute.after", error, directory);
       }
     },
 
@@ -641,7 +711,7 @@ export const MemoryV2Plugin: Plugin = async (input) => {
         // output.context if they want to preserve other plugin contributions.
         output.context.length = 0;
       } catch (error) {
-        warnMemoryHook("session.compacting", error);
+        await warnMemoryHook("session.compacting", error, directory);
       }
     },
 
@@ -658,15 +728,24 @@ export const MemoryV2Plugin: Plugin = async (input) => {
           // Parse latest compaction summary for memory candidates, stage them into
           // durable pending journal, then promote pending memories.
           const summary = await latestCompactionSummary(client, sessionID);
-          const candidates = summary ? parseWorkspaceMemoryCandidates(summary) : [];
+          const parseResult = summary ? parseWorkspaceMemoryCandidatesWithEvidence(summary) : { entries: [], evidence: [] };
+          await appendEvidenceEvents(directory, parseResult.evidence.map(event => ({
+            ...event,
+            sessionHash: sessionID,
+          })));
+          const candidates = parseResult.entries;
           if (candidates.length > 0) {
             await appendPendingMemories(directory, candidates);
+            await appendEvidenceEvents(directory, candidates.map(memory => ({
+              ...pendingAppendedEvidence(memory),
+              sessionHash: sessionID,
+            })));
           }
 
           await promotePendingMemories(sessionID, { includeUnownedJournal: true });
         } catch (error) {
           // Keep pending memories in session/journal for retry on next event/session.
-          warnMemoryHook("event.session.compacted", error);
+          await warnMemoryHook("event.session.compacted", error, directory);
         }
       }
 
@@ -688,7 +767,7 @@ export const MemoryV2Plugin: Plugin = async (input) => {
             await rm(await sessionStatePath(directory, sessionID), { force: true });
           }
         } catch (error) {
-          warnMemoryHook("event.session.deleted", error);
+          await warnMemoryHook("event.session.deleted", error, directory);
         }
       }
     },
