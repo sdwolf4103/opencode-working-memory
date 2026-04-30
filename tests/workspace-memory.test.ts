@@ -270,7 +270,7 @@ test("enforceLongTermLimits respects maxEntries limit", () => {
   assert.ok(kept.length <= 28, `Should respect maxEntries. Got: ${kept.length}`);
 });
 
-test("calculateInitialStrength multiplies type, source, importance, and safety factors", () => {
+test("calculateInitialStrength multiplies type, source, and importance factors", () => {
   const memory: LongTermMemoryEntry = {
     ...entry("strength", "Never store raw credentials", "reference"),
     source: "explicit",
@@ -278,7 +278,20 @@ test("calculateInitialStrength multiplies type, source, importance, and safety f
     safetyCritical: true,
   };
 
-  assert.equal(calculateInitialStrength(memory), 18);
+  assert.equal(calculateInitialStrength(memory), 3);
+});
+
+test("calculateInitialStrength ignores deprecated safetyCritical field", () => {
+  const memory: LongTermMemoryEntry = {
+    ...entry("safety-deprecated", "Deprecated safety field should not affect strength", "decision"),
+    source: "explicit",
+    userImportance: "high",
+    safetyCritical: true,
+  };
+
+  const withoutSafety = { ...memory, safetyCritical: undefined };
+
+  assert.equal(calculateInitialStrength(memory), calculateInitialStrength(withoutSafety));
 });
 
 test("calculateEffectiveHalfLife clamps reinforcement count at configured maximum", () => {
@@ -567,7 +580,73 @@ test("enforceLongTermLimits applies per-type caps after strength sorting", () =>
   assert.equal(kept.filter(memory => memory.type === "feedback").length, 10);
 });
 
-test("enforceLongTermLimits exempts safety-critical entries from type caps", () => {
+test("safetyCritical entries compete under TYPE_MAX caps like other entries", () => {
+  const safetyEntries: LongTermMemoryEntry[] = Array.from({ length: 6 }, (_, i) => ({
+    ...entry(`safety-${i}`, `Safety memory ${i}`, "feedback"),
+    source: "explicit",
+    safetyCritical: true,
+  }));
+
+  const ordinaryEntries: LongTermMemoryEntry[] = Array.from({ length: 10 }, (_, i) => ({
+    ...entry(`ordinary-${i}`, `Ordinary memory ${i}`, "feedback"),
+    source: "explicit",
+  }));
+
+  const all = [...safetyEntries, ...ordinaryEntries];
+  const kept = enforceLongTermLimits(all);
+
+  const feedbackCount = kept.filter(e => e.type === "feedback").length;
+  assert.equal(feedbackCount, 10);
+  // safetyCritical entries are no longer exempt from type caps
+  assert.ok(kept.filter(e => e.safetyCritical).length < 6);
+});
+
+test("workspace memory JSON with deprecated safetyCritical loads and competes normally", async () => {
+  const root = await mkdtemp(join(tmpdir(), "opencode-safety-compat-"));
+  try {
+    const key = await workspaceKey(root);
+    const path = await workspaceMemoryPath(root);
+    const now = new Date().toISOString();
+    const safetyEntries: LongTermMemoryEntry[] = Array.from({ length: 6 }, (_, i) => ({
+      ...entry(`safety-fixture-${i}`, `Safety fixture memory ${i}`, "feedback"),
+      source: "explicit",
+      userImportance: i === 0 ? "high" : "normal",
+      safetyCritical: true,
+    }));
+    const ordinaryEntries: LongTermMemoryEntry[] = Array.from({ length: 10 }, (_, i) => ({
+      ...entry(`ordinary-fixture-${i}`, `Ordinary fixture memory ${i}`, "feedback"),
+      source: "explicit",
+    }));
+    const store: WorkspaceMemoryStore = {
+      version: 1,
+      workspace: { root, key },
+      limits: { maxRenderedChars: LONG_TERM_LIMITS.maxRenderedChars, maxEntries: LONG_TERM_LIMITS.maxEntries },
+      entries: [...safetyEntries, ...ordinaryEntries],
+      migrations: [],
+      updatedAt: now,
+      lastActivityAt: now,
+    };
+
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, JSON.stringify(store, null, 2), "utf8");
+
+    const loaded = await loadWorkspaceMemory(root);
+    const safetyEntry = loaded.entries.find(memory => memory.safetyCritical);
+    assert.ok(safetyEntry, "fixture should include deprecated safetyCritical entries");
+    assert.equal(
+      calculateInitialStrength(safetyEntry),
+      calculateInitialStrength({ ...safetyEntry, safetyCritical: undefined }),
+    );
+
+    const kept = enforceLongTermLimits(loaded.entries);
+    assert.equal(kept.filter(memory => memory.type === "feedback").length, 10);
+    assert.ok(kept.filter(memory => memory.safetyCritical).length < safetyEntries.length);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("enforceLongTermLimits applies type caps to deprecated safetyCritical entries", () => {
   const ordinaryFeedback = Array.from({ length: 12 }, (_, i) =>
     entry(`feedback_${i}`, `Unique safe ordinary feedback preference ${i}`, "feedback")
   );
@@ -578,12 +657,11 @@ test("enforceLongTermLimits exempts safety-critical entries from type caps", () 
 
   const kept = enforceLongTermLimits([safetyCriticalFeedback, ...ordinaryFeedback]);
 
-  assert.equal(kept.length, 11);
-  assert.ok(kept.some(memory => memory.id === "safety-feedback"));
-  assert.equal(kept.filter(memory => memory.type === "feedback" && !memory.safetyCritical).length, 10);
+  assert.equal(kept.length, 10);
+  assert.equal(kept.filter(memory => memory.type === "feedback").length, 10);
 });
 
-test("mixed retention scenario applies caps, safety exemption, and reinforcement ordering", () => {
+test("mixed retention scenario applies caps and reinforcement ordering", () => {
   const now = Date.now();
   const oldAge = now - 120 * DAY_MS;
   const ordinaryFeedback = Array.from({ length: 17 }, (_, i) =>
@@ -625,18 +703,15 @@ test("mixed retention scenario applies caps, safety exemption, and reinforcement
     lastActivityAt: new Date(now).toISOString(),
   };
 
-  assert.ok(entries.filter(memory => memory.type === "feedback" && !memory.safetyCritical).length > 10);
-  assert.ok(entries.filter(memory => memory.type === "decision" && !memory.safetyCritical).length > 10);
+  assert.ok(entries.filter(memory => memory.type === "feedback").length > 10);
+  assert.ok(entries.filter(memory => memory.type === "decision").length > 10);
 
   const result = enforceLongTermLimitsWithAccounting(entries, store);
 
   assert.ok(result.kept.length <= 28);
-  assert.ok(result.kept.filter(memory => memory.type === "feedback" && !memory.safetyCritical).length <= 10);
-  assert.ok(result.kept.filter(memory => memory.type === "decision" && !memory.safetyCritical).length <= 10);
-  assert.ok(result.kept.some(memory => memory.safetyCritical));
-  assert.equal(result.kept.filter(memory => memory.type === "feedback" && !memory.safetyCritical).length, 10);
-  assert.equal(result.kept.filter(memory => memory.type === "feedback" && memory.safetyCritical).length, 1);
-  assert.equal(result.kept.filter(memory => memory.type === "feedback").length, 11);
+  assert.ok(result.kept.filter(memory => memory.type === "feedback").length <= 10);
+  assert.ok(result.kept.filter(memory => memory.type === "decision").length <= 10);
+  assert.equal(result.kept.filter(memory => memory.type === "feedback").length, 10);
   const reinforcedIndex = result.kept.findIndex(memory => memory.id === "old-reinforced");
   const unreinforcedIndex = result.kept.findIndex(memory => memory.id === "old-unreinforced");
   assert.ok(reinforcedIndex >= 0, "old reinforced reference should be kept");

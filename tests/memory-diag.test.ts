@@ -77,7 +77,7 @@ test("memory health reports stored vs rendered retention counts", async () => {
   }
 });
 
-test("memory health reports dormancy and retention monitoring alerts", async () => {
+test("memory health reports dormancy and retention monitoring deprecations", async () => {
   const root = await mkdtemp(join(tmpdir(), "opencode-memory-diag-"));
   try {
     const lastActivityAt = new Date(Date.now() - 19 * 24 * 60 * 60 * 1000).toISOString();
@@ -96,7 +96,7 @@ test("memory health reports dormancy and retention monitoring alerts", async () 
     assert.match(stdout, /dormant discount active: yes/);
     assert.match(stdout, /dormant days past grace: 5\.0/);
     assert.match(stdout, /high_importance_ratio: 40\.0% .* ALERT/);
-    assert.match(stdout, /safety_critical_count: 6 .* ALERT/);
+    assert.match(stdout, /safety_critical_count: 6 .*deprecated.* WARNING/);
     assert.match(stdout, /max_reinforced_count: 2 \(20\.0%, alert > 10%\) ALERT/);
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -135,7 +135,7 @@ test("memory health reports missing dormancy and non-alert monitoring defaults",
     assert.match(stdout, /wall days since activity: unknown/);
     assert.match(stdout, /dormant discount active: no/);
     assert.match(stdout, /high_importance_ratio: 0\.0% \(alert > 30%\)\n/);
-    assert.match(stdout, /safety_critical_count: 0 \(alert > 5\)\n/);
+    assert.match(stdout, /safety_critical_count: 0 \(deprecated field\)\n/);
     assert.match(stdout, /max_reinforced_count: 0 \(alert > 10% active\)/);
   } finally {
     await rm(root, { recursive: true, force: true });

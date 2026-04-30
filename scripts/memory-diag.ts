@@ -279,15 +279,13 @@ function retentionCandidatesForDiag(store: WorkspaceMemoryStore): {
   const typeCounts: Partial<Record<LongTermType, number>> = {};
 
   for (const item of sorted) {
-    if (!isSafetyCriticalForDiag(item.entry)) {
-      const count = typeCounts[item.entry.type] ?? 0;
-      const max = TYPE_MAX_FOR_DIAG[item.entry.type] ?? Infinity;
-      if (count >= max) {
-        typeCapped.push(item);
-        continue;
-      }
-      typeCounts[item.entry.type] = count + 1;
+    const count = typeCounts[item.entry.type] ?? 0;
+    const max = TYPE_MAX_FOR_DIAG[item.entry.type] ?? Infinity;
+    if (count >= max) {
+      typeCapped.push(item);
+      continue;
     }
+    typeCounts[item.entry.type] = count + 1;
 
     if (rendered.length < LONG_TERM_LIMITS.maxEntries) {
       rendered.push(item);
@@ -472,11 +470,11 @@ async function printWorkspaceHealth(input: {
   const highImportanceRatio = active.length === 0 ? 0 : highImportanceCount / active.length;
   const maxReinforcedRatio = active.length === 0 ? 0 : maxReinforcedCount / active.length;
   const highImportanceAlert = highImportanceRatio > 0.3;
-  const safetyCriticalAlert = safetyCriticalCount > 5;
+  const safetyCriticalWarning = safetyCriticalCount > 0;
   const maxReinforcedAlert = maxReinforcedRatio > 0.1;
   console.log("Retention monitoring:");
   console.log(`  high_importance_ratio: ${formatPercent(highImportanceRatio)} (alert > 30%)${highImportanceAlert ? " ALERT" : ""}`);
-  console.log(`  safety_critical_count: ${safetyCriticalCount} (alert > 5)${safetyCriticalAlert ? " ALERT" : ""}`);
+  console.log(`  safety_critical_count: ${safetyCriticalCount} (deprecated field)${safetyCriticalWarning ? " WARNING" : ""}`);
   console.log(`  max_reinforced_count: ${maxReinforcedAlert ? `${maxReinforcedCount} (${formatPercent(maxReinforcedRatio)}, alert > 10%) ALERT` : `${maxReinforcedCount} (alert > 10% active)`}`);
   console.log("");
 
