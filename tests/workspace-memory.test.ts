@@ -8,6 +8,7 @@ import { HOT_STATE_LIMITS, LONG_TERM_LIMITS } from "../src/types.ts";
 import { workspaceKey, workspaceMemoryPath } from "../src/paths.ts";
 import {
   renderWorkspaceMemory,
+  accountWorkspaceMemoryRender,
   enforceLongTermLimits,
   dedupeLongTermEntriesWithAccounting,
   enforceLongTermLimitsWithAccounting,
@@ -19,13 +20,16 @@ import {
   loadWorkspaceMemory,
   saveWorkspaceMemory,
   updateWorkspaceMemoryWithAccounting,
+} from "../src/workspace-memory.ts";
+import {
+  RETENTION_TYPE_MAX,
   calculateInitialStrength,
   calculateEffectiveHalfLife,
   calculateRetentionStrength,
   calculateDormantDays,
   calculateEffectiveAgeDays,
   reinforceMemory,
-} from "../src/workspace-memory.ts";
+} from "../src/retention.ts";
 import { redactCredentials } from "../src/redaction.ts";
 import { assessMemoryQuality, isHardQualityReason, isProgressSnapshotViolation } from "../src/memory-quality.ts";
 import { reviewerCurrent28Fixture } from "./fixtures/memory-quality-current-28.ts";
@@ -154,6 +158,47 @@ test("renderWorkspaceMemory returns empty for no entries", () => {
   assert.equal(rendered, "");
 });
 
+test("accountWorkspaceMemoryRender reports rendered and omitted reasons", () => {
+  const store: WorkspaceMemoryStore = {
+    version: 1,
+    workspace: { root: "/repo", key: "abc" },
+    limits: { maxRenderedChars: LONG_TERM_LIMITS.maxRenderedChars, maxEntries: LONG_TERM_LIMITS.maxEntries },
+    entries: [
+      ...Array.from({ length: 12 }, (_, i) => entry(`feedback-render-${i}`, `Unique rendered feedback preference ${i}`, "feedback")),
+      { ...entry("superseded-render", "Old superseded memory", "decision"), status: "superseded" as const },
+    ],
+    updatedAt: new Date().toISOString(),
+  };
+
+  const accounting = accountWorkspaceMemoryRender(store);
+
+  assert.equal(accounting.rendered.length, 10);
+  assert.ok(accounting.omitted.some(item => item.reason === "type_cap"));
+  assert.ok(accounting.omitted.some(item => item.reason === "superseded"));
+  assert.ok(accounting.evidence.some(event => event.type === "render_selected"));
+  assert.ok(accounting.evidence.some(event => event.type === "render_omitted" && event.reasonCodes.includes("type_cap")));
+});
+
+test("accountWorkspaceMemoryRender reports char budget and empty budget omissions", () => {
+  const charBudgetStore: WorkspaceMemoryStore = {
+    version: 1,
+    workspace: { root: "/repo", key: "abc" },
+    limits: { maxRenderedChars: 180, maxEntries: LONG_TERM_LIMITS.maxEntries },
+    entries: Array.from({ length: 3 }, (_, i) => entry(`char-budget-${i}`, `Long rendered memory ${i} `.repeat(20), "decision")),
+    updatedAt: new Date().toISOString(),
+  };
+  const emptyBudgetStore: WorkspaceMemoryStore = {
+    ...charBudgetStore,
+    limits: { maxRenderedChars: 10, maxEntries: LONG_TERM_LIMITS.maxEntries },
+  };
+
+  const charBudget = accountWorkspaceMemoryRender(charBudgetStore);
+  const emptyBudget = accountWorkspaceMemoryRender(emptyBudgetStore);
+
+  assert.ok(charBudget.omitted.some(item => item.reason === "char_budget"));
+  assert.ok(emptyBudget.omitted.some(item => item.reason === "empty_render_budget"));
+});
+
 // ============================================
 // PR-2 Task 5 tests (for enforceLongTermLimits)
 // ============================================
@@ -270,7 +315,7 @@ test("enforceLongTermLimits respects maxEntries limit", () => {
   assert.ok(kept.length <= 28, `Should respect maxEntries. Got: ${kept.length}`);
 });
 
-test("calculateInitialStrength multiplies type, source, importance, and safety factors", () => {
+test("calculateInitialStrength multiplies type, source, and importance factors", () => {
   const memory: LongTermMemoryEntry = {
     ...entry("strength", "Never store raw credentials", "reference"),
     source: "explicit",
@@ -278,7 +323,20 @@ test("calculateInitialStrength multiplies type, source, importance, and safety f
     safetyCritical: true,
   };
 
-  assert.equal(calculateInitialStrength(memory), 18);
+  assert.equal(calculateInitialStrength(memory), 3);
+});
+
+test("calculateInitialStrength ignores deprecated safetyCritical field", () => {
+  const memory: LongTermMemoryEntry = {
+    ...entry("safety-deprecated", "Deprecated safety field should not affect strength", "decision"),
+    source: "explicit",
+    userImportance: "high",
+    safetyCritical: true,
+  };
+
+  const withoutSafety = { ...memory, safetyCritical: undefined };
+
+  assert.equal(calculateInitialStrength(memory), calculateInitialStrength(withoutSafety));
 });
 
 test("calculateEffectiveHalfLife clamps reinforcement count at configured maximum", () => {
@@ -447,6 +505,33 @@ test("reinforceMemory enforces session interval and max guards", () => {
   assert.equal(reinforceMemory(atMax, "session-c", now), atMax);
 });
 
+test("reinforceMemory requires distinct UTC calendar days between reinforcements", () => {
+  const firstReinforcedAt = Date.UTC(2026, 3, 29, 0, 15);
+  const sameUtcDayMuchLater = Date.UTC(2026, 3, 29, 23, 30);
+  const nextUtcDayAfterInterval = Date.UTC(2026, 3, 30, 1, 30);
+  const base: LongTermMemoryEntry = {
+    ...entry("calendar-day-gated", "Reinforcement requires distinct UTC calendar days", "decision"),
+    reinforcementCount: 1,
+    lastReinforcedAt: firstReinforcedAt,
+    lastReinforcedSessionID: "session-a",
+  };
+
+  assert.equal(reinforceMemory(base, "session-b", sameUtcDayMuchLater), base);
+
+  const reinforcedNextDay = reinforceMemory(base, "session-b", nextUtcDayAfterInterval);
+  assert.notEqual(reinforcedNextDay, base);
+  assert.equal(reinforcedNextDay.reinforcementCount, 2);
+  assert.equal(reinforcedNextDay.lastReinforcedAt, nextUtcDayAfterInterval);
+  assert.equal(reinforcedNextDay.lastReinforcedSessionID, "session-b");
+  assert.equal(reinforcedNextDay.retentionClock, nextUtcDayAfterInterval);
+
+  const atMax: LongTermMemoryEntry = {
+    ...base,
+    reinforcementCount: 6,
+  };
+  assert.equal(reinforceMemory(atMax, "session-c", nextUtcDayAfterInterval), atMax);
+});
+
 test("dedupeLongTermEntriesWithAccounting reinforces absorbed exact duplicates", () => {
   const now = Date.now();
   const retained: LongTermMemoryEntry = {
@@ -469,6 +554,30 @@ test("dedupeLongTermEntriesWithAccounting reinforces absorbed exact duplicates",
   assert.equal(result.kept[0].reinforcementCount, 1);
   assert.equal(result.kept[0].lastReinforcedSessionID, "reinforce-session");
   assert.ok(typeof result.kept[0].retentionClock === "number");
+  assert.ok(result.evidence.some(event =>
+    event.type === "memory_reinforced" &&
+    event.reasonCodes.includes("duplicate_exact") &&
+    event.relations?.some(relation => relation.role === "reinforced" && relation.memory?.memoryId === "duplicate") &&
+    event.relations?.some(relation => relation.role === "reinforced_by" && relation.memory?.memoryId === "retained")
+  ));
+});
+
+test("dedupeLongTermEntriesWithAccounting emits identity reinforcement evidence", () => {
+  const now = Date.now();
+  const retained: LongTermMemoryEntry = {
+    ...entry("retained-identity", "OpenCode plugin config location: `.opencode-agenthub/current/xdg/opencode/opencode.json` in workspace", "reference"),
+    retentionClock: now - 10 * DAY_MS,
+  };
+  const duplicate: LongTermMemoryEntry = {
+    ...entry("duplicate-identity", "OpenCode plugin config: .opencode-agenthub/current/xdg/opencode/opencode.json in workspace", "reference"),
+    pendingOwnerSessionID: "identity-session",
+  };
+
+  const result = dedupeLongTermEntriesWithAccounting([retained, duplicate]);
+
+  assert.ok(result.evidence.some(event =>
+    event.type === "memory_reinforced" && event.reasonCodes.includes("duplicate_identity")
+  ));
 });
 
 test("reinforced memory with same initial strength and age ranks above unreinforced memory", () => {
@@ -514,6 +623,7 @@ test("dedupe reinforcement does not increment for same session", () => {
   assert.ok(retained, "existing manual memory should be retained");
   assert.equal(retained.reinforcementCount, 1);
   assert.equal(retained.lastReinforcedSessionID, "same-session");
+  assert.equal(result.evidence.some(event => event.type === "memory_reinforced"), false);
 });
 
 test("dedupe reinforcement does not increment under one hour", () => {
@@ -536,6 +646,23 @@ test("dedupe reinforcement does not increment under one hour", () => {
   assert.ok(retained, "existing manual memory should be retained");
   assert.equal(retained.reinforcementCount, 1);
   assert.equal(retained.lastReinforcedSessionID, "old-session");
+  assert.equal(result.evidence.some(event => event.type === "memory_reinforced"), false);
+});
+
+test("dedupe reinforcement does not emit evidence at max reinforcement count", () => {
+  const existing: LongTermMemoryEntry = {
+    ...entry("existing-max", "Prefer deterministic consolidation accounting", "feedback"),
+    source: "manual",
+    reinforcementCount: 6,
+  };
+  const duplicate: LongTermMemoryEntry = {
+    ...entry("duplicate-max", "prefer deterministic consolidation accounting!!!", "feedback"),
+    pendingOwnerSessionID: "new-session",
+  };
+
+  const result = dedupeLongTermEntriesWithAccounting([existing, duplicate]);
+
+  assert.equal(result.evidence.some(event => event.type === "memory_reinforced"), false);
 });
 
 test("enforceLongTermLimits orders entries by retention strength", () => {
@@ -567,7 +694,73 @@ test("enforceLongTermLimits applies per-type caps after strength sorting", () =>
   assert.equal(kept.filter(memory => memory.type === "feedback").length, 10);
 });
 
-test("enforceLongTermLimits exempts safety-critical entries from type caps", () => {
+test("safetyCritical entries compete under RETENTION_TYPE_MAX caps like other entries", () => {
+  const safetyEntries: LongTermMemoryEntry[] = Array.from({ length: 6 }, (_, i) => ({
+    ...entry(`safety-${i}`, `Safety memory ${i}`, "feedback"),
+    source: "explicit",
+    safetyCritical: true,
+  }));
+
+  const ordinaryEntries: LongTermMemoryEntry[] = Array.from({ length: 10 }, (_, i) => ({
+    ...entry(`ordinary-${i}`, `Ordinary memory ${i}`, "feedback"),
+    source: "explicit",
+  }));
+
+  const all = [...safetyEntries, ...ordinaryEntries];
+  const kept = enforceLongTermLimits(all);
+
+  const feedbackCount = kept.filter(e => e.type === "feedback").length;
+  assert.equal(feedbackCount, RETENTION_TYPE_MAX.feedback);
+  // safetyCritical entries are no longer exempt from type caps
+  assert.ok(kept.filter(e => e.safetyCritical).length < 6);
+});
+
+test("workspace memory JSON with deprecated safetyCritical loads and competes normally", async () => {
+  const root = await mkdtemp(join(tmpdir(), "opencode-safety-compat-"));
+  try {
+    const key = await workspaceKey(root);
+    const path = await workspaceMemoryPath(root);
+    const now = new Date().toISOString();
+    const safetyEntries: LongTermMemoryEntry[] = Array.from({ length: 6 }, (_, i) => ({
+      ...entry(`safety-fixture-${i}`, `Safety fixture memory ${i}`, "feedback"),
+      source: "explicit",
+      userImportance: i === 0 ? "high" : "normal",
+      safetyCritical: true,
+    }));
+    const ordinaryEntries: LongTermMemoryEntry[] = Array.from({ length: 10 }, (_, i) => ({
+      ...entry(`ordinary-fixture-${i}`, `Ordinary fixture memory ${i}`, "feedback"),
+      source: "explicit",
+    }));
+    const store: WorkspaceMemoryStore = {
+      version: 1,
+      workspace: { root, key },
+      limits: { maxRenderedChars: LONG_TERM_LIMITS.maxRenderedChars, maxEntries: LONG_TERM_LIMITS.maxEntries },
+      entries: [...safetyEntries, ...ordinaryEntries],
+      migrations: [],
+      updatedAt: now,
+      lastActivityAt: now,
+    };
+
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, JSON.stringify(store, null, 2), "utf8");
+
+    const loaded = await loadWorkspaceMemory(root);
+    const safetyEntry = loaded.entries.find(memory => memory.safetyCritical);
+    assert.ok(safetyEntry, "fixture should include deprecated safetyCritical entries");
+    assert.equal(
+      calculateInitialStrength(safetyEntry),
+      calculateInitialStrength({ ...safetyEntry, safetyCritical: undefined }),
+    );
+
+    const kept = enforceLongTermLimits(loaded.entries);
+    assert.equal(kept.filter(memory => memory.type === "feedback").length, RETENTION_TYPE_MAX.feedback);
+    assert.ok(kept.filter(memory => memory.safetyCritical).length < safetyEntries.length);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("enforceLongTermLimits applies type caps to deprecated safetyCritical entries", () => {
   const ordinaryFeedback = Array.from({ length: 12 }, (_, i) =>
     entry(`feedback_${i}`, `Unique safe ordinary feedback preference ${i}`, "feedback")
   );
@@ -578,12 +771,11 @@ test("enforceLongTermLimits exempts safety-critical entries from type caps", () 
 
   const kept = enforceLongTermLimits([safetyCriticalFeedback, ...ordinaryFeedback]);
 
-  assert.equal(kept.length, 11);
-  assert.ok(kept.some(memory => memory.id === "safety-feedback"));
-  assert.equal(kept.filter(memory => memory.type === "feedback" && !memory.safetyCritical).length, 10);
+  assert.equal(kept.length, RETENTION_TYPE_MAX.feedback);
+  assert.equal(kept.filter(memory => memory.type === "feedback").length, RETENTION_TYPE_MAX.feedback);
 });
 
-test("mixed retention scenario applies caps, safety exemption, and reinforcement ordering", () => {
+test("mixed retention scenario applies caps and reinforcement ordering", () => {
   const now = Date.now();
   const oldAge = now - 120 * DAY_MS;
   const ordinaryFeedback = Array.from({ length: 17 }, (_, i) =>
@@ -625,18 +817,15 @@ test("mixed retention scenario applies caps, safety exemption, and reinforcement
     lastActivityAt: new Date(now).toISOString(),
   };
 
-  assert.ok(entries.filter(memory => memory.type === "feedback" && !memory.safetyCritical).length > 10);
-  assert.ok(entries.filter(memory => memory.type === "decision" && !memory.safetyCritical).length > 10);
+  assert.ok(entries.filter(memory => memory.type === "feedback").length > 10);
+  assert.ok(entries.filter(memory => memory.type === "decision").length > 10);
 
   const result = enforceLongTermLimitsWithAccounting(entries, store);
 
   assert.ok(result.kept.length <= 28);
-  assert.ok(result.kept.filter(memory => memory.type === "feedback" && !memory.safetyCritical).length <= 10);
-  assert.ok(result.kept.filter(memory => memory.type === "decision" && !memory.safetyCritical).length <= 10);
-  assert.ok(result.kept.some(memory => memory.safetyCritical));
-  assert.equal(result.kept.filter(memory => memory.type === "feedback" && !memory.safetyCritical).length, 10);
-  assert.equal(result.kept.filter(memory => memory.type === "feedback" && memory.safetyCritical).length, 1);
-  assert.equal(result.kept.filter(memory => memory.type === "feedback").length, 11);
+  assert.ok(result.kept.filter(memory => memory.type === "feedback").length <= RETENTION_TYPE_MAX.feedback);
+  assert.ok(result.kept.filter(memory => memory.type === "decision").length <= RETENTION_TYPE_MAX.decision);
+  assert.equal(result.kept.filter(memory => memory.type === "feedback").length, RETENTION_TYPE_MAX.feedback);
   const reinforcedIndex = result.kept.findIndex(memory => memory.id === "old-reinforced");
   const unreinforcedIndex = result.kept.findIndex(memory => memory.id === "old-unreinforced");
   assert.ok(reinforcedIndex >= 0, "old reinforced reference should be kept");

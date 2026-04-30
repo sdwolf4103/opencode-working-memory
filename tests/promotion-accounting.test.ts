@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import type { LongTermMemoryEntry } from "../src/types.ts";
-import { accountPendingPromotions } from "../src/promotion-accounting.ts";
+import { accountPendingPromotions, promotionAccountingEvidenceEvents } from "../src/promotion-accounting.ts";
 import { memoryKey } from "../src/pending-journal.ts";
 import type { MemoryConsolidationEvent } from "../src/workspace-memory.ts";
 import { workspaceMemoryExactKey, workspaceMemoryIdentityKey } from "../src/workspace-memory.ts";
@@ -228,4 +228,58 @@ test("accountPendingPromotions marks manual capacity rejection as retryable", ()
   assert.deepEqual([...result.rejectedKeys], [memoryKey(pending[0])]);
   assert.equal(result.clearableKeys.size, 0);
   assert.deepEqual([...result.retryableRejectedKeys], [memoryKey(pending[0])]);
+});
+
+test("promotionAccountingEvidenceEvents maps every promotion outcome with relations", () => {
+  const promoted = mem("promoted", "Promoted memory should produce evidence.", { source: "explicit" });
+  const absorbed = mem("absorbed", "Absorbed memory should produce evidence.", { source: "explicit" });
+  const retained = mem("retained", "absorbed memory should produce evidence.", { source: "explicit" });
+  const identityAbsorbed = mem("identity-absorbed", "Project config lives in `src/config.ts`", { type: "reference" });
+  const identityRetained = mem("identity-retained", "Project config lives in `./src/config.ts`", { type: "reference" });
+  const superseded = mem("superseded", "Parser supports 3 formats.", { source: "compaction" });
+  const replacement = mem("replacement", "Parser supports 4 formats.", { source: "compaction" });
+  const capacity = mem("capacity", "Capacity rejected explicit memory should retry.", { source: "explicit", type: "reference" });
+  const exhausted = mem("exhausted", "Exhausted explicit memory should stop retrying.", { source: "explicit", type: "reference" });
+  const pending = [promoted, absorbed, identityAbsorbed, superseded, capacity, exhausted];
+  const accounting = {
+    promotedKeys: new Set([memoryKey(promoted)]),
+    absorbedKeys: new Set([memoryKey(absorbed), memoryKey(identityAbsorbed)]),
+    supersededKeys: new Set([memoryKey(superseded)]),
+    rejectedKeys: new Set([memoryKey(capacity), memoryKey(exhausted)]),
+    retryableRejectedKeys: new Set([memoryKey(capacity), memoryKey(exhausted)]),
+    clearableKeys: new Set([memoryKey(promoted), memoryKey(absorbed), memoryKey(identityAbsorbed), memoryKey(superseded), memoryKey(exhausted)]),
+  };
+  const events = [
+    { ...event(absorbed, "absorbed_exact"), retainedId: retained.id },
+    { ...event(identityAbsorbed, "absorbed_identity"), retainedId: identityRetained.id },
+    { ...event(superseded, "superseded_existing"), retainedId: replacement.id, supersededId: superseded.id },
+    event(capacity, "rejected_capacity"),
+    event(exhausted, "rejected_capacity"),
+  ];
+
+  const evidence = promotionAccountingEvidenceEvents({
+    pending,
+    after: [promoted, retained, identityRetained, replacement],
+    events,
+    accounting,
+    exhaustedRejectedKeys: new Set([memoryKey(exhausted)]),
+  });
+
+  const expectedPromotionEventTypes = new Set([
+    "promotion_promoted",
+    "promotion_absorbed_exact",
+    "promotion_absorbed_identity",
+    "promotion_superseded",
+    "promotion_rejected_capacity",
+    "promotion_retry_scheduled",
+    "promotion_retry_exhausted",
+  ]);
+
+  assert.deepEqual(new Set(evidence.map(event => event.type)), expectedPromotionEventTypes);
+  const absorbedEvent = evidence.find(event => event.type === "promotion_absorbed_exact");
+  assert.ok(absorbedEvent?.relations?.some(relation => relation.role === "absorbed" && relation.memory?.memoryId === absorbed.id));
+  assert.ok(absorbedEvent?.relations?.some(relation => relation.role === "retained" && relation.memory?.memoryId === retained.id));
+  const supersededEvent = evidence.find(event => event.type === "promotion_superseded");
+  assert.ok(supersededEvent?.relations?.some(relation => relation.role === "superseded" && relation.memory?.memoryId === superseded.id));
+  assert.ok(supersededEvent?.relations?.some(relation => relation.role === "superseded_by" && relation.memory?.memoryId === replacement.id));
 });
