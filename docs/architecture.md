@@ -343,6 +343,10 @@ canonical("Use npm cache for plugins") === "use npm cache for plugins"
 const workspaceKey = sha256(realpath(workspaceRoot)).slice(0, 16)
 ```
 
+### Storage Safety
+
+All read-modify-write updates go through `updateJSON()`, which combines an in-process promise queue with an on-disk `.lock` file. The lock file uses exclusive creation, heartbeat refreshes while held, stale-lock recovery after 30 seconds, and a 5 second wait timeout for live contention. Direct `readJSON()` is fallback-oriented and does not mutate data except when corrupt JSON is quarantined.
+
 ## Performance Considerations
 
 ### Memory Budgets

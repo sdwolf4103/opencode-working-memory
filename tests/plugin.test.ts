@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { MemoryV2Plugin } from "../src/plugin.ts";
@@ -450,6 +450,33 @@ test("chat system transform reuses frozen rendered workspace snapshot", async ()
   }
 });
 
+test("chat system transform degrades gracefully when workspace memory JSON is corrupt", async () => {
+  const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-test-"));
+
+  try {
+    const path = await workspaceMemoryPath(tmpDir);
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, "{ invalid json", "utf8");
+
+    const plugin = await MemoryV2Plugin({
+      directory: tmpDir,
+      client: mockRootClient(),
+    });
+    const output = { system: ["base header"] };
+
+    await assert.doesNotReject(async () => {
+      await (plugin as Record<string, Function>)["experimental.chat.system.transform"](
+        { sessionID: "corrupt-json-session", model: {} },
+        output,
+      );
+    });
+
+    assert.deepEqual(output.system, ["base header"]);
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
 test("no compaction: owned explicit memory is not promoted by unrelated next session start", async () => {
   const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-test-"));
 
@@ -871,6 +898,47 @@ test("integration: explicit memory flows from user message through pending journ
     );
 
     assert.match(output.system.join("\n"), /Prefer deterministic consolidation accounting/);
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("session.compacted promotes first-time explicit memory without self-reinforcement", async () => {
+  const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-test-"));
+
+  try {
+    const plugin = await MemoryV2Plugin({
+      directory: tmpDir,
+      client: mockClientWithLatestUser(
+        "remember this: Prefer no self reinforcement during first promotion.",
+        "msg-no-self-reinforce",
+      ),
+    });
+
+    await (plugin as Record<string, Function>)["experimental.chat.system.transform"](
+      { sessionID: "no-self-reinforce-session", model: {} },
+      { system: ["base header"] },
+    );
+
+    await (plugin as Record<string, Function>)["event"]({
+      event: {
+        type: "session.compacted",
+        properties: { sessionID: "no-self-reinforce-session" },
+      },
+    });
+
+    const workspace = await loadWorkspaceMemory(tmpDir);
+    const promoted = workspace.entries.find(entry =>
+      /Prefer no self reinforcement/.test(entry.text)
+    );
+
+    assert.ok(promoted, "explicit memory should be promoted");
+    assert.equal(promoted.reinforcementCount ?? 0, 0);
+    assert.equal(promoted.lastReinforcedSessionID, undefined);
+
+    const state = await loadSessionState(tmpDir, "no-self-reinforce-session");
+    assert.equal(state.pendingMemories.length, 0);
+    assert.equal((await loadPendingJournal(tmpDir)).entries.length, 0);
   } finally {
     await rm(tmpDir, { recursive: true, force: true });
   }
