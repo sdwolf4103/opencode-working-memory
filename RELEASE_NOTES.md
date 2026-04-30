@@ -1,5 +1,40 @@
 # Release Notes
 
+## 1.5.1 (2026-04-30)
+
+### Evidence Loop and Explainability
+
+This release adds an evidence-based audit trail for memory lifecycle events and user-facing diagnostics for understanding why memories are rendered, promoted, or rejected.
+
+> **Evidence before sublimation.** Every memory decision can be traced.
+
+### What Changed
+
+- **Evidence log**: extraction, promotion, reinforcement, render, and storage events are now recorded in a per-workspace `events.jsonl` with 90-day retention and 5000-event cap.
+- **User explainability**: `memory-diag explain` shows per-memory render status with strength, reasons, and evidence. `memory-diag trace --memory <id>` shows the full lifecycle history.
+- **Machine-readable diagnostics**: `memory-diag health --json` outputs structured `MemoryDiagJSON` for scripting.
+- **Calendar-day reinforcement gate**: reinforcement now requires distinct UTC calendar days, preventing repetitive-task gaming that could inflate a memory's strength within a single day.
+- **SafetyCritical deprecation complete**: the `safetyCritical` field no longer affects retention strength or type-cap bypass. All memories fade by the same rules.
+- **Retention module extraction**: retention constants and calculations moved to `src/retention.ts` for cleaner separation.
+
+### Privacy
+
+- Evidence text previews are credential-redacted. Memory content is stored as truncated hashes, never in full.
+- Diagnostics default to redacted output. `--raw` is available for maintainers.
+
+### Upgrade Notes
+
+- No configuration changes required.
+- Existing workspace memory files remain compatible.
+- Evidence logs are created automatically; no migration needed.
+
+### Validation
+
+- `npm run typecheck`
+- `npm test` — 271 tests passing
+
+---
+
 ## 1.5.0 (2026-04-29)
 
 ### Retention Decay Model
