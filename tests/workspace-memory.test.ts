@@ -19,13 +19,16 @@ import {
   loadWorkspaceMemory,
   saveWorkspaceMemory,
   updateWorkspaceMemoryWithAccounting,
+} from "../src/workspace-memory.ts";
+import {
+  RETENTION_TYPE_MAX,
   calculateInitialStrength,
   calculateEffectiveHalfLife,
   calculateRetentionStrength,
   calculateDormantDays,
   calculateEffectiveAgeDays,
   reinforceMemory,
-} from "../src/workspace-memory.ts";
+} from "../src/retention.ts";
 import { redactCredentials } from "../src/redaction.ts";
 import { assessMemoryQuality, isHardQualityReason, isProgressSnapshotViolation } from "../src/memory-quality.ts";
 import { reviewerCurrent28Fixture } from "./fixtures/memory-quality-current-28.ts";
@@ -580,7 +583,7 @@ test("enforceLongTermLimits applies per-type caps after strength sorting", () =>
   assert.equal(kept.filter(memory => memory.type === "feedback").length, 10);
 });
 
-test("safetyCritical entries compete under TYPE_MAX caps like other entries", () => {
+test("safetyCritical entries compete under RETENTION_TYPE_MAX caps like other entries", () => {
   const safetyEntries: LongTermMemoryEntry[] = Array.from({ length: 6 }, (_, i) => ({
     ...entry(`safety-${i}`, `Safety memory ${i}`, "feedback"),
     source: "explicit",
@@ -596,7 +599,7 @@ test("safetyCritical entries compete under TYPE_MAX caps like other entries", ()
   const kept = enforceLongTermLimits(all);
 
   const feedbackCount = kept.filter(e => e.type === "feedback").length;
-  assert.equal(feedbackCount, 10);
+  assert.equal(feedbackCount, RETENTION_TYPE_MAX.feedback);
   // safetyCritical entries are no longer exempt from type caps
   assert.ok(kept.filter(e => e.safetyCritical).length < 6);
 });
@@ -639,7 +642,7 @@ test("workspace memory JSON with deprecated safetyCritical loads and competes no
     );
 
     const kept = enforceLongTermLimits(loaded.entries);
-    assert.equal(kept.filter(memory => memory.type === "feedback").length, 10);
+    assert.equal(kept.filter(memory => memory.type === "feedback").length, RETENTION_TYPE_MAX.feedback);
     assert.ok(kept.filter(memory => memory.safetyCritical).length < safetyEntries.length);
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -657,8 +660,8 @@ test("enforceLongTermLimits applies type caps to deprecated safetyCritical entri
 
   const kept = enforceLongTermLimits([safetyCriticalFeedback, ...ordinaryFeedback]);
 
-  assert.equal(kept.length, 10);
-  assert.equal(kept.filter(memory => memory.type === "feedback").length, 10);
+  assert.equal(kept.length, RETENTION_TYPE_MAX.feedback);
+  assert.equal(kept.filter(memory => memory.type === "feedback").length, RETENTION_TYPE_MAX.feedback);
 });
 
 test("mixed retention scenario applies caps and reinforcement ordering", () => {
@@ -709,9 +712,9 @@ test("mixed retention scenario applies caps and reinforcement ordering", () => {
   const result = enforceLongTermLimitsWithAccounting(entries, store);
 
   assert.ok(result.kept.length <= 28);
-  assert.ok(result.kept.filter(memory => memory.type === "feedback").length <= 10);
-  assert.ok(result.kept.filter(memory => memory.type === "decision").length <= 10);
-  assert.equal(result.kept.filter(memory => memory.type === "feedback").length, 10);
+  assert.ok(result.kept.filter(memory => memory.type === "feedback").length <= RETENTION_TYPE_MAX.feedback);
+  assert.ok(result.kept.filter(memory => memory.type === "decision").length <= RETENTION_TYPE_MAX.decision);
+  assert.equal(result.kept.filter(memory => memory.type === "feedback").length, RETENTION_TYPE_MAX.feedback);
   const reinforcedIndex = result.kept.findIndex(memory => memory.id === "old-reinforced");
   const unreinforcedIndex = result.kept.findIndex(memory => memory.id === "old-unreinforced");
   assert.ok(reinforcedIndex >= 0, "old reinforced reference should be kept");

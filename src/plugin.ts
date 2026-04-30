@@ -36,8 +36,8 @@ import {
   updateWorkspaceMemory,
   updateWorkspaceMemoryWithAccounting,
   renderWorkspaceMemory,
-  reinforceMemory,
 } from "./workspace-memory.ts";
+import { reinforceMemory } from "./retention.ts";
 import {
   appendPendingMemories,
   clearPendingMemories,
