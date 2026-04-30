@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.1] - 2026-04-30
+
+### Added
+
+- Per-workspace evidence log for extraction, promotion, reinforcement, render, storage, and hook lifecycle events.
+- `memory-diag health --json` for machine-readable diagnostics.
+- `memory-diag explain` for per-memory render status, strength, reasons, and evidence event IDs.
+- `memory-diag trace --memory <id>` for memory lifecycle history.
+- UTC calendar-day reinforcement gate so repeated matches cannot inflate a memory multiple times in the same day.
+
+### Changed
+
+- Retention constants and calculations moved to `src/retention.ts`.
+- `safetyCritical` is now fully inert: no retention multiplier and no type-cap bypass, while remaining JSON-compatible.
+
 ## [1.5.0] - 2026-04-29
 
 ### Added
