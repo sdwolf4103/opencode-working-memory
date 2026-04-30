@@ -108,12 +108,25 @@ export function calculateEffectiveAgeDays(
   return activeDays + dormantOverlapDays * DORMANT_DECAY_MULTIPLIER;
 }
 
+function isSameUTCCalendarDay(ts1: number, ts2: number): boolean {
+  const d1 = new Date(ts1);
+  const d2 = new Date(ts2);
+  return d1.getUTCFullYear() === d2.getUTCFullYear()
+    && d1.getUTCMonth() === d2.getUTCMonth()
+    && d1.getUTCDate() === d2.getUTCDate();
+}
+
 export function reinforceMemory(
   memory: LongTermMemoryEntry,
   sessionId: string,
   now: number,
 ): LongTermMemoryEntry {
   if (memory.lastReinforcedSessionID === sessionId) {
+    return memory;
+  }
+
+  // Calendar-day diversity gate (OQ-2): same UTC day = no reinforcement.
+  if (memory.lastReinforcedAt && isSameUTCCalendarDay(memory.lastReinforcedAt, now)) {
     return memory;
   }
 

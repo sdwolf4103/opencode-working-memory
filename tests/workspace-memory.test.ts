@@ -505,6 +505,33 @@ test("reinforceMemory enforces session interval and max guards", () => {
   assert.equal(reinforceMemory(atMax, "session-c", now), atMax);
 });
 
+test("reinforceMemory requires distinct UTC calendar days between reinforcements", () => {
+  const firstReinforcedAt = Date.UTC(2026, 3, 29, 0, 15);
+  const sameUtcDayMuchLater = Date.UTC(2026, 3, 29, 23, 30);
+  const nextUtcDayAfterInterval = Date.UTC(2026, 3, 30, 1, 30);
+  const base: LongTermMemoryEntry = {
+    ...entry("calendar-day-gated", "Reinforcement requires distinct UTC calendar days", "decision"),
+    reinforcementCount: 1,
+    lastReinforcedAt: firstReinforcedAt,
+    lastReinforcedSessionID: "session-a",
+  };
+
+  assert.equal(reinforceMemory(base, "session-b", sameUtcDayMuchLater), base);
+
+  const reinforcedNextDay = reinforceMemory(base, "session-b", nextUtcDayAfterInterval);
+  assert.notEqual(reinforcedNextDay, base);
+  assert.equal(reinforcedNextDay.reinforcementCount, 2);
+  assert.equal(reinforcedNextDay.lastReinforcedAt, nextUtcDayAfterInterval);
+  assert.equal(reinforcedNextDay.lastReinforcedSessionID, "session-b");
+  assert.equal(reinforcedNextDay.retentionClock, nextUtcDayAfterInterval);
+
+  const atMax: LongTermMemoryEntry = {
+    ...base,
+    reinforcementCount: 6,
+  };
+  assert.equal(reinforceMemory(atMax, "session-c", nextUtcDayAfterInterval), atMax);
+});
+
 test("dedupeLongTermEntriesWithAccounting reinforces absorbed exact duplicates", () => {
   const now = Date.now();
   const retained: LongTermMemoryEntry = {
