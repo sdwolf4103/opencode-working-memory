@@ -3,11 +3,29 @@ import { randomUUID } from "crypto";
 import { mkdir, open, readFile, rename, rm, stat, writeFile } from "fs/promises";
 import type { FileHandle } from "fs/promises";
 import { dirname } from "path";
+import { appendEvidenceEventForWorkspaceKey } from "./evidence-log.ts";
 
 const fileLocks = new Map<string, Promise<unknown>>();
 const LOCK_WAIT_TIMEOUT_MS = 5000;
 const LOCK_STALE_MS = 30_000;
 const LOCK_HEARTBEAT_MS = 1_000;
+
+function workspaceKeyFromStorePath(path: string): string | undefined {
+  return path.match(/[\\/]opencode-working-memory[\\/]workspaces[\\/]([a-f0-9]{16})[\\/]/i)?.[1];
+}
+
+function storeKindFromPath(path: string): string {
+  if (path.endsWith("workspace-memory.json")) return "workspace_memory";
+  if (path.endsWith("workspace-pending-journal.json")) return "pending_journal";
+  if (path.includes(`${"/"}sessions${"/"}`) || path.includes(`${"\\"}sessions${"\\"}`)) return "session_state";
+  return "unknown";
+}
+
+async function emitStorageEvidence(path: string, event: Parameters<typeof appendEvidenceEventForWorkspaceKey>[1]): Promise<void> {
+  const key = workspaceKeyFromStorePath(path);
+  if (!key) return;
+  await appendEvidenceEventForWorkspaceKey(key, event).catch(() => undefined);
+}
 
 async function quarantineCorruptJSON(path: string): Promise<string | null> {
   const quarantinePath = `${path}.corrupt-${Date.now()}-${process.pid}-${randomUUID()}`;
@@ -31,6 +49,16 @@ export async function readJSON<T>(path: string, fallback: () => T): Promise<T> {
 
     if (quarantinePath) {
       console.error(`[memory] invalid JSON in ${path}; quarantined to ${quarantinePath}: ${message}`);
+      await emitStorageEvidence(path, {
+        type: "storage_corrupt_json_quarantined",
+        phase: "storage",
+        outcome: "quarantined",
+        reasonCodes: ["invalid_json"],
+        details: {
+          storeKind: storeKindFromPath(path),
+          quarantined: true,
+        },
+      });
     } else {
       console.error(`[memory] invalid JSON in ${path}; using fallback without quarantine: ${message}`);
     }
@@ -103,10 +131,30 @@ async function withFileLock<T>(path: string, fn: () => Promise<T>): Promise<T> {
 
       if (await isLockStale(lockPath)) {
         await rm(lockPath, { force: true });
+        await emitStorageEvidence(path, {
+          type: "storage_stale_lock_recovered",
+          phase: "storage",
+          outcome: "recovered",
+          reasonCodes: ["stale_lock"],
+          details: {
+            storeKind: storeKindFromPath(path),
+            waitMs: Date.now() - started,
+          },
+        });
         continue;
       }
 
       if (Date.now() - started > LOCK_WAIT_TIMEOUT_MS) {
+        await emitStorageEvidence(path, {
+          type: "storage_lock_timeout",
+          phase: "storage",
+          outcome: "failed",
+          reasonCodes: ["lock_wait_timeout"],
+          details: {
+            storeKind: storeKindFromPath(path),
+            waitMs: LOCK_WAIT_TIMEOUT_MS,
+          },
+        });
         throw new Error(`Timed out waiting for lock ${lockPath}`);
       }
 

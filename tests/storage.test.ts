@@ -1,11 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
-import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { spawn } from "node:child_process";
 import { readJSON, updateJSON } from "../src/storage.ts";
+import { queryEvidenceEvents } from "../src/evidence-log.ts";
+import { workspaceMemoryPath } from "../src/paths.ts";
 
 test("updateJSON serializes concurrent increments", async () => {
   const root = await mkdtemp(join(tmpdir(), "wm-storage-"));
@@ -56,6 +58,25 @@ test("readJSON quarantines corrupt JSON and returns fallback", async () => {
   }
 });
 
+test("readJSON emits corrupt JSON quarantine evidence for workspace stores", async () => {
+  const root = await mkdtemp(join(tmpdir(), "wm-storage-evidence-corrupt-"));
+  try {
+    const path = await workspaceMemoryPath(root);
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, "{ invalid json", "utf8");
+
+    const loaded = await readJSON(path, () => ({ ok: true }));
+    const events = await queryEvidenceEvents(root, { types: ["storage_corrupt_json_quarantined"] });
+
+    assert.deepEqual(loaded, { ok: true });
+    assert.equal(events.length, 1);
+    assert.equal(events[0].reasonCodes.includes("invalid_json"), true);
+    assert.equal(JSON.stringify(events).includes("invalid json"), false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("updateJSON recovers stale lock files left by crashed process", async () => {
   const root = await mkdtemp(join(tmpdir(), "wm-storage-stale-lock-"));
   try {
@@ -66,6 +87,47 @@ test("updateJSON recovers stale lock files left by crashed process", async () =>
     const updated = await updateJSON(path, () => ({ count: 0 }), current => ({ count: current.count + 1 }));
     assert.equal(updated.count, 1);
     assert.equal(existsSync(lockPath), false, "stale lock file should be removed after update");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("updateJSON emits stale lock recovery evidence for workspace stores", async () => {
+  const root = await mkdtemp(join(tmpdir(), "wm-storage-evidence-stale-lock-"));
+  try {
+    const path = await workspaceMemoryPath(root);
+    const lockPath = `${path}.lock`;
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(lockPath, `999999\n0\n`, "utf8");
+
+    await updateJSON(path, () => ({ count: 0 }), current => ({ count: current.count + 1 }));
+    const events = await queryEvidenceEvents(root, { types: ["storage_stale_lock_recovered"] });
+
+    assert.equal(events.length, 1);
+    assert.equal(events[0].reasonCodes.includes("stale_lock"), true);
+    assert.equal(JSON.stringify(events).includes("999999"), false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("updateJSON emits lock timeout evidence and still throws", async () => {
+  const root = await mkdtemp(join(tmpdir(), "wm-storage-evidence-timeout-"));
+  try {
+    const path = await workspaceMemoryPath(root);
+    const lockPath = `${path}.lock`;
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(lockPath, `${process.pid}\n${Date.now()}\n`, "utf8");
+
+    await assert.rejects(
+      updateJSON(path, () => ({ count: 0 }), current => current),
+      /Timed out waiting for lock/,
+    );
+    const events = await queryEvidenceEvents(root, { types: ["storage_lock_timeout"] });
+
+    assert.equal(events.length, 1);
+    assert.equal(events[0].reasonCodes.includes("lock_wait_timeout"), true);
+    assert.equal(JSON.stringify(events).includes(String(process.pid)), false);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

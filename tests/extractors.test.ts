@@ -3,7 +3,13 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { extractErrorsFromBash, extractExplicitMemories, parseWorkspaceMemoryCandidates } from "../src/extractors.ts";
+import {
+  extractErrorsFromBash,
+  extractExplicitMemories,
+  extractExplicitMemoriesWithEvidence,
+  parseWorkspaceMemoryCandidates,
+  parseWorkspaceMemoryCandidatesWithEvidence,
+} from "../src/extractors.ts";
 
 async function waitForFile(path: string, attempts = 20): Promise<string> {
   let lastError: unknown;
@@ -145,6 +151,20 @@ test("extractExplicitMemories captures multiple memories in same message", () =>
   assert.equal(items.length, 2);
 });
 
+test("explicit memory extraction returns detected and ignored evidence", () => {
+  const result = extractExplicitMemoriesWithEvidence([
+    "remember this: Prefer deterministic tests.",
+    "don't remember this: temporary password: sushi",
+    "remember this: later",
+  ].join("\n"));
+
+  assert.equal(result.entries.length, 1);
+  assert.ok(result.evidence.some(event => event.type === "explicit_memory_detected"));
+  assert.ok(result.evidence.some(event => event.type === "explicit_memory_ignored" && event.reasonCodes.includes("negated_request")));
+  assert.ok(result.evidence.some(event => event.type === "explicit_memory_ignored" && event.reasonCodes.includes("deferral")));
+  assert.equal(JSON.stringify(result.evidence).includes("sushi"), false);
+});
+
 // ============================================
 // Task 7: Compaction quality gate tests
 // ============================================
@@ -174,6 +194,41 @@ test("parseWorkspaceMemoryCandidates rejects raw error", () => {
 `;
   const items = parseWorkspaceMemoryCandidates(summary);
   assert.equal(items.length, 0);
+});
+
+test("compaction accepted candidate returns privacy-safe extraction evidence", () => {
+  const summary = `
+Memory candidates:
+- [decision] Use accounting evidence events to explain promoted memories in diagnostics.
+`;
+
+  const result = parseWorkspaceMemoryCandidatesWithEvidence(summary);
+
+  assert.equal(result.entries.length, 1);
+  assert.equal(result.evidence.length, 1);
+  assert.equal(result.evidence[0].type, "extraction_candidate_accepted");
+  assert.ok(result.evidence[0].reasonCodes.includes("quality_gate_passed"));
+  assert.ok(result.evidence[0].reasonCodes.includes("valid_candidate_format"));
+  assert.match(result.evidence[0].textPreview ?? "", /accounting evidence events/);
+});
+
+test("compaction rejected candidate returns rejection evidence without secrets", () => {
+  const summary = `
+Memory candidates:
+- [feedback] password: sushi Admin PIN 是 456123 Bearer abc.def.ghi TypeError: Cannot read property x
+`;
+
+  const result = parseWorkspaceMemoryCandidatesWithEvidence(summary);
+  const raw = JSON.stringify(result.evidence);
+
+  assert.equal(result.entries.length, 0);
+  assert.equal(result.evidence.length, 1);
+  assert.equal(result.evidence[0].type, "extraction_candidate_rejected");
+  assert.ok(result.evidence[0].reasonCodes.length > 0);
+  assert.equal(raw.includes("sushi"), false);
+  assert.equal(raw.includes("456123"), false);
+  assert.equal(raw.includes("abc.def.ghi"), false);
+  assert.ok((result.evidence[0].textPreview?.length ?? 0) <= 80);
 });
 
 test("parseWorkspaceMemoryCandidates rejects stack trace", () => {

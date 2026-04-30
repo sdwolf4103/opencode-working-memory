@@ -11,6 +11,7 @@ import {
   calculateRetentionStrength,
   reinforceMemory,
 } from "./retention.ts";
+import type { EvidenceEventInput, MemoryEvidenceRef } from "./evidence-log.ts";
 
 // Minimum length for workspace_memory envelope: <workspace_memory>\n...\n</workspace_memory>
 const MIN_ENVELOPE_LENGTH = 80;
@@ -38,11 +39,22 @@ export type LongTermLimitResult = {
   dropped: MemoryConsolidationEvent[];
   absorbed: MemoryConsolidationEvent[];
   superseded: MemoryConsolidationEvent[];
+  evidence: EvidenceEventInput[];
 };
 
 export type WorkspaceMemoryNormalizationResult = LongTermLimitResult & {
   store: WorkspaceMemoryStore;
   events: MemoryConsolidationEvent[];
+};
+
+export type WorkspaceMemoryRenderAccounting = {
+  rendered: LongTermMemoryEntry[];
+  omitted: Array<{
+    memory: LongTermMemoryEntry;
+    reason: "superseded" | "type_cap" | "global_cap" | "char_budget" | "empty_render_budget";
+  }>;
+  evidence: EvidenceEventInput[];
+  prompt: string;
 };
 
 export type QualityCleanupMigrationLogEntry = {
@@ -156,6 +168,7 @@ export async function updateWorkspaceMemoryWithAccounting(
     dropped: [],
     absorbed: [],
     superseded: [],
+    evidence: [],
     events: [],
   };
 }
@@ -244,6 +257,7 @@ export async function normalizeWorkspaceMemoryWithAccounting(
     dropped: accounting.dropped,
     absorbed: accounting.absorbed,
     superseded: accounting.superseded,
+    evidence: accounting.evidence,
     events: [...accounting.dropped, ...accounting.absorbed, ...accounting.superseded],
   };
 }
@@ -520,29 +534,39 @@ export function enforceLongTermLimitsWithAccounting(
     dropped: [...dedupeResult.dropped, ...capacityDropped],
     absorbed: dedupeResult.absorbed,
     superseded: dedupeResult.superseded,
+    evidence: dedupeResult.evidence,
   };
 }
 
 function applyTypeMaxCaps(entries: LongTermMemoryEntry[]): LongTermMemoryEntry[] {
+  return applyTypeMaxCapsWithOmissions(entries).kept;
+}
+
+function applyTypeMaxCapsWithOmissions(entries: LongTermMemoryEntry[]): { kept: LongTermMemoryEntry[]; omitted: LongTermMemoryEntry[] } {
   const capped: LongTermMemoryEntry[] = [];
+  const omitted: LongTermMemoryEntry[] = [];
   const typeCounts: Partial<Record<LongTermMemoryEntry["type"], number>> = {};
 
   for (const entry of entries) {
     const count = typeCounts[entry.type] ?? 0;
     const max = RETENTION_TYPE_MAX[entry.type] ?? Infinity;
-    if (count >= max) continue;
+    if (count >= max) {
+      omitted.push(entry);
+      continue;
+    }
 
     capped.push(entry);
     typeCounts[entry.type] = count + 1;
   }
 
-  return capped;
+  return { kept: capped, omitted };
 }
 
 export function dedupeLongTermEntriesWithAccounting(entries: LongTermMemoryEntry[]): LongTermLimitResult {
   const now = Date.now();
   const absorbed: MemoryConsolidationEvent[] = [];
   const superseded: MemoryConsolidationEvent[] = [];
+  const evidence: EvidenceEventInput[] = [];
 
   // For project/reference/feedback: dedupe by concrete identity or exact canonical text.
   const projectRefEntries = entries.filter(e => e.type === "project" || e.type === "reference" || e.type === "feedback");
@@ -566,6 +590,8 @@ export function dedupeLongTermEntriesWithAccounting(entries: LongTermMemoryEntry
         reinforcementSessionId(retained, dropped),
         now,
       );
+      const reinforcedEvent = reinforcementEvidence(retained, dropped, reinforced, reason);
+      if (reinforcedEvent) evidence.push(reinforcedEvent);
 
       absorbed.push(consolidationEvent(dropped, reason, reinforced));
       entityDeduped.set(key, reinforced);
@@ -592,6 +618,8 @@ export function dedupeLongTermEntriesWithAccounting(entries: LongTermMemoryEntry
         reinforcementSessionId(retained, dropped),
         now,
       );
+      const reinforcedEvent = reinforcementEvidence(retained, dropped, reinforced, reason);
+      if (reinforcedEvent) evidence.push(reinforcedEvent);
 
       if (reason === "superseded_existing") {
         superseded.push(consolidationEvent(dropped, reason, reinforced));
@@ -614,6 +642,40 @@ export function dedupeLongTermEntriesWithAccounting(entries: LongTermMemoryEntry
     dropped: [],
     absorbed,
     superseded,
+    evidence,
+  };
+}
+
+function memoryEvidenceRef(memory: LongTermMemoryEntry): MemoryEvidenceRef {
+  return {
+    memoryId: memory.id,
+    memoryKeyHash: workspaceMemoryExactKey(memory),
+    identityKeyHash: workspaceMemoryIdentityKey(memory),
+    type: memory.type,
+    source: memory.source,
+    status: memory.status,
+  };
+}
+
+function reinforcementEvidence(
+  retained: LongTermMemoryEntry,
+  dropped: LongTermMemoryEntry,
+  reinforced: LongTermMemoryEntry,
+  reason: "absorbed_exact" | "absorbed_identity" | "superseded_existing",
+): EvidenceEventInput | undefined {
+  if ((reinforced.reinforcementCount ?? 0) <= (retained.reinforcementCount ?? 0)) return undefined;
+  const duplicateReason = reason === "absorbed_identity" ? "duplicate_identity" : "duplicate_exact";
+  return {
+    type: "memory_reinforced",
+    phase: "reinforcement",
+    outcome: "reinforced",
+    memory: memoryEvidenceRef(reinforced),
+    relations: [
+      { role: "reinforced", memory: memoryEvidenceRef(reinforced) },
+      { role: "reinforced_by", memory: memoryEvidenceRef(dropped) },
+    ],
+    reasonCodes: [duplicateReason, "reinforcement_window_allowed"],
+    textPreview: reinforced.text,
   };
 }
 
@@ -648,20 +710,49 @@ function wouldFit(
 }
 
 export function renderWorkspaceMemory(store: WorkspaceMemoryStore): string {
-  const active = enforceLongTermLimitsWithAccounting(store.entries, store).kept;
-  if (active.length === 0) return "";
+  return accountWorkspaceMemoryRender(store).prompt;
+}
 
+export function accountWorkspaceMemoryRender(store: WorkspaceMemoryStore): WorkspaceMemoryRenderAccounting {
+  const now = Date.now();
   const maxChars = Math.min(
     store.limits.maxRenderedChars,
     LONG_TERM_LIMITS.maxRenderedChars
   );
+  const omitted: WorkspaceMemoryRenderAccounting["omitted"] = [];
+  const evidence: EvidenceEventInput[] = [];
+
+  for (const entry of store.entries) {
+    if (entry.status === "superseded") {
+      omitted.push({ memory: entry, reason: "superseded" });
+    }
+  }
+
+  const activeEntries = store.entries.filter(entry => entry.status !== "superseded");
+  const phase1 = activeEntries.map(entry => ({ ...entry, text: entry.text.slice(0, LONG_TERM_LIMITS.maxEntryTextChars) }));
+  const dedupeResult = dedupeLongTermEntriesWithAccounting(phase1);
+  const sorted = [...dedupeResult.kept].sort((a, b) => compareLongTermMemoryForRetention(a, b, now, store.lastActivityAt));
+  const typeCapResult = applyTypeMaxCapsWithOmissions(sorted);
+  for (const memory of typeCapResult.omitted) omitted.push({ memory, reason: "type_cap" });
+  const active = typeCapResult.kept.slice(0, LONG_TERM_LIMITS.maxEntries);
+  for (const memory of typeCapResult.kept.slice(LONG_TERM_LIMITS.maxEntries)) omitted.push({ memory, reason: "global_cap" });
+
+  if (active.length === 0) {
+    for (const item of omitted) evidence.push(renderEvidence(item.memory, "omitted", item.reason));
+    return { rendered: [], omitted, evidence, prompt: "" };
+  }
 
   // If maxChars smaller than minimum envelope, return empty string
-  if (maxChars < MIN_ENVELOPE_LENGTH) return "";
+  if (maxChars < MIN_ENVELOPE_LENGTH) {
+    for (const memory of active) omitted.push({ memory, reason: "empty_render_budget" });
+    for (const item of omitted) evidence.push(renderEvidence(item.memory, "omitted", item.reason));
+    return { rendered: [], omitted, evidence, prompt: "" };
+  }
 
   const lines: string[] = [
     "Workspace memory (cross-session, verify if stale):",
   ];
+  const rendered: LongTermMemoryEntry[] = [];
 
   for (const type of ["feedback", "project", "decision", "reference"] as const) {
     const items = active.filter(entry => entry.type === type);
@@ -673,6 +764,9 @@ export function renderWorkspaceMemory(store: WorkspaceMemoryStore): string {
       const line = `- ${renderEntry(item)}`;
       if ([...lines, ...sectionLines, line].join("\n").length <= maxChars) {
         sectionLines.push(line);
+        rendered.push(item);
+      } else {
+        omitted.push({ memory: item, reason: "char_budget" });
       }
     }
 
@@ -681,7 +775,26 @@ export function renderWorkspaceMemory(store: WorkspaceMemoryStore): string {
     }
   }
 
-  return lines.join("\n");
+  for (const memory of rendered) evidence.push(renderEvidence(memory, "rendered"));
+  for (const item of omitted) evidence.push(renderEvidence(item.memory, "omitted", item.reason));
+
+  return { rendered, omitted, evidence, prompt: lines.join("\n") };
+}
+
+function renderEvidence(
+  memory: LongTermMemoryEntry,
+  outcome: "rendered" | "omitted",
+  reason?: WorkspaceMemoryRenderAccounting["omitted"][number]["reason"],
+): EvidenceEventInput {
+  return {
+    type: outcome === "rendered" ? "render_selected" : "render_omitted",
+    phase: "render",
+    outcome,
+    memory: memoryEvidenceRef(memory),
+    relations: [{ role: outcome === "rendered" ? "rendered" : "omitted", memory: memoryEvidenceRef(memory) }],
+    reasonCodes: outcome === "rendered" ? ["within_caps", "within_char_budget"] : [reason ?? "char_budget"],
+    textPreview: memory.text,
+  };
 }
 
 function renderEntry(entry: LongTermMemoryEntry): string {

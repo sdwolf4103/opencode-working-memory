@@ -8,6 +8,7 @@ import { HOT_STATE_LIMITS, LONG_TERM_LIMITS } from "../src/types.ts";
 import { workspaceKey, workspaceMemoryPath } from "../src/paths.ts";
 import {
   renderWorkspaceMemory,
+  accountWorkspaceMemoryRender,
   enforceLongTermLimits,
   dedupeLongTermEntriesWithAccounting,
   enforceLongTermLimitsWithAccounting,
@@ -155,6 +156,47 @@ test("renderWorkspaceMemory returns empty for no entries", () => {
 
   const rendered = renderWorkspaceMemory(store);
   assert.equal(rendered, "");
+});
+
+test("accountWorkspaceMemoryRender reports rendered and omitted reasons", () => {
+  const store: WorkspaceMemoryStore = {
+    version: 1,
+    workspace: { root: "/repo", key: "abc" },
+    limits: { maxRenderedChars: LONG_TERM_LIMITS.maxRenderedChars, maxEntries: LONG_TERM_LIMITS.maxEntries },
+    entries: [
+      ...Array.from({ length: 12 }, (_, i) => entry(`feedback-render-${i}`, `Unique rendered feedback preference ${i}`, "feedback")),
+      { ...entry("superseded-render", "Old superseded memory", "decision"), status: "superseded" as const },
+    ],
+    updatedAt: new Date().toISOString(),
+  };
+
+  const accounting = accountWorkspaceMemoryRender(store);
+
+  assert.equal(accounting.rendered.length, 10);
+  assert.ok(accounting.omitted.some(item => item.reason === "type_cap"));
+  assert.ok(accounting.omitted.some(item => item.reason === "superseded"));
+  assert.ok(accounting.evidence.some(event => event.type === "render_selected"));
+  assert.ok(accounting.evidence.some(event => event.type === "render_omitted" && event.reasonCodes.includes("type_cap")));
+});
+
+test("accountWorkspaceMemoryRender reports char budget and empty budget omissions", () => {
+  const charBudgetStore: WorkspaceMemoryStore = {
+    version: 1,
+    workspace: { root: "/repo", key: "abc" },
+    limits: { maxRenderedChars: 180, maxEntries: LONG_TERM_LIMITS.maxEntries },
+    entries: Array.from({ length: 3 }, (_, i) => entry(`char-budget-${i}`, `Long rendered memory ${i} `.repeat(20), "decision")),
+    updatedAt: new Date().toISOString(),
+  };
+  const emptyBudgetStore: WorkspaceMemoryStore = {
+    ...charBudgetStore,
+    limits: { maxRenderedChars: 10, maxEntries: LONG_TERM_LIMITS.maxEntries },
+  };
+
+  const charBudget = accountWorkspaceMemoryRender(charBudgetStore);
+  const emptyBudget = accountWorkspaceMemoryRender(emptyBudgetStore);
+
+  assert.ok(charBudget.omitted.some(item => item.reason === "char_budget"));
+  assert.ok(emptyBudget.omitted.some(item => item.reason === "empty_render_budget"));
 });
 
 // ============================================
@@ -485,6 +527,30 @@ test("dedupeLongTermEntriesWithAccounting reinforces absorbed exact duplicates",
   assert.equal(result.kept[0].reinforcementCount, 1);
   assert.equal(result.kept[0].lastReinforcedSessionID, "reinforce-session");
   assert.ok(typeof result.kept[0].retentionClock === "number");
+  assert.ok(result.evidence.some(event =>
+    event.type === "memory_reinforced" &&
+    event.reasonCodes.includes("duplicate_exact") &&
+    event.relations?.some(relation => relation.role === "reinforced" && relation.memory?.memoryId === "duplicate") &&
+    event.relations?.some(relation => relation.role === "reinforced_by" && relation.memory?.memoryId === "retained")
+  ));
+});
+
+test("dedupeLongTermEntriesWithAccounting emits identity reinforcement evidence", () => {
+  const now = Date.now();
+  const retained: LongTermMemoryEntry = {
+    ...entry("retained-identity", "OpenCode plugin config location: `.opencode-agenthub/current/xdg/opencode/opencode.json` in workspace", "reference"),
+    retentionClock: now - 10 * DAY_MS,
+  };
+  const duplicate: LongTermMemoryEntry = {
+    ...entry("duplicate-identity", "OpenCode plugin config: .opencode-agenthub/current/xdg/opencode/opencode.json in workspace", "reference"),
+    pendingOwnerSessionID: "identity-session",
+  };
+
+  const result = dedupeLongTermEntriesWithAccounting([retained, duplicate]);
+
+  assert.ok(result.evidence.some(event =>
+    event.type === "memory_reinforced" && event.reasonCodes.includes("duplicate_identity")
+  ));
 });
 
 test("reinforced memory with same initial strength and age ranks above unreinforced memory", () => {
@@ -530,6 +596,7 @@ test("dedupe reinforcement does not increment for same session", () => {
   assert.ok(retained, "existing manual memory should be retained");
   assert.equal(retained.reinforcementCount, 1);
   assert.equal(retained.lastReinforcedSessionID, "same-session");
+  assert.equal(result.evidence.some(event => event.type === "memory_reinforced"), false);
 });
 
 test("dedupe reinforcement does not increment under one hour", () => {
@@ -552,6 +619,23 @@ test("dedupe reinforcement does not increment under one hour", () => {
   assert.ok(retained, "existing manual memory should be retained");
   assert.equal(retained.reinforcementCount, 1);
   assert.equal(retained.lastReinforcedSessionID, "old-session");
+  assert.equal(result.evidence.some(event => event.type === "memory_reinforced"), false);
+});
+
+test("dedupe reinforcement does not emit evidence at max reinforcement count", () => {
+  const existing: LongTermMemoryEntry = {
+    ...entry("existing-max", "Prefer deterministic consolidation accounting", "feedback"),
+    source: "manual",
+    reinforcementCount: 6,
+  };
+  const duplicate: LongTermMemoryEntry = {
+    ...entry("duplicate-max", "prefer deterministic consolidation accounting!!!", "feedback"),
+    pendingOwnerSessionID: "new-session",
+  };
+
+  const result = dedupeLongTermEntriesWithAccounting([existing, duplicate]);
+
+  assert.equal(result.evidence.some(event => event.type === "memory_reinforced"), false);
 });
 
 test("enforceLongTermLimits orders entries by retention strength", () => {
