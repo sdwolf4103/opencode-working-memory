@@ -1,14 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { appendEvidenceEvents, type EvidenceEventInput } from "../src/evidence-log.ts";
 import type { LongTermMemoryEntry, WorkspaceMemoryStore } from "../src/types.ts";
-import { LONG_TERM_LIMITS } from "../src/types.ts";
-import { workspaceKey, workspaceMemoryPath } from "../src/paths.ts";
+import { LONG_TERM_LIMITS, PROMOTION_RETRY_LIMITS, type PendingMemoryJournalStore } from "../src/types.ts";
+import { workspaceKey, workspaceMemoryPath, workspacePendingJournalPath } from "../src/paths.ts";
 
 const execFileAsync = promisify(execFile);
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -46,15 +47,41 @@ async function writeWorkspaceStore(root: string, entries: LongTermMemoryEntry[],
 }
 
 async function runMemoryDiagHealth(root: string): Promise<string> {
+  return runMemoryDiag(["health", "--workspace", root]);
+}
+
+async function runMemoryDiag(args: string[]): Promise<string> {
   const { stdout } = await execFileAsync(process.execPath, [
     "--experimental-strip-types",
     "scripts/memory-diag.ts",
-    "health",
-    "--workspace",
-    root,
+    ...args,
   ], { cwd: repoRoot });
 
   return stdout;
+}
+
+async function writePendingJournal(root: string, entries: LongTermMemoryEntry[]): Promise<void> {
+  const key = await workspaceKey(root);
+  const path = await workspacePendingJournalPath(root);
+  const store: PendingMemoryJournalStore = {
+    version: 1,
+    workspace: { root, key },
+    entries,
+    updatedAt: new Date().toISOString(),
+  };
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, JSON.stringify(store, null, 2), "utf8");
+}
+
+function evidence(overrides: Partial<EvidenceEventInput>): EvidenceEventInput {
+  return {
+    type: "promotion_promoted",
+    phase: "promotion",
+    outcome: "promoted",
+    memory: { memoryId: "mem-rendered", type: "feedback", source: "explicit", status: "active" },
+    reasonCodes: ["new_workspace_entry"],
+    ...overrides,
+  };
 }
 
 test("memory health reports stored vs rendered retention counts", async () => {
@@ -137,6 +164,148 @@ test("memory health reports missing dormancy and non-alert monitoring defaults",
     assert.match(stdout, /high_importance_ratio: 0\.0% \(alert > 30%\)\n/);
     assert.match(stdout, /safety_critical_count: 0 \(deprecated field\)\n/);
     assert.match(stdout, /max_reinforced_count: 0 \(alert > 10% active\)/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("memory health --json prints parseable privacy-safe diagnostics matching human counts", async () => {
+  const root = await mkdtemp(join(tmpdir(), "opencode-memory-diag-json-"));
+  try {
+    const rendered = { ...entry("mem-rendered", "Prefer small focused changes", "feedback"), source: "explicit" as const };
+    const secret = { ...entry("mem-secret", "Use password: sushi only in test fixtures", "decision"), source: "manual" as const };
+    const superseded = { ...entry("mem-old", "Old decision that was superseded", "decision"), status: "superseded" as const };
+    const pending = { ...entry("mem-pending", "Retry this pending memory later", "project"), promotionAttempts: 1 };
+    await writeWorkspaceStore(root, [rendered, secret, superseded]);
+    await writePendingJournal(root, [pending]);
+    await appendEvidenceEvents(root, [
+      evidence({ type: "extraction_candidate_rejected", phase: "extraction", outcome: "rejected", memory: { memoryId: "mem-rejected", type: "feedback", source: "explicit" }, reasonCodes: ["raw_secret"], textPreview: "password: sushi should not leak" }),
+      evidence({ type: "storage_corrupt_json_quarantined", phase: "storage", outcome: "quarantined", memory: undefined, reasonCodes: ["invalid_json"] }),
+      evidence({ type: "promotion_promoted", phase: "promotion", outcome: "promoted", memory: { memoryId: "mem-rendered", type: "feedback", source: "explicit", status: "active" }, reasonCodes: ["new_workspace_entry"] }),
+      evidence({ type: "render_selected", phase: "render", outcome: "rendered", memory: { memoryId: "mem-rendered", type: "feedback", source: "explicit", status: "active" }, reasonCodes: ["within_caps", "within_char_budget"] }),
+    ]);
+
+    const human = await runMemoryDiagHealth(root);
+    const jsonText = await runMemoryDiag(["health", "--workspace", root, "--json"]);
+    const parsed = JSON.parse(jsonText) as {
+      version: 1;
+      summary: { storedActive: number; rendered: number; pending: number; rejectedLast7Days: number; corruptStoresQuarantinedLast30Days: number };
+      memories: Array<{ id: string; status: string; reasonCodes: string[]; evidenceEventIds: string[]; textPreview?: string }>;
+      recentEvents: Array<{ eventId: string; type: string; outcome: string; createdAt: string; reasonCodes: string[] }>;
+    };
+
+    assert.equal(parsed.version, 1);
+    assert.equal(parsed.summary.storedActive, Number(human.match(/Stored active memories: (\d+)/)?.[1]));
+    assert.equal(parsed.summary.rendered, Number(human.match(/Rendered candidates: (\d+)/)?.[1]));
+    assert.equal(parsed.summary.pending, Number(human.match(/Pending journal:\n\s+total: (\d+)/)?.[1]));
+    assert.equal(parsed.summary.rejectedLast7Days, 1);
+    assert.equal(parsed.summary.corruptStoresQuarantinedLast30Days, 1);
+    assert.ok(parsed.recentEvents.some(event => event.eventId && event.type === "render_selected" && event.outcome === "rendered" && event.createdAt && event.reasonCodes.includes("within_caps")));
+    assert.ok(parsed.memories.find(memory => memory.id === "mem-rendered")?.evidenceEventIds.length);
+    assert.ok(!jsonText.includes("sushi"));
+    assert.ok(jsonText.trim().startsWith("{"));
+    assert.ok(jsonText.trim().endsWith("}"));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("memory-diag explain shows rendered, omitted, pending, and evidence reason status", async () => {
+  const root = await mkdtemp(join(tmpdir(), "opencode-memory-diag-explain-"));
+  try {
+    const rendered = { ...entry("mem-rendered", "Rendered feedback wins the render set", "feedback"), source: "explicit" as const };
+    const superseded = { ...entry("mem-superseded", "Superseded memory is not rendered", "decision"), status: "superseded" as const };
+    const typeCapped = Array.from({ length: 11 }, (_, i) => entry(`mem-type-${i}`, `Type cap feedback memory ${i}`, "feedback"));
+    const globalCapped = [
+      ...Array.from({ length: 10 }, (_, i) => entry(`mem-g-feedback-${i}`, `Global cap feedback memory ${i}`, "feedback")),
+      ...Array.from({ length: 10 }, (_, i) => entry(`mem-g-decision-${i}`, `Global cap decision memory ${i}`, "decision")),
+      ...Array.from({ length: 8 }, (_, i) => entry(`mem-g-project-${i}`, `Global cap project memory ${i}`, "project")),
+      ...Array.from({ length: 7 }, (_, i) => entry(`mem-g-reference-${i}`, `Global cap reference memory ${i}`, "reference")),
+    ];
+    const charBudget = { ...entry("mem-char-budget", "This active memory cannot fit the tiny character budget", "project") };
+    await writeWorkspaceStore(root, [rendered, superseded, ...typeCapped, ...globalCapped, charBudget]);
+    const key = await workspaceKey(root);
+    const path = await workspaceMemoryPath(root);
+    const raw = JSON.parse(await readFile(path, "utf8")) as WorkspaceMemoryStore;
+    raw.limits.maxRenderedChars = 100;
+    raw.workspace = { root, key };
+    await writeFile(path, JSON.stringify(raw, null, 2), "utf8");
+
+    const retry = { ...entry("mem-pending-retry", "Pending retry memory", "project"), promotionAttempts: 1, lastPromotionFailureReason: "capacity_rejected" };
+    const exhausted = { ...entry("mem-pending-capacity", "Pending capacity rejected memory", "project"), promotionAttempts: PROMOTION_RETRY_LIMITS.maxExplicitAttempts, lastPromotionFailureReason: "capacity_rejected" };
+    await writePendingJournal(root, [retry, exhausted]);
+    await appendEvidenceEvents(root, [
+      evidence({ type: "promotion_absorbed_exact", phase: "promotion", outcome: "absorbed", memory: { memoryId: "mem-absorbed", type: "feedback", source: "explicit" }, reasonCodes: ["same_exact_key"] }),
+      evidence({ type: "storage_corrupt_json_quarantined", phase: "storage", outcome: "quarantined", memory: undefined, reasonCodes: ["invalid_json"] }),
+    ]);
+
+    const stdout = await runMemoryDiag(["explain", "--workspace", root]);
+
+    assert.match(stdout, /Memory mem-rendered: rendered/);
+    assert.match(stdout, /Memory mem-superseded: omitted_superseded/);
+    assert.match(stdout, /omitted_type_cap/);
+    assert.match(stdout, /omitted_global_cap/);
+    assert.match(stdout, /omitted_char_budget/);
+    assert.match(stdout, /Memory mem-pending-retry: pending_retry/);
+    assert.match(stdout, /Memory mem-pending-capacity: pending_rejected_capacity/);
+    assert.match(stdout, /Memory mem-absorbed: omitted_absorbed_duplicate/);
+    assert.match(stdout, /quarantined_corrupt_store/);
+    assert.match(stdout, /- strength=\d+\.\d{3}, type=feedback, source=explicit/);
+    assert.match(stdout, /- evidence: .*promotion_absorbed_exact/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("memory-diag trace prints lifecycle relations and redacts secrets", async () => {
+  const root = await mkdtemp(join(tmpdir(), "opencode-memory-diag-trace-"));
+  try {
+    await writeWorkspaceStore(root, [
+      { ...entry("mem-life", "Old token password: sushi should be redacted", "decision"), status: "superseded" as const },
+      entry("mem-new", "Replacement memory", "decision"),
+    ]);
+    await appendEvidenceEvents(root, [
+      evidence({ type: "extraction_candidate_accepted", phase: "extraction", outcome: "accepted", memory: { memoryId: "mem-life", type: "decision", source: "compaction" }, reasonCodes: ["quality_gate_passed"], textPreview: "password: sushi" }),
+      evidence({ type: "pending_memory_appended", phase: "pending_journal", outcome: "accepted", memory: { memoryId: "mem-life", type: "decision", source: "compaction" }, relations: [{ role: "pending", memory: { memoryId: "mem-life" } }], reasonCodes: ["pending_journal_append"] }),
+      evidence({ type: "promotion_promoted", phase: "promotion", outcome: "promoted", memory: { memoryId: "mem-life", type: "decision", source: "compaction" }, reasonCodes: ["new_workspace_entry"] }),
+      evidence({ type: "memory_reinforced", phase: "reinforcement", outcome: "reinforced", memory: { memoryId: "mem-life", type: "decision", source: "compaction" }, relations: [{ role: "reinforced_by", memory: { memoryId: "mem-duplicate" } }], reasonCodes: ["duplicate_exact"] }),
+      evidence({ type: "promotion_superseded", phase: "promotion", outcome: "superseded", memory: { memoryId: "mem-life", type: "decision", source: "compaction" }, relations: [{ role: "superseded_by", memory: { memoryId: "mem-new" } }], reasonCodes: ["superseded_existing"] }),
+      evidence({ type: "render_omitted", phase: "render", outcome: "omitted", memory: { memoryId: "mem-life", type: "decision", source: "compaction" }, relations: [{ role: "omitted", memory: { memoryId: "mem-life" } }], reasonCodes: ["superseded"] }),
+    ]);
+
+    const stdout = await runMemoryDiag(["trace", "--workspace", root, "--memory", "mem-life"]);
+
+    assert.match(stdout, /Memory mem-life: omitted_superseded/);
+    assert.match(stdout, /Lifecycle:/);
+    assert.match(stdout, /extraction_candidate_accepted: accepted; reasons=quality_gate_passed/);
+    assert.match(stdout, /pending_memory_appended: accepted; reasons=pending_journal_append/);
+    assert.match(stdout, /promotion_superseded: superseded; reasons=superseded_existing; .*superseded_by=mem-new/);
+    assert.match(stdout, /memory_reinforced: reinforced; reasons=duplicate_exact; .*reinforced_by=mem-duplicate/);
+    assert.match(stdout, /Superseded by:\n- mem-new/);
+    assert.match(stdout, /Reinforced by:\n- mem-duplicate/);
+    assert.ok(!stdout.includes("sushi"));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("memory-diag trace requires --memory and reports unknown IDs", async () => {
+  const root = await mkdtemp(join(tmpdir(), "opencode-memory-diag-trace-unknown-"));
+  try {
+    await assert.rejects(
+      execFileAsync(process.execPath, ["--experimental-strip-types", "scripts/memory-diag.ts", "trace", "--workspace", root], { cwd: repoRoot }),
+      (error: unknown) => {
+        const err = error as { code?: number; stderr?: string };
+        assert.notEqual(err.code, 0);
+        assert.match(err.stderr ?? "", /--memory requires an id/);
+        assert.match(err.stderr ?? "", /Usage:/);
+        return true;
+      },
+    );
+
+    const stdout = await runMemoryDiag(["trace", "--workspace", root, "--memory", "missing-memory"]);
+    assert.match(stdout, /Memory missing-memory: unknown/);
+    assert.match(stdout, /Lifecycle:\n\(none\)/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

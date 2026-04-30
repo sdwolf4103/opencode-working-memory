@@ -12,7 +12,7 @@ import { dataHome, extractionRejectionLogPath, migrationLogPath, workspaceKey, w
 import { assessMemoryQuality, HARD_QUALITY_REASONS } from "../src/memory-quality.ts";
 import { redactCredentials } from "../src/redaction.ts";
 import { scanWorkspaceResidues } from "../src/workspace-cleanup.ts";
-import { renderWorkspaceMemory } from "../src/workspace-memory.ts";
+import { accountWorkspaceMemoryRender, renderWorkspaceMemory } from "../src/workspace-memory.ts";
 import {
   DORMANT_DECAY_MULTIPLIER,
   RETENTION_TYPE_MAX,
@@ -21,18 +21,70 @@ import {
 } from "../src/retention.ts";
 import type { LongTermMemoryEntry, LongTermSource, LongTermType, PendingMemoryJournalStore, WorkspaceMemoryStore } from "../src/types.ts";
 import { LONG_TERM_LIMITS, PROMOTION_RETRY_LIMITS } from "../src/types.ts";
+import {
+  queryEvidenceEvents,
+  summarizeMemoryEvidence,
+  traceMemoryLifecycle,
+  type EvidenceEventType,
+  type EvidenceEventV1,
+  type EvidenceOutcome,
+} from "../src/evidence-log.ts";
 
-type Command = "health" | "rejections" | "audit";
+export type MemoryRenderStatus =
+  | "rendered"
+  | "omitted_superseded"
+  | "omitted_type_cap"
+  | "omitted_global_cap"
+  | "omitted_char_budget"
+  | "omitted_absorbed_duplicate"
+  | "pending_retry"
+  | "pending_rejected_capacity"
+  | "quarantined_corrupt_store";
+
+export type MemoryDiagJSON = {
+  version: 1;
+  workspace: { rootHash: string; key: string };
+  generatedAt: string;
+  summary: {
+    storedActive: number;
+    rendered: number;
+    pending: number;
+    rejectedLast7Days: number;
+    corruptStoresQuarantinedLast30Days: number;
+  };
+  memories: Array<{
+    id: string;
+    type: "feedback" | "project" | "decision" | "reference";
+    source: "explicit" | "compaction" | "manual";
+    status: MemoryRenderStatus;
+    strength?: number;
+    reasonCodes: string[];
+    textPreview?: string;
+    evidenceEventIds: string[];
+  }>;
+  recentEvents: Array<{
+    eventId: string;
+    type: EvidenceEventType;
+    outcome: EvidenceOutcome;
+    createdAt: string;
+    memoryId?: string;
+    reasonCodes: string[];
+  }>;
+};
+
+type Command = "health" | "rejections" | "audit" | "explain" | "trace";
 type Origin = "explicit_trigger" | "compaction_candidate" | "manual" | "migration_check" | "unknown";
 
 type CliOptions = {
   raw: boolean;
+  json?: boolean;
   workspace?: string;
   all?: boolean;
   softOnly?: boolean;
   triggerOnly?: boolean;
   since?: string;
   migration?: string;
+  memory?: string;
 };
 
 type RejectionLogRecord = {
@@ -89,7 +141,9 @@ const ALLOWED_ORIGINS = new Set<Origin>([
 
 function usage(): string {
   return `Usage:
-  bun scripts/memory-diag.ts health [--workspace <path>] [--all] [--raw]
+  bun scripts/memory-diag.ts health [--workspace <path>] [--all] [--raw] [--json]
+  bun scripts/memory-diag.ts explain [--workspace <path>] [--raw]
+  bun scripts/memory-diag.ts trace --memory <id> [--workspace <path>] [--raw]
   bun scripts/memory-diag.ts rejections [--soft-only] [--trigger-only] [--since 14d] [--raw]
   bun scripts/memory-diag.ts audit [--migration <id>] [--raw]
 `;
@@ -107,7 +161,7 @@ function parseArgs(argv: string[]): { command: Command; options: CliOptions } {
     console.log(usage());
     process.exit(0);
   }
-  if (command !== "health" && command !== "rejections" && command !== "audit") {
+  if (command !== "health" && command !== "rejections" && command !== "audit" && command !== "explain" && command !== "trace") {
     die(`Unknown subcommand: ${command}`);
   }
 
@@ -115,6 +169,7 @@ function parseArgs(argv: string[]): { command: Command; options: CliOptions } {
   for (let i = 0; i < rest.length; i += 1) {
     const arg = rest[i];
     if (arg === "--raw") options.raw = true;
+    else if (arg === "--json") options.json = true;
     else if (arg === "--all") options.all = true;
     else if (arg === "--soft-only") options.softOnly = true;
     else if (arg === "--trigger-only") options.triggerOnly = true;
@@ -130,6 +185,10 @@ function parseArgs(argv: string[]): { command: Command; options: CliOptions } {
       const value = rest[++i];
       if (!value) die("--migration requires an id");
       options.migration = value;
+    } else if (arg === "--memory") {
+      const value = rest[++i];
+      if (!value) die("--memory requires an id");
+      options.memory = value;
     } else {
       die(`Unknown option: ${arg}`);
     }
@@ -137,14 +196,24 @@ function parseArgs(argv: string[]): { command: Command; options: CliOptions } {
 
   if (command === "health") {
     if (options.all && options.workspace) die("Use either --all or --workspace, not both");
+    if (options.json && options.all) die("health --json does not support --all");
+  } else if (command === "explain" || command === "trace") {
+    if (options.all) die(`${command} does not accept --all`);
   } else {
     if (options.all || options.workspace) die(`${command} does not accept --all or --workspace`);
   }
+  if (command !== "health" && options.json) die(`${command} does not accept --json`);
   if (command !== "rejections" && (options.softOnly || options.triggerOnly || options.since)) {
     die(`${command} does not accept rejection filters`);
   }
   if (command !== "audit" && options.migration) {
     die(`${command} does not accept --migration`);
+  }
+  if (command !== "trace" && options.memory) {
+    die(`${command} does not accept --memory`);
+  }
+  if (command === "trace" && !options.memory) {
+    die("--memory requires an id");
   }
 
   return { command, options };
@@ -335,7 +404,186 @@ function normalizedJournal(journal: PendingMemoryJournalStore | null): PendingMe
   };
 }
 
+type WorkspaceDiagSnapshot = {
+  store: WorkspaceMemoryStore;
+  journal: PendingMemoryJournalStore;
+  retention: ReturnType<typeof retentionCandidatesForDiag>;
+  memories: MemoryDiagJSON["memories"];
+  recentEvents: MemoryDiagJSON["recentEvents"];
+  allEvents: EvidenceEventV1[];
+  summary: MemoryDiagJSON["summary"];
+};
+
+function uniqueStrings(values: string[]): string[] {
+  return [...new Set(values.filter(Boolean))];
+}
+
+function eventMemoryId(event: EvidenceEventV1): string | undefined {
+  return event.memory?.memoryId
+    ?? event.relations?.map(relation => relation.memory?.memoryId).find((id): id is string => Boolean(id));
+}
+
+function isWithinDays(iso: string, days: number): boolean {
+  const ms = new Date(iso).getTime();
+  return Number.isFinite(ms) && ms >= Date.now() - days * 86_400_000;
+}
+
+function renderStatusReason(status: MemoryRenderStatus, fallback?: string): string[] {
+  switch (status) {
+    case "rendered": return ["within_caps", "within_char_budget"];
+    case "omitted_superseded": return ["superseded"];
+    case "omitted_type_cap": return ["type_cap"];
+    case "omitted_global_cap": return ["global_cap"];
+    case "omitted_char_budget": return [fallback === "empty_render_budget" ? "empty_render_budget" : "char_budget"];
+    case "omitted_absorbed_duplicate": return ["absorbed_duplicate"];
+    case "pending_retry": return ["retryable_capacity_rejection"];
+    case "pending_rejected_capacity": return ["capacity_rejected", "max_attempts_reached"];
+    case "quarantined_corrupt_store": return ["invalid_json"];
+  }
+}
+
+function statusFromOmissionReason(reason: string | undefined): MemoryRenderStatus {
+  if (reason === "superseded") return "omitted_superseded";
+  if (reason === "type_cap") return "omitted_type_cap";
+  if (reason === "global_cap") return "omitted_global_cap";
+  return "omitted_char_budget";
+}
+
+function pendingStatus(entry: LongTermMemoryEntry): MemoryRenderStatus {
+  const attempts = entry.promotionAttempts ?? 0;
+  return attempts >= promotionLimit(entry.source) ? "pending_rejected_capacity" : "pending_retry";
+}
+
+function safeTextPreview(text: string): string {
+  return truncate(cleanText(text, false), 120);
+}
+
+async function buildWorkspaceDiagSnapshot(input: {
+  root: string;
+  key: string;
+  memoryPath: string;
+  pendingPath: string;
+}): Promise<WorkspaceDiagSnapshot> {
+  const rawStore = await readJSONFile<WorkspaceMemoryStore>(input.memoryPath);
+  const storeRoot = rawStore?.workspace?.root ?? input.root;
+  const storeKey = rawStore?.workspace?.key ?? input.key;
+  const store = normalizedStore(rawStore, storeRoot, storeKey);
+  const journal = normalizedJournal(await readJSONFile<PendingMemoryJournalStore>(input.pendingPath));
+  const retention = retentionCandidatesForDiag(store);
+  const renderAccounting = accountWorkspaceMemoryRender(store);
+  const renderedIds = new Set(renderAccounting.rendered.map(memory => memory.id));
+  const omittedById = new Map(renderAccounting.omitted.map(item => [item.memory.id, item.reason]));
+  const allEvents = await queryEvidenceEvents(input.root);
+  const recentEvidence = await queryEvidenceEvents(input.root, { newestFirst: true, limit: 50 });
+  const memoryRows: MemoryDiagJSON["memories"] = [];
+  const seenIds = new Set<string>();
+
+  for (const entry of store.entries) {
+    const omissionReason = omittedById.get(entry.id);
+    const status: MemoryRenderStatus = renderedIds.has(entry.id)
+      ? "rendered"
+      : statusFromOmissionReason(omissionReason ?? (entry.status === "superseded" ? "superseded" : undefined));
+    const summary = await summarizeMemoryEvidence(input.root, { memoryId: entry.id });
+    memoryRows.push({
+      id: entry.id,
+      type: entry.type,
+      source: entry.source,
+      status,
+      strength: calculateRetentionStrength(entry, Date.now(), store.lastActivityAt),
+      reasonCodes: uniqueStrings([...renderStatusReason(status, omissionReason), ...summary.reasonCodes]),
+      textPreview: safeTextPreview(entry.text),
+      evidenceEventIds: summary.eventIds,
+    });
+    seenIds.add(entry.id);
+  }
+
+  for (const entry of journal.entries) {
+    const status = pendingStatus(entry);
+    const summary = await summarizeMemoryEvidence(input.root, { memoryId: entry.id });
+    memoryRows.push({
+      id: entry.id,
+      type: entry.type,
+      source: entry.source,
+      status,
+      strength: calculateRetentionStrength(entry, Date.now(), store.lastActivityAt),
+      reasonCodes: uniqueStrings([...renderStatusReason(status), entry.lastPromotionFailureReason ?? "", ...summary.reasonCodes]),
+      textPreview: safeTextPreview(entry.text),
+      evidenceEventIds: summary.eventIds,
+    });
+    seenIds.add(entry.id);
+  }
+
+  for (const event of allEvents) {
+    if (event.outcome !== "absorbed") continue;
+    const memory = event.memory;
+    if (!memory?.memoryId || !memory.type || !memory.source || seenIds.has(memory.memoryId)) continue;
+    const summary = await summarizeMemoryEvidence(input.root, { memoryId: memory.memoryId });
+    memoryRows.push({
+      id: memory.memoryId,
+      type: memory.type,
+      source: memory.source,
+      status: "omitted_absorbed_duplicate",
+      reasonCodes: uniqueStrings([...renderStatusReason("omitted_absorbed_duplicate"), ...summary.reasonCodes]),
+      evidenceEventIds: summary.eventIds.length > 0 ? summary.eventIds : [event.eventId],
+    });
+    seenIds.add(memory.memoryId);
+  }
+
+  const recentEvents = recentEvidence.map(event => ({
+    eventId: event.eventId,
+    type: event.type,
+    outcome: event.outcome,
+    createdAt: event.createdAt,
+    memoryId: eventMemoryId(event),
+    reasonCodes: uniqueStrings([
+      ...event.reasonCodes,
+      ...(event.type === "storage_corrupt_json_quarantined" ? ["quarantined_corrupt_store"] : []),
+    ]),
+  }));
+
+  return {
+    store,
+    journal,
+    retention,
+    memories: memoryRows,
+    recentEvents,
+    allEvents,
+    summary: {
+      storedActive: store.entries.filter(entry => entry.status !== "superseded").length,
+      rendered: retention.rendered.length,
+      pending: journal.entries.length,
+      rejectedLast7Days: allEvents.filter(event => event.outcome === "rejected" && isWithinDays(event.createdAt, 7)).length,
+      corruptStoresQuarantinedLast30Days: allEvents.filter(event => event.type === "storage_corrupt_json_quarantined" && isWithinDays(event.createdAt, 30)).length,
+    },
+  };
+}
+
+async function buildMemoryDiagJSON(root: string): Promise<MemoryDiagJSON> {
+  const key = await workspaceKey(root);
+  const snapshot = await buildWorkspaceDiagSnapshot({
+    root,
+    key,
+    memoryPath: await workspaceMemoryPath(root),
+    pendingPath: await workspacePendingJournalPath(root),
+  });
+
+  return {
+    version: 1,
+    workspace: { rootHash: workspaceRootHash(snapshot.store.workspace.root || root), key: snapshot.store.workspace.key || key },
+    generatedAt: new Date().toISOString(),
+    summary: snapshot.summary,
+    memories: snapshot.memories,
+    recentEvents: snapshot.recentEvents,
+  };
+}
+
 async function runHealth(options: CliOptions): Promise<void> {
+  if (options.json) {
+    const root = options.workspace ?? process.cwd();
+    console.log(JSON.stringify(await buildMemoryDiagJSON(root), null, 2));
+    return;
+  }
+
   if (options.all) {
     const scan = await scanWorkspaceResidues({ includeOrphans: true, minAgeMs: 0 });
     console.log("Workspace memory health");
@@ -707,8 +955,125 @@ async function runAudit(options: CliOptions): Promise<void> {
   }
 }
 
+async function snapshotForOptions(options: CliOptions): Promise<WorkspaceDiagSnapshot> {
+  const root = options.workspace ?? process.cwd();
+  const key = await workspaceKey(root);
+  return buildWorkspaceDiagSnapshot({
+    root,
+    key,
+    memoryPath: await workspaceMemoryPath(root),
+    pendingPath: await workspacePendingJournalPath(root),
+  });
+}
+
+function formatEvidenceRefs(eventIds: string[], allEvents: EvidenceEventV1[]): string {
+  if (eventIds.length === 0) return "(none)";
+  const byId = new Map(allEvents.map(event => [event.eventId, event]));
+  return eventIds
+    .map(id => {
+      const event = byId.get(id);
+      return event ? `${event.eventId} ${event.type}` : id;
+    })
+    .join(", ");
+}
+
+async function runExplain(options: CliOptions): Promise<void> {
+  const snapshot = await snapshotForOptions(options);
+  console.log("Workspace memory explainability");
+  console.log("");
+
+  if (snapshot.memories.length === 0) {
+    console.log("No memories found.");
+  }
+
+  for (const memory of snapshot.memories) {
+    console.log(`Memory ${memory.id}: ${memory.status}`);
+    const strength = typeof memory.strength === "number" ? formatStrength(memory.strength) : "n/a";
+    console.log(`- strength=${strength}, type=${memory.type}, source=${memory.source}`);
+    console.log(`- reasons: ${memory.reasonCodes.length > 0 ? memory.reasonCodes.join(", ") : "(none)"}`);
+    console.log(`- evidence: ${formatEvidenceRefs(memory.evidenceEventIds, snapshot.allEvents)}`);
+    console.log("");
+  }
+
+  const quarantines = snapshot.recentEvents.filter(event => event.type === "storage_corrupt_json_quarantined");
+  if (quarantines.length > 0) {
+    console.log("Quarantined stores:");
+    for (const event of quarantines) {
+      console.log(`- quarantined_corrupt_store: ${event.eventId} ${event.type}; reasons=${event.reasonCodes.join(",")}`);
+    }
+  }
+}
+
+function statusFromTraceEvent(event: EvidenceEventV1 | undefined): string {
+  if (!event) return "unknown";
+  if (event.type === "render_selected") return "rendered";
+  if (event.type === "render_omitted") return statusFromOmissionReason(event.reasonCodes[0]);
+  if (event.type === "promotion_absorbed_exact" || event.type === "promotion_absorbed_identity") return "omitted_absorbed_duplicate";
+  if (event.type === "promotion_retry_scheduled") return "pending_retry";
+  if (event.type === "promotion_rejected_capacity" || event.type === "promotion_retry_exhausted") return "pending_rejected_capacity";
+  if (event.type === "storage_corrupt_json_quarantined") return "quarantined_corrupt_store";
+  if (event.outcome === "superseded") return "omitted_superseded";
+  return event.outcome;
+}
+
+function formatTraceEvent(event: EvidenceEventV1): string {
+  const reasons = event.reasonCodes.length > 0 ? event.reasonCodes.join(",") : "none";
+  const relations = (event.relations ?? [])
+    .map(relation => relation.memory?.memoryId ? `${relation.role}=${relation.memory.memoryId}` : undefined)
+    .filter((value): value is string => Boolean(value));
+  const relationText = relations.length > 0 ? `; ${relations.join(", ")}` : "";
+  return `- ${event.eventId} ${event.type}: ${event.outcome}; reasons=${reasons}${relationText}`;
+}
+
+function relationMemoryIds(events: EvidenceEventV1[], role: string): string[] {
+  return uniqueStrings(events.flatMap(event => (event.relations ?? [])
+    .filter(relation => relation.role === role)
+    .map(relation => relation.memory?.memoryId ?? "")));
+}
+
+async function runTrace(options: CliOptions): Promise<void> {
+  const root = options.workspace ?? process.cwd();
+  const memoryId = options.memory;
+  if (!memoryId) die("--memory requires an id");
+
+  const [snapshot, trace] = await Promise.all([
+    snapshotForOptions(options),
+    traceMemoryLifecycle(root, { memoryId }),
+  ]);
+  const memoryRow = snapshot.memories.find(memory => memory.id === memoryId);
+  const status = memoryRow?.status ?? statusFromTraceEvent(trace.events.at(-1));
+
+  console.log(`Memory ${memoryId}: ${status}`);
+  console.log("");
+  console.log("Lifecycle:");
+  if (trace.events.length === 0) {
+    console.log("(none)");
+    return;
+  }
+
+  for (const event of trace.events) {
+    console.log(formatTraceEvent(event));
+  }
+
+  const supersededBy = relationMemoryIds(trace.events, "superseded_by");
+  if (supersededBy.length > 0) {
+    console.log("");
+    console.log("Superseded by:");
+    for (const id of supersededBy) console.log(`- ${id}`);
+  }
+
+  const reinforcedBy = relationMemoryIds(trace.events, "reinforced_by");
+  if (reinforcedBy.length > 0) {
+    console.log("");
+    console.log("Reinforced by:");
+    for (const id of reinforcedBy) console.log(`- ${id}`);
+  }
+}
+
 const { command, options } = parseArgs(process.argv.slice(2));
 
 if (command === "health") await runHealth(options);
 else if (command === "rejections") await runRejections(options);
-else await runAudit(options);
+else if (command === "audit") await runAudit(options);
+else if (command === "explain") await runExplain(options);
+else await runTrace(options);
