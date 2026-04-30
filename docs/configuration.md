@@ -34,7 +34,7 @@ const WORKSPACE_DORMANT_AFTER_DAYS = 14;
 const DORMANT_DECAY_MULTIPLIER = 0.25;
 ```
 
-Initial strength uses type, source, user importance, and safety-critical factors. Confidence is stored for compatibility but is not used for retention scoring.
+Initial strength uses type, source, and user importance factors. Confidence is stored for compatibility but is not used for retention scoring.
 
 Rendered type caps prevent one type from filling all workspace memory slots:
 
@@ -45,7 +45,7 @@ Rendered type caps prevent one type from filling all workspace memory slots:
 | `project` | 8 |
 | `reference` | 6 |
 
-Safety-critical memories are exempt from type caps but still compete under the global `maxEntries` limit. Old or stale-marked memories are not hard-pruned by age; they lose rendered space through strength and cap competition.
+Old or stale-marked memories are not hard-pruned by age; they lose rendered space through strength and cap competition. The deprecated `safetyCritical` field is preserved for compatibility but no longer affects strength or type caps.
 
 ## Hot Session State Limits
 

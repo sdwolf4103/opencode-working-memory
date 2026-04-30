@@ -1,12 +1,47 @@
 # Release Notes
 
+## 1.5.1 (2026-04-30)
+
+### Evidence Loop and Explainability
+
+This release adds an evidence-based audit trail for memory lifecycle events and user-facing diagnostics for understanding why memories are rendered, promoted, or rejected.
+
+> **Evidence before sublimation.** Every memory decision can be traced.
+
+### What Changed
+
+- **Evidence log**: extraction, promotion, reinforcement, render, and storage events are now recorded in a per-workspace `events.jsonl` with 90-day retention and 5000-event cap.
+- **User explainability**: `memory-diag explain` shows per-memory render status with strength, reasons, and evidence. `memory-diag trace --memory <id>` shows the full lifecycle history.
+- **Machine-readable diagnostics**: `memory-diag health --json` outputs structured `MemoryDiagJSON` for scripting.
+- **Calendar-day reinforcement gate**: reinforcement now requires distinct UTC calendar days, preventing repetitive-task gaming that could inflate a memory's strength within a single day.
+- **SafetyCritical deprecation complete**: the `safetyCritical` field no longer affects retention strength or type-cap bypass. All memories fade by the same rules.
+- **Retention module extraction**: retention constants and calculations moved to `src/retention.ts` for cleaner separation.
+
+### Privacy
+
+- Evidence text previews are credential-redacted. Memory content is stored as truncated hashes, never in full.
+- Diagnostics default to redacted output. `--raw` is available for maintainers.
+
+### Upgrade Notes
+
+- No configuration changes required.
+- Existing workspace memory files remain compatible.
+- Evidence logs are created automatically; no migration needed.
+
+### Validation
+
+- `npm run typecheck`
+- `npm test` — 271 tests passing
+
+---
+
 ## 1.5.0 (2026-04-29)
 
 ### Retention Decay Model
 
 This release changes workspace memory retention from hard stale pruning and additive priority scoring to a strength-based decay model.
 
-Think of it like a forgetting curve: memories fade over time, but important, reinforced, and safety-critical memories decay slower. Weak entries fall out of rendered prompt context by cap competition, not hard deletion.
+Think of it like a forgetting curve: memories fade over time, but important and reinforced memories decay slower. Weak entries fall out of rendered prompt context by cap competition, not hard deletion.
 
 > **Memory should fade, so the agent can keep learning.**
 > Important memories decay slower, but every memory must leave room for newer project reality and avoid long-term memory pollution.
@@ -27,10 +62,10 @@ Think of it like a forgetting curve: memories fade over time, but important, rei
 ### What Changed
 
 - **Strength-based retention**: workspace memory now uses exponential decay: initial strength × age decay.
-- **Better initial strength**: type, source, user importance, and safety-critical status now determine how strong a memory starts.
+- **Better initial strength**: type, source, and user importance now determine how strong a memory starts.
 - **No confidence scoring**: confidence remains in stored data for compatibility, but it no longer affects retention ranking.
 - **Type caps**: rendered workspace memory now caps feedback, decisions, project facts, and references separately so one type cannot monopolize all 28 slots.
-- **Safety-critical protection**: safety-critical entries get stronger retention and are exempt from per-type caps, while still competing under the global rendered cap.
+- **Deprecation:** `safetyCritical` field no longer affects retention strength or type-cap bypass. All system memories now fade according to the same rules. Safety rules belong in user-controlled `agent.md` files, not in system memory.
 - **Dormant-aware age**: after 14 inactive days, additional dormant workspace time counts at 0.25x so paused projects do not forget too aggressively.
 - **Reinforcement**: repeated matching memories reinforce the survivor and slow future decay, with same-session and one-hour guards to avoid accidental spam.
 - **No hard stale pruning**: old or stale-marked memories are no longer automatically dropped by age; they lose rendered space only through cap competition.
