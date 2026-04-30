@@ -9,11 +9,32 @@ const LOCK_WAIT_TIMEOUT_MS = 5000;
 const LOCK_STALE_MS = 30_000;
 const LOCK_HEARTBEAT_MS = 1_000;
 
+async function quarantineCorruptJSON(path: string): Promise<string | null> {
+  const quarantinePath = `${path}.corrupt-${Date.now()}-${process.pid}-${randomUUID()}`;
+
+  try {
+    await rename(path, quarantinePath);
+    return quarantinePath;
+  } catch {
+    return null;
+  }
+}
+
 export async function readJSON<T>(path: string, fallback: () => T): Promise<T> {
   if (!existsSync(path)) return fallback();
+
   try {
     return JSON.parse(await readFile(path, "utf8")) as T;
-  } catch {
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const quarantinePath = await quarantineCorruptJSON(path);
+
+    if (quarantinePath) {
+      console.error(`[memory] invalid JSON in ${path}; quarantined to ${quarantinePath}: ${message}`);
+    } else {
+      console.error(`[memory] invalid JSON in ${path}; using fallback without quarantine: ${message}`);
+    }
+
     return fallback();
   }
 }

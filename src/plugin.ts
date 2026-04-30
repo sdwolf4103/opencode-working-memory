@@ -63,7 +63,7 @@ import {
   pendingTodos,
 } from "./opencode.ts";
 import { accountPendingPromotions } from "./promotion-accounting.ts";
-import { WORKSPACE_MEMORY_CACHE_LIMITS } from "./types.ts";
+import { type LongTermMemoryEntry, WORKSPACE_MEMORY_CACHE_LIMITS } from "./types.ts";
 
 /**
  * Build the complete compaction prompt.
@@ -160,6 +160,11 @@ function renderTodosForCompaction(todos: Array<{ content: string; status: string
     lines.push(`- ${status} ${todo.content}${priority}`);
   }
   return lines.join("\n");
+}
+
+function warnMemoryHook(scope: string, error: unknown): void {
+  const message = error instanceof Error ? error.message : String(error);
+  console.error(`[memory] ${scope} failed: ${message}`);
 }
 
 export const MemoryV2Plugin: Plugin = async (input) => {
@@ -285,6 +290,22 @@ export const MemoryV2Plugin: Plugin = async (input) => {
     rememberProcessedUserMessage(sessionID, latestMessage.id, processedForSession);
   }
 
+  function dedupePendingPromotionMemories(
+    memories: LongTermMemoryEntry[],
+  ): LongTermMemoryEntry[] {
+    const seen = new Set<string>();
+    const deduped: LongTermMemoryEntry[] = [];
+
+    for (const memory of memories) {
+      const key = memoryKey(memory);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      deduped.push(memory);
+    }
+
+    return deduped;
+  }
+
   async function promotePendingMemories(
     sessionID?: string,
     options: { includeUnownedJournal?: boolean; includeOwnedJournal?: boolean } = {},
@@ -302,10 +323,10 @@ export const MemoryV2Plugin: Plugin = async (input) => {
       return false;
     });
 
-    const pending = [
+    const pending = dedupePendingPromotionMemories([
       ...(sessionState?.pendingMemories ?? []),
       ...journalPending,
-    ];
+    ]);
     if (pending.length === 0) return;
 
     let beforeEntries: Awaited<ReturnType<typeof loadWorkspaceMemory>>["entries"] = [];
@@ -462,38 +483,42 @@ export const MemoryV2Plugin: Plugin = async (input) => {
       const { sessionID } = hookInput;
       if (!sessionID) return;
 
-      pruneFrozenWorkspaceMemoryCache();
-      pruneProcessedUserMessagesCache();
+      try {
+        pruneFrozenWorkspaceMemoryCache();
+        pruneProcessedUserMessagesCache();
 
-      // Sub-agents are short-lived - skip memory system
-      if (await isSubAgent(sessionID)) return;
+        // Sub-agents are short-lived - skip memory system
+        if (await isSubAgent(sessionID)) return;
 
-      // Process explicit user memory even on no-tool turns. Keep this after the
-      // sub-agent guard so child sessions never append to the parent journal.
-      await processLatestUserMessage(sessionID);
+        // Process explicit user memory even on no-tool turns. Keep this after the
+        // sub-agent guard so child sessions never append to the parent journal.
+        await processLatestUserMessage(sessionID);
 
-      // Before first snapshot in this session, promote durable unowned backlog from
-      // prior sessions. Current-turn owned explicit memory remains pending and only
-      // appears in hot state for this transform.
-      if (!frozenWorkspaceMemoryCache.has(sessionID) && await hasPendingJournalEntries(directory)) {
-        await promotePendingMemories(undefined, { includeUnownedJournal: true, includeOwnedJournal: false });
-      }
+        // Before first snapshot in this session, promote durable unowned backlog from
+        // prior sessions. Current-turn owned explicit memory remains pending and only
+        // appears in hot state for this transform.
+        if (!frozenWorkspaceMemoryCache.has(sessionID) && await hasPendingJournalEntries(directory)) {
+          await promotePendingMemories(undefined, { includeUnownedJournal: true, includeOwnedJournal: false });
+        }
 
-      // Get frozen workspace memory snapshot (loaded and rendered once per session)
-      const workspaceSnapshot = await getFrozenWorkspaceMemorySnapshot(directory, sessionID);
+        // Get frozen workspace memory snapshot (loaded and rendered once per session)
+        const workspaceSnapshot = await getFrozenWorkspaceMemorySnapshot(directory, sessionID);
 
-      // Get current hot session state
-      const sessionState = await loadSessionState(directory, sessionID);
+        // Get current hot session state
+        const sessionState = await loadSessionState(directory, sessionID);
 
-      // Inject frozen workspace memory snapshot
-      if (workspaceSnapshot.renderedPrompt) {
-        output.system.push(workspaceSnapshot.renderedPrompt);
-      }
+        // Inject frozen workspace memory snapshot
+        if (workspaceSnapshot.renderedPrompt) {
+          output.system.push(workspaceSnapshot.renderedPrompt);
+        }
 
-      // Render and inject hot session state
-      const hotPrompt = renderHotSessionState(sessionState, directory);
-      if (hotPrompt) {
-        output.system.push(hotPrompt);
+        // Render and inject hot session state
+        const hotPrompt = renderHotSessionState(sessionState, directory);
+        if (hotPrompt) {
+          output.system.push(hotPrompt);
+        }
+      } catch (error) {
+        warnMemoryHook("chat.system.transform", error);
       }
     },
 
@@ -506,50 +531,54 @@ export const MemoryV2Plugin: Plugin = async (input) => {
       // Sub-agents don't need memory tracking
       if (await isSubAgent(sessionID)) return;
 
-      await updateSessionState(directory, sessionID, state => {
-        // Track active files from tool usage
-        if (toolName === "read" || toolName === "edit" || toolName === "write" || toolName === "grep") {
-          const files = extractActiveFiles(
-            toolName,
-            args as Record<string, unknown>,
-            toolOutput ?? ""
-          );
-          for (const { path, action } of files) {
-            touchActiveFile(state, path, action);
-            if (action === "edit" || action === "write") {
-              markErrorsMaybeFixedForFile(state, path, directory);
+      try {
+        await updateSessionState(directory, sessionID, state => {
+          // Track active files from tool usage
+          if (toolName === "read" || toolName === "edit" || toolName === "write" || toolName === "grep") {
+            const files = extractActiveFiles(
+              toolName,
+              args as Record<string, unknown>,
+              toolOutput ?? ""
+            );
+            for (const { path, action } of files) {
+              touchActiveFile(state, path, action);
+              if (action === "edit" || action === "write") {
+                markErrorsMaybeFixedForFile(state, path, directory);
+              }
             }
           }
-        }
 
-        // Track errors from failed bash commands
-        if (toolName === "bash") {
-          const argsRecord = args as Record<string, unknown>;
-          const command: string = typeof argsRecord?.command === "string"
-            ? argsRecord.command
-            : "";
-          const outputText: string = toolOutput ?? "";
+          // Track errors from failed bash commands
+          if (toolName === "bash") {
+            const argsRecord = args as Record<string, unknown>;
+            const command: string = typeof argsRecord?.command === "string"
+              ? argsRecord.command
+              : "";
+            const outputText: string = toolOutput ?? "";
 
-          // Check if command succeeded - clear errors for that category
-          const exitCode = bashExitCode(hookOutput);
-          if (typeof exitCode !== "number") {
-            // Unknown exit status: do not extract and do not clear
-          } else if (exitCode === 0 && command) {
-            clearErrorsForSuccessfulCommand(state, command);
-          } else if (command) {
-            // Only extract errors for commands with explicit non-zero exit
-            const errors = extractErrorsFromBash(command, outputText);
-            for (const error of errors) {
-              upsertOpenError(state, error);
+            // Check if command succeeded - clear errors for that category
+            const exitCode = bashExitCode(hookOutput);
+            if (typeof exitCode !== "number") {
+              // Unknown exit status: do not extract and do not clear
+            } else if (exitCode === 0 && command) {
+              clearErrorsForSuccessfulCommand(state, command);
+            } else if (command) {
+              // Only extract errors for commands with explicit non-zero exit
+              const errors = extractErrorsFromBash(command, outputText);
+              for (const error of errors) {
+                upsertOpenError(state, error);
+              }
             }
           }
-        }
-        return state;
-      });
+          return state;
+        });
 
-      // Process explicit memory from latest user message
-      // Only process once per message ID
-      await processLatestUserMessage(sessionID);
+        // Process explicit memory from latest user message
+        // Only process once per message ID
+        await processLatestUserMessage(sessionID);
+      } catch (error) {
+        warnMemoryHook("tool.execute.after", error);
+      }
     },
 
     /**
@@ -567,95 +596,99 @@ export const MemoryV2Plugin: Plugin = async (input) => {
       const { sessionID } = hookInput;
       if (!sessionID) return;
 
-      // Sub-agents don't need compaction support
-      if (await isSubAgent(sessionID)) return;
+      try {
+        // Sub-agents don't need compaction support
+        if (await isSubAgent(sessionID)) return;
 
-      // Preserve context injected by other plugins that ran before us.
-      // Setting output.prompt bypasses the default prompt + context join,
-      // so we must explicitly carry forward any existing output.context.
-      const otherContext = output.context.filter(Boolean).join("\n\n");
+        // Preserve context injected by other plugins that ran before us.
+        // Setting output.prompt bypasses the default prompt + context join,
+        // so we must explicitly carry forward any existing output.context.
+        const otherContext = output.context.filter(Boolean).join("\n\n");
 
-      // Build our private context (workspace memory, hot state, todos)
-      const contextParts: string[] = [];
+        // Build our private context (workspace memory, hot state, todos)
+        const contextParts: string[] = [];
 
       // 1. Frozen workspace memory snapshot
-      const workspaceSnapshot = await getFrozenWorkspaceMemorySnapshot(directory, sessionID);
-      if (workspaceSnapshot.renderedPrompt) {
-        contextParts.push(workspaceSnapshot.renderedPrompt);
+        const workspaceSnapshot = await getFrozenWorkspaceMemorySnapshot(directory, sessionID);
+        if (workspaceSnapshot.renderedPrompt) {
+          contextParts.push(workspaceSnapshot.renderedPrompt);
+        }
+
+        // 2. Hot session state
+        const sessionState = await loadSessionState(directory, sessionID);
+        const hotPrompt = renderHotSessionState(sessionState, directory);
+        if (hotPrompt) {
+          contextParts.push(hotPrompt);
+        }
+
+        // 3. Pending todos from OpenCode
+        const todos = await pendingTodos(client, sessionID);
+        const todosPrompt = renderTodosForCompaction(todos);
+        if (todosPrompt) {
+          contextParts.push(todosPrompt);
+        }
+
+        // Combine: other plugins' context first, then our private context
+        const privateContext = [otherContext, ...contextParts]
+          .filter(Boolean)
+          .join("\n\n");
+
+        // Replace the default prompt entirely with our ---free template
+        output.prompt = buildCompactionPrompt(privateContext);
+
+        // Clear context array since we consumed it into output.prompt.
+        // Subsequent plugins that set output.prompt will also need to check
+        // output.context if they want to preserve other plugin contributions.
+        output.context.length = 0;
+      } catch (error) {
+        warnMemoryHook("session.compacting", error);
       }
-
-      // 2. Hot session state
-      const sessionState = await loadSessionState(directory, sessionID);
-      const hotPrompt = renderHotSessionState(sessionState, directory);
-      if (hotPrompt) {
-        contextParts.push(hotPrompt);
-      }
-
-      // 3. Pending todos from OpenCode
-      const todos = await pendingTodos(client, sessionID);
-      const todosPrompt = renderTodosForCompaction(todos);
-      if (todosPrompt) {
-        contextParts.push(todosPrompt);
-      }
-
-      // Combine: other plugins' context first, then our private context
-      const privateContext = [otherContext, ...contextParts]
-        .filter(Boolean)
-        .join("\n\n");
-
-      // Replace the default prompt entirely with our ---free template
-      output.prompt = buildCompactionPrompt(privateContext);
-
-      // Clear context array since we consumed it into output.prompt.
-      // Subsequent plugins that set output.prompt will also need to check
-      // output.context if they want to preserve other plugin contributions.
-      output.context.length = 0;
     },
 
     // Handle session events
     event: async ({ event }) => {
       if (event.type === "session.compacted") {
-        const sessionID = sessionIDFromEventProperties(event.properties);
-        if (!sessionID) return;
-
-        // Sub-agents don't need post-compaction processing
-        if (await isSubAgent(sessionID)) return;
-
-        // Parse latest compaction summary for memory candidates, stage them into
-        // durable pending journal, then promote pending memories.
-        const summary = await latestCompactionSummary(client, sessionID);
-        const candidates = summary ? parseWorkspaceMemoryCandidates(summary) : [];
-        if (candidates.length > 0) {
-          await appendPendingMemories(directory, candidates);
-        }
-
         try {
+          const sessionID = sessionIDFromEventProperties(event.properties);
+          if (!sessionID) return;
+
+          // Sub-agents don't need post-compaction processing
+          if (await isSubAgent(sessionID)) return;
+
+          // Parse latest compaction summary for memory candidates, stage them into
+          // durable pending journal, then promote pending memories.
+          const summary = await latestCompactionSummary(client, sessionID);
+          const candidates = summary ? parseWorkspaceMemoryCandidates(summary) : [];
+          if (candidates.length > 0) {
+            await appendPendingMemories(directory, candidates);
+          }
+
           await promotePendingMemories(sessionID, { includeUnownedJournal: true });
-        } catch {
+        } catch (error) {
           // Keep pending memories in session/journal for retry on next event/session.
+          warnMemoryHook("event.session.compacted", error);
         }
       }
 
       if (event.type === "session.deleted") {
-        const sessionID = sessionIDFromEventProperties(event.properties);
-        if (sessionID) {
+        try {
+          const sessionID = sessionIDFromEventProperties(event.properties);
+          if (sessionID) {
           // Promote pending memories before deleting per-session state.
           // If promotion fails, leave session state and journal intact.
-          let promoted = false;
-          try {
+            let promoted = false;
             await promotePendingMemories(sessionID, { includeOwnedJournal: true, includeUnownedJournal: false });
             promoted = true;
-          } catch {
-            return;
-          } finally {
             if (promoted) {
               frozenWorkspaceMemoryCache.delete(sessionID);
               processedUserMessages.delete(sessionID);
               sessionParentCache.delete(sessionID);
             }
-          }
 
-          await rm(await sessionStatePath(directory, sessionID), { force: true });
+            await rm(await sessionStatePath(directory, sessionID), { force: true });
+          }
+        } catch (error) {
+          warnMemoryHook("event.session.deleted", error);
         }
       }
     },

@@ -96,7 +96,7 @@ Retention monitoring:
 ### Validation
 
 - `npm run typecheck`
-- `npm test` — 237 tests passing
+- `npm test` — 242 tests passing
 - `bun scripts/memory-diag.ts health`
 
 ---
