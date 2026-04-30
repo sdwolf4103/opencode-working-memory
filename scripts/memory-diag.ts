@@ -12,7 +12,13 @@ import { dataHome, extractionRejectionLogPath, migrationLogPath, workspaceKey, w
 import { assessMemoryQuality, HARD_QUALITY_REASONS } from "../src/memory-quality.ts";
 import { redactCredentials } from "../src/redaction.ts";
 import { scanWorkspaceResidues } from "../src/workspace-cleanup.ts";
-import { calculateRetentionStrength, renderWorkspaceMemory } from "../src/workspace-memory.ts";
+import { renderWorkspaceMemory } from "../src/workspace-memory.ts";
+import {
+  DORMANT_DECAY_MULTIPLIER,
+  RETENTION_TYPE_MAX,
+  WORKSPACE_DORMANT_AFTER_DAYS,
+  calculateRetentionStrength,
+} from "../src/retention.ts";
 import type { LongTermMemoryEntry, LongTermSource, LongTermType, PendingMemoryJournalStore, WorkspaceMemoryStore } from "../src/types.ts";
 import { LONG_TERM_LIMITS, PROMOTION_RETRY_LIMITS } from "../src/types.ts";
 
@@ -65,14 +71,6 @@ type MigrationLogRecord = {
 };
 
 const TYPES: LongTermType[] = ["feedback", "decision", "project", "reference"];
-const TYPE_MAX_FOR_DIAG: Record<LongTermType, number> = {
-  feedback: 10,
-  decision: 10,
-  project: 8,
-  reference: 6,
-};
-const WORKSPACE_DORMANT_AFTER_DAYS_FOR_DIAG = 14;
-const DORMANT_DECAY_MULTIPLIER_FOR_DIAG = 0.25;
 const SUSPICIOUS_REASONS = [
   "progress_snapshot",
   "active_file_snapshot",
@@ -280,7 +278,7 @@ function retentionCandidatesForDiag(store: WorkspaceMemoryStore): {
 
   for (const item of sorted) {
     const count = typeCounts[item.entry.type] ?? 0;
-    const max = TYPE_MAX_FOR_DIAG[item.entry.type] ?? Infinity;
+    const max = RETENTION_TYPE_MAX[item.entry.type] ?? Infinity;
     if (count >= max) {
       typeCapped.push(item);
       continue;
@@ -430,7 +428,7 @@ async function printWorkspaceHealth(input: {
     const storedCount = active.filter(entry => entry.type === type).length;
     const renderedCount = renderedEntries.filter(entry => entry.type === type).length;
     const supersededCount = superseded.filter(entry => entry.type === type).length;
-    console.log(`  ${type.padEnd(9)} stored=${String(storedCount).padEnd(3)} rendered=${String(renderedCount).padEnd(3)} typeCap=${TYPE_MAX_FOR_DIAG[type]} superseded=${supersededCount}`);
+    console.log(`  ${type.padEnd(9)} stored=${String(storedCount).padEnd(3)} rendered=${String(renderedCount).padEnd(3)} typeCap=${RETENTION_TYPE_MAX[type]} superseded=${supersededCount}`);
   }
   console.log("");
 
@@ -452,16 +450,16 @@ async function printWorkspaceHealth(input: {
   console.log("");
 
   const wallDaysSinceActivity = daysSinceIso(store.lastActivityAt);
-  const dormantDiscountActive = wallDaysSinceActivity !== null && wallDaysSinceActivity > WORKSPACE_DORMANT_AFTER_DAYS_FOR_DIAG;
+  const dormantDiscountActive = wallDaysSinceActivity !== null && wallDaysSinceActivity > WORKSPACE_DORMANT_AFTER_DAYS;
   const dormantDaysPastGrace = wallDaysSinceActivity === null
     ? 0
-    : Math.max(0, wallDaysSinceActivity - WORKSPACE_DORMANT_AFTER_DAYS_FOR_DIAG);
+    : Math.max(0, wallDaysSinceActivity - WORKSPACE_DORMANT_AFTER_DAYS);
   console.log("Dormancy:");
   console.log(`  lastActivityAt: ${store.lastActivityAt ?? "(missing)"}`);
   console.log(`  wall days since activity: ${wallDaysSinceActivity === null ? "unknown" : wallDaysSinceActivity.toFixed(1)}`);
   console.log(`  dormant discount active: ${dormantDiscountActive ? "yes" : "no"}`);
   console.log(`  dormant days past grace: ${dormantDaysPastGrace.toFixed(1)}`);
-  console.log(`  dormant multiplier: ${DORMANT_DECAY_MULTIPLIER_FOR_DIAG}`);
+  console.log(`  dormant multiplier: ${DORMANT_DECAY_MULTIPLIER}`);
   console.log("");
 
   const highImportanceCount = active.filter(entry => entry.userImportance === "high").length;
