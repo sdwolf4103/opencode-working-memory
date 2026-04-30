@@ -11,7 +11,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Strength-based workspace memory retention using exponential decay instead of additive priority scoring.
 - Per-type rendered caps for workspace memory candidates: feedback 10, decision 10, project 8, and reference 6.
-- Safety-critical memory weighting and type-cap exemption so important entries survive type floods while still competing under the global rendered cap.
 - Dormant-workspace effective age: after 14 days without activity, additional dormant time counts at 0.25x for retention decay.
 - Reinforcement tracking for repeated memories, with same-session and one-hour guards to prevent accidental reinforcement spam.
 - Memory health diagnostics for stored vs rendered counts, type caps, global cap overflow, dormancy, retention monitoring, and strength-ranked top/weakest entries.
@@ -21,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Workspace memory rendering now ranks entries by retention strength, not the previous priority/penalty model.
 - Confidence is retained for compatibility but no longer affects retention scoring.
+- Deprecated `safetyCritical` is retained for JSON compatibility but no longer affects retention strength or type-cap behavior.
 - Old or stale-marked memories are no longer hard-pruned; they remain stored and only fall out of rendered context through strength and cap competition.
 - Existing duplicate promotion and dedupe paths now reinforce the surviving memory instead of only absorbing the duplicate.
 - Health output now separates stored active memories from rendered candidates to make cap behavior easier to understand.

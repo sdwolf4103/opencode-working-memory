@@ -40,8 +40,6 @@ const USER_IMPORTANCE_FACTOR = {
   high: 1.5,
 } as const;
 
-const SAFETY_CRITICAL_FACTOR = 6.0;
-
 const TYPE_MAX = {
   feedback: 10,
   decision: 10,
@@ -53,9 +51,8 @@ export function calculateInitialStrength(memory: LongTermMemoryEntry): number {
   const typeFactor = TYPE_FACTOR[memory.type] ?? 1.0;
   const sourceFactor = SOURCE_FACTOR[memory.source] ?? 1.0;
   const importanceFactor = USER_IMPORTANCE_FACTOR[memory.userImportance ?? "normal"] ?? 1.0;
-  const safetyFactor = memory.safetyCritical ? SAFETY_CRITICAL_FACTOR : 1.0;
 
-  return typeFactor * sourceFactor * importanceFactor * safetyFactor;
+  return typeFactor * sourceFactor * importanceFactor;
 }
 
 export function calculateEffectiveHalfLife(memory: LongTermMemoryEntry): number {
@@ -660,11 +657,6 @@ function applyTypeMaxCaps(entries: LongTermMemoryEntry[]): LongTermMemoryEntry[]
   const typeCounts: Partial<Record<LongTermMemoryEntry["type"], number>> = {};
 
   for (const entry of entries) {
-    if (entry.safetyCritical) {
-      capped.push(entry);
-      continue;
-    }
-
     const count = typeCounts[entry.type] ?? 0;
     const max = TYPE_MAX[entry.type] ?? Infinity;
     if (count >= max) continue;

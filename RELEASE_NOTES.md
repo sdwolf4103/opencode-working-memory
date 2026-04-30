@@ -6,7 +6,7 @@
 
 This release changes workspace memory retention from hard stale pruning and additive priority scoring to a strength-based decay model.
 
-Think of it like a forgetting curve: memories fade over time, but important, reinforced, and safety-critical memories decay slower. Weak entries fall out of rendered prompt context by cap competition, not hard deletion.
+Think of it like a forgetting curve: memories fade over time, but important and reinforced memories decay slower. Weak entries fall out of rendered prompt context by cap competition, not hard deletion.
 
 > **Memory should fade, so the agent can keep learning.**
 > Important memories decay slower, but every memory must leave room for newer project reality and avoid long-term memory pollution.
@@ -27,10 +27,10 @@ Think of it like a forgetting curve: memories fade over time, but important, rei
 ### What Changed
 
 - **Strength-based retention**: workspace memory now uses exponential decay: initial strength × age decay.
-- **Better initial strength**: type, source, user importance, and safety-critical status now determine how strong a memory starts.
+- **Better initial strength**: type, source, and user importance now determine how strong a memory starts.
 - **No confidence scoring**: confidence remains in stored data for compatibility, but it no longer affects retention ranking.
 - **Type caps**: rendered workspace memory now caps feedback, decisions, project facts, and references separately so one type cannot monopolize all 28 slots.
-- **Safety-critical protection**: safety-critical entries get stronger retention and are exempt from per-type caps, while still competing under the global rendered cap.
+- **Deprecation:** `safetyCritical` field no longer affects retention strength or type-cap bypass. All system memories now fade according to the same rules. Safety rules belong in user-controlled `agent.md` files, not in system memory.
 - **Dormant-aware age**: after 14 inactive days, additional dormant workspace time counts at 0.25x so paused projects do not forget too aggressively.
 - **Reinforcement**: repeated matching memories reinforce the survivor and slow future decay, with same-session and one-hour guards to avoid accidental spam.
 - **No hard stale pruning**: old or stale-marked memories are no longer automatically dropped by age; they lose rendered space only through cap competition.

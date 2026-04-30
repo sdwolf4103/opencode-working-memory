@@ -109,14 +109,14 @@ Retention then decides which active memories are rendered into prompt context. I
 strength = initialStrength * 2 ** (-effectiveAgeDays / effectiveHalfLifeDays)
 ```
 
-Initial strength is based on memory type, source, optional user importance, and safety-critical status. Confidence remains stored for compatibility but is not part of retention scoring.
+Initial strength is based on memory type, source, and optional user importance. Confidence remains stored for compatibility but is not part of retention scoring.
 
 Rendered candidates are selected in this order:
 
 1. Exclude `status: "superseded"` entries.
 2. Compute current retention strength.
 3. Sort by strength descending.
-4. Apply per-type caps, with safety-critical entries exempt from type caps.
+4. Apply per-type caps.
 5. Keep the top 28 rendered entries under the workspace memory character budget.
 
 Default type caps:
@@ -131,6 +131,10 @@ Default type caps:
 The type-cap total is 34, intentionally above the global 28-entry cap. These are maximums, not quotas.
 
 Dormant workspaces age more slowly: after 14 inactive days, additional dormant time counts at 0.25x for retention decay. Repeated duplicate memories reinforce the surviving entry and slow future decay, but same-session and under-one-hour repeats do not stack reinforcement.
+
+### Safety-Critical Deprecation
+
+The `safetyCritical` field on `LongTermMemoryEntry` is deprecated as of the retention v1.5.1 model update. It no longer affects retention strength or type-cap bypass. The field is preserved in the type definition for backward compatibility with existing workspace memory JSON files, but has no active behavior. Safety rules should be maintained in user-controlled files such as `agent.md` rather than in system memory.
 
 ### System Prompt Injection
 
