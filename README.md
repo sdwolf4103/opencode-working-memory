@@ -209,6 +209,22 @@ npm run cleanup:workspaces -- --quarantine
 
 The cleanup command only quarantines definite temp/test workspace residues by default. It does not delete unknown missing-root workspaces.
 
+### Local Inspection CLI
+
+Maintainers can run read-only inspection surfaces without telemetry or mutation. Human output redacts absolute paths and credentials by default; pass `--raw` only when you intentionally need local paths.
+
+```bash
+bun scripts/memory-diag.ts quality --workspace /path/to/repo
+bun scripts/memory-diag.ts coverage --workspace /path/to/repo --include-historical
+bun scripts/memory-diag.ts disappearances --workspace /path/to/repo --explain
+bun scripts/memory-diag.ts rejections --quality --reason bad_decision --unique
+```
+
+- `quality` summarizes store caps, retention clocks, evidence coverage, disappearances, and rejection scoping.
+- `coverage` classifies per-memory evidence lifecycle coverage, optionally including historical evidence-only memory IDs.
+- `disappearances --explain` reports evidence memory IDs absent from the current store with terminal capacity, promotion, supersession, or render-omission context when available.
+- `rejections --quality` groups rejection records by scope, reason distribution, and heuristic possible false-positive buckets.
+
 ## Configuration
 
 OpenCode Working Memory works out of the box.

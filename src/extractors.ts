@@ -322,6 +322,13 @@ type ExtractionRejectionLogEntry = {
   text: string;
   reasons: string[];
   source: "compaction";
+  workspaceKey?: string;
+  workspaceRootHash?: string;
+};
+
+type WorkspaceMemoryCandidateParseOptions = {
+  workspaceKey?: string;
+  workspaceRootHash?: string;
 };
 
 async function logExtractionRejection(entry: ExtractionRejectionLogEntry): Promise<void> {
@@ -341,7 +348,7 @@ function evaluateWorkspaceMemoryCandidate(
   },
   options: {
     fromMemoryTrigger?: boolean;
-  } = {},
+  } & WorkspaceMemoryCandidateParseOptions = {},
 ): { accepted: boolean; reasons: string[] } {
   const text = entry.text.trim();
   const minLength = options.fromMemoryTrigger ? 6 : 20;
@@ -367,6 +374,8 @@ function evaluateWorkspaceMemoryCandidate(
       text: redactCredentials(text),
       reasons: quality.reasons,
       source: "compaction",
+      workspaceKey: options.workspaceKey,
+      workspaceRootHash: options.workspaceRootHash,
     });
     return { accepted: false, reasons: quality.reasons };
   }
@@ -381,7 +390,7 @@ function shouldAcceptWorkspaceMemoryCandidate(
   },
   options: {
     fromMemoryTrigger?: boolean;
-  } = {},
+  } & WorkspaceMemoryCandidateParseOptions = {},
 ): boolean {
   return evaluateWorkspaceMemoryCandidate(entry, options).accepted;
 }
@@ -410,11 +419,17 @@ function extractCandidateBlock(summary: string): string | null {
   return null;
 }
 
-export function parseWorkspaceMemoryCandidates(summary: string): LongTermMemoryEntry[] {
-  return parseWorkspaceMemoryCandidatesWithEvidence(summary).entries;
+export function parseWorkspaceMemoryCandidates(
+  summary: string,
+  options?: WorkspaceMemoryCandidateParseOptions,
+): LongTermMemoryEntry[] {
+  return parseWorkspaceMemoryCandidatesWithEvidence(summary, options).entries;
 }
 
-export function parseWorkspaceMemoryCandidatesWithEvidence(summary: string): WorkspaceMemoryParseResult {
+export function parseWorkspaceMemoryCandidatesWithEvidence(
+  summary: string,
+  options: WorkspaceMemoryCandidateParseOptions = {},
+): WorkspaceMemoryParseResult {
   const block = extractCandidateBlock(summary);
   if (!block) return { entries: [], evidence: [] };
 
@@ -459,7 +474,11 @@ export function parseWorkspaceMemoryCandidatesWithEvidence(summary: string): Wor
     // Apply quality gate
     const quality = evaluateWorkspaceMemoryCandidate(
       { type, text: normalizedBody.text },
-      { fromMemoryTrigger: normalizedBody.hadTrigger },
+      {
+        fromMemoryTrigger: normalizedBody.hadTrigger,
+        workspaceKey: options.workspaceKey,
+        workspaceRootHash: options.workspaceRootHash,
+      },
     );
     if (!quality.accepted) {
       evidence.push(extractionEvidence({

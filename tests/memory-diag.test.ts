@@ -9,7 +9,7 @@ import { promisify } from "node:util";
 import { appendEvidenceEvents, type EvidenceEventInput } from "../src/evidence-log.ts";
 import type { LongTermMemoryEntry, WorkspaceMemoryStore } from "../src/types.ts";
 import { LONG_TERM_LIMITS, PROMOTION_RETRY_LIMITS, type PendingMemoryJournalStore } from "../src/types.ts";
-import { workspaceKey, workspaceMemoryPath, workspacePendingJournalPath } from "../src/paths.ts";
+import { extractionRejectionLogPath, workspaceKey, workspaceMemoryPath, workspacePendingJournalPath } from "../src/paths.ts";
 
 const execFileAsync = promisify(execFile);
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -71,6 +71,12 @@ async function writePendingJournal(root: string, entries: LongTermMemoryEntry[])
   };
   await mkdir(dirname(path), { recursive: true });
   await writeFile(path, JSON.stringify(store, null, 2), "utf8");
+}
+
+async function writeRejectionRecords(records: unknown[]): Promise<void> {
+  const path = extractionRejectionLogPath();
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, records.map(record => JSON.stringify(record)).join("\n") + "\n", "utf8");
 }
 
 function evidence(overrides: Partial<EvidenceEventInput>): EvidenceEventInput {
@@ -306,6 +312,211 @@ test("memory-diag trace requires --memory and reports unknown IDs", async () => 
     const stdout = await runMemoryDiag(["trace", "--workspace", root, "--memory", "missing-memory"]);
     assert.match(stdout, /Memory missing-memory: unknown/);
     assert.match(stdout, /Lifecycle:\n\(none\)/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+async function setupQualityFixture(): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), "opencode-memory-diag-quality-"));
+  const key = await workspaceKey(root);
+  const now = new Date().toISOString();
+  const entries = Array.from({ length: LONG_TERM_LIMITS.maxEntries }, (_, i) => ({
+    ...entry(`quality-${i}`, `Quality fixture memory ${i}`, i % 2 === 0 ? "feedback" as const : "decision" as const),
+    retentionClock: i === 0 ? -1 : Date.now(),
+  }));
+  await writeWorkspaceStore(root, entries);
+  await appendEvidenceEvents(root, [
+    evidence({ type: "promotion_promoted", phase: "promotion", outcome: "promoted", memory: { memoryId: "quality-1", type: "decision", source: "compaction" }, reasonCodes: ["new_workspace_entry"] }),
+    evidence({ type: "promotion_promoted", phase: "promotion", outcome: "promoted", memory: { memoryId: "quality-historical", type: "reference", source: "compaction" }, reasonCodes: ["new_workspace_entry"] }),
+  ]);
+  await writeRejectionRecords([
+    { timestamp: now, workspaceKey: key, workspaceRootHash: "hash", type: "decision", source: "compaction", text: "Implemented phase 2 and updated tests", reasons: ["bad_decision"] },
+    { timestamp: now, type: "feedback", source: "compaction", text: "Wave 1 completed successfully", reasons: ["progress_snapshot", "bad_feedback"] },
+  ]);
+  return root;
+}
+
+test("quality human output includes summary and aggregate inspection counts", async () => {
+  const root = await setupQualityFixture();
+  try {
+    const stdout = await runMemoryDiag(["quality", "--workspace", root]);
+
+    assert.match(stdout, /Memory quality inspection/);
+    assert.match(stdout, /Summary: Workspace memory quality is degraded:/);
+    assert.match(stdout, /Caps:\n\s+active: 28 \/ 28/);
+    assert.match(stdout, /decision: 14 \/ 10 FULL/);
+    assert.match(stdout, /feedback: 14 \/ 10 FULL/);
+    assert.match(stdout, /Retention clocks:\n\s+present: 27\n\s+missing: 0\n\s+invalid: 1/);
+    assert.match(stdout, /Evidence:\n\s+current with evidence: 1\n\s+current without evidence: 27/);
+    assert.match(stdout, /Rejection scoping:\n\s+total records: 2\n\s+workspace scoped: 1\n\s+legacy unscoped: 1/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("quality --json includes summaryText, caps, retention, evidence, and rejections", async () => {
+  const root = await setupQualityFixture();
+  try {
+    const stdout = await runMemoryDiag(["quality", "--workspace", root, "--json"]);
+    const parsed = JSON.parse(stdout) as {
+      summaryText: string;
+      caps: { active: number; capsFull: boolean };
+      retention: { invalid: number };
+      evidence: { currentWithEvidence: number; unknownDisappearances: number };
+      rejections: { workspaceScopedCount: number; legacyUnscopedCount: number };
+    };
+
+    assert.match(parsed.summaryText, /Workspace memory quality is degraded/);
+    assert.equal(parsed.caps.active, LONG_TERM_LIMITS.maxEntries);
+    assert.equal(parsed.caps.capsFull, true);
+    assert.equal(parsed.retention.invalid, 1);
+    assert.equal(parsed.evidence.currentWithEvidence, 1);
+    assert.equal(parsed.evidence.unknownDisappearances, 1);
+    assert.equal(parsed.rejections.workspaceScopedCount, 1);
+    assert.equal(parsed.rejections.legacyUnscopedCount, 1);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("coverage human output includes class counts and per-memory rows", async () => {
+  const root = await mkdtemp(join(tmpdir(), "opencode-memory-diag-coverage-"));
+  try {
+    await writeWorkspaceStore(root, [
+      entry("mem-full", "Full lifecycle memory", "feedback"),
+      entry("mem-render-only", "Render only memory", "decision"),
+      entry("mem-no-evidence", "No evidence memory", "project"),
+    ]);
+    await appendEvidenceEvents(root, [
+      evidence({ type: "extraction_candidate_accepted", phase: "extraction", outcome: "accepted", memory: { memoryId: "mem-full", type: "feedback", source: "compaction" }, reasonCodes: ["quality_gate_passed"] }),
+      evidence({ type: "promotion_promoted", phase: "promotion", outcome: "promoted", memory: { memoryId: "mem-full", type: "feedback", source: "compaction" }, reasonCodes: ["new_workspace_entry"] }),
+      evidence({ type: "render_selected", phase: "render", outcome: "rendered", memory: { memoryId: "mem-render-only", type: "decision", source: "compaction" }, reasonCodes: ["within_caps"] }),
+    ]);
+
+    const stdout = await runMemoryDiag(["coverage", "--workspace", root]);
+
+    assert.match(stdout, /Class counts:/);
+    assert.match(stdout, /full_lifecycle: 1/);
+    assert.match(stdout, /render_only: 1/);
+    assert.match(stdout, /no_evidence: 1/);
+    assert.match(stdout, /Per-memory rows:/);
+    assert.match(stdout, /mem-full full_lifecycle .*extraction=1 promotion=1/);
+    assert.match(stdout, /mem-render-only render_only .*render=1/);
+    assert.match(stdout, /mem-no-evidence no_evidence .*total=0/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("coverage --json includes event counts", async () => {
+  const root = await mkdtemp(join(tmpdir(), "opencode-memory-diag-coverage-json-"));
+  try {
+    await writeWorkspaceStore(root, [entry("mem-full", "Full lifecycle memory", "feedback")]);
+    await appendEvidenceEvents(root, [
+      evidence({ type: "promotion_promoted", phase: "promotion", outcome: "promoted", memory: { memoryId: "mem-full", type: "feedback", source: "compaction" }, reasonCodes: ["new_workspace_entry"] }),
+    ]);
+
+    const stdout = await runMemoryDiag(["coverage", "--workspace", root, "--json"]);
+    const parsed = JSON.parse(stdout) as { memories: Array<{ id: string; eventCounts: { total: number; byType: Record<string, number> } }> };
+    const row = parsed.memories.find(memory => memory.id === "mem-full");
+
+    assert.equal(row?.eventCounts.total, 1);
+    assert.equal(row?.eventCounts.byType.promotion_promoted, 1);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("disappearances labels historical evidence-only memory unknown without terminal event", async () => {
+  const root = await mkdtemp(join(tmpdir(), "opencode-memory-diag-disappear-"));
+  try {
+    await writeWorkspaceStore(root, [entry("current", "Current memory", "feedback")]);
+    await appendEvidenceEvents(root, [
+      evidence({ type: "promotion_promoted", phase: "promotion", outcome: "promoted", memory: { memoryId: "historical-unknown", type: "decision", source: "compaction" }, reasonCodes: ["new_workspace_entry"] }),
+    ]);
+
+    const stdout = await runMemoryDiag(["disappearances", "--workspace", root]);
+
+    assert.match(stdout, /Memory historical-unknown: historical_absent_unknown_reason terminal=unknown/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("disappearances --explain shows capacity details and render omitted type-cap observations", async () => {
+  const root = await mkdtemp(join(tmpdir(), "opencode-memory-diag-disappear-explain-"));
+  try {
+    await writeWorkspaceStore(root, [entry("current", "Current memory", "feedback")]);
+    await appendEvidenceEvents(root, [
+      evidence({
+        type: "memory_removed_capacity",
+        phase: "storage",
+        outcome: "removed",
+        memory: { memoryId: "capacity-loser", type: "decision", source: "compaction", status: "active" },
+        relations: [{ role: "removed", memory: { memoryId: "capacity-loser", type: "decision", source: "compaction", status: "active" } }],
+        reasonCodes: ["type_cap"],
+        details: { type: "decision", globalCap: 28, typeCap: 10, source: "compaction" },
+      }),
+      evidence({ type: "render_omitted", phase: "render", outcome: "omitted", memory: { memoryId: "render-loser", type: "feedback", source: "compaction" }, reasonCodes: ["type_cap"] }),
+    ]);
+
+    const stdout = await runMemoryDiag(["disappearances", "--workspace", root, "--explain"]);
+
+    assert.match(stdout, /capacity-loser: historical_absent_with_reason terminal=memory_removed_capacity reasons=type_cap/);
+    assert.match(stdout, /memory_removed_capacity details: .*globalCap=28 .*typeCap=10/);
+    assert.match(stdout, /render-loser: historical_absent_with_reason terminal=render_omitted reasons=type_cap/);
+    assert.match(stdout, /render_omitted type-cap observation: reasons=type_cap/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("rejections --quality --reason bad_decision --unique groups architecture-like samples heuristically", async () => {
+  const root = await mkdtemp(join(tmpdir(), "opencode-memory-diag-rejections-quality-"));
+  try {
+    const key = await workspaceKey(root);
+    const now = new Date().toISOString();
+    await writeRejectionRecords([
+      { timestamp: now, workspaceKey: key, type: "decision", source: "compaction", text: "Retention scoring model uses evidence caps to avoid normalization drift", reasons: ["bad_decision"] },
+      { timestamp: now, workspaceKey: key, type: "decision", source: "compaction", text: "Implemented phase 2 and updated tests", reasons: ["bad_decision"] },
+      { timestamp: now, type: "decision", source: "compaction", text: "Maybe useful", reasons: ["bad_decision"] },
+    ]);
+
+    const stdout = await runMemoryDiag(["rejections", "--quality", "--workspace", root, "--reason", "bad_decision", "--unique"]);
+
+    assert.match(stdout, /Possible false-positive grouping is heuristic, not deterministic truth/);
+    assert.match(stdout, /architecture_like_possible_false_positive: 1/);
+    assert.match(stdout, /clearly_garbage: 1/);
+    assert.match(stdout, /ambiguous: 1/);
+    assert.doesNotMatch(stdout, /deterministic truth\s*:/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("rejections --quality --json includes scoping, unique reasons, and possible false-positive groups", async () => {
+  const root = await mkdtemp(join(tmpdir(), "opencode-memory-diag-rejections-json-"));
+  try {
+    const key = await workspaceKey(root);
+    const now = new Date().toISOString();
+    await writeRejectionRecords([
+      { timestamp: now, workspaceKey: key, workspaceRootHash: "hash", type: "decision", source: "compaction", text: "Memory system schema boundary should remain stable", reasons: ["bad_decision"] },
+      { timestamp: now, type: "feedback", source: "compaction", text: "Wave 1 completed successfully", reasons: ["progress_snapshot", "bad_feedback"] },
+    ]);
+
+    const stdout = await runMemoryDiag(["rejections", "--quality", "--workspace", root, "--json"]);
+    const parsed = JSON.parse(stdout) as {
+      workspaceScopedCount: number;
+      legacyUnscopedCount: number;
+      uniqueReasonDistribution: Record<string, number>;
+      possibleFalsePositiveGroups: Record<string, { count: number }>;
+    };
+
+    assert.equal(parsed.workspaceScopedCount, 1);
+    assert.equal(parsed.legacyUnscopedCount, 1);
+    assert.equal(parsed.uniqueReasonDistribution.bad_decision, 1);
+    assert.equal(parsed.possibleFalsePositiveGroups.architecture_like_possible_false_positive.count, 1);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

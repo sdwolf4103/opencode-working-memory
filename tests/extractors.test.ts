@@ -387,6 +387,36 @@ Memory candidates:
   }
 });
 
+test("new rejection records include workspaceKey and workspaceRootHash when provided", async () => {
+  const dataHome = await mkdtemp(join(tmpdir(), "wm-extraction-scope-data-"));
+  const previousXdgDataHome = process.env.XDG_DATA_HOME;
+  process.env.XDG_DATA_HOME = dataHome;
+
+  try {
+    const summary = `
+Memory candidates:
+- feedback Wave 1 completed successfully and all tests passed
+`;
+
+    const result = parseWorkspaceMemoryCandidatesWithEvidence(summary, {
+      workspaceKey: "testkey1234567",
+      workspaceRootHash: "abcdef123456",
+    });
+
+    assert.equal(result.entries.length, 0);
+    const logPath = join(dataHome, "opencode-working-memory", "extraction-rejections.jsonl");
+    const lines = (await waitForFile(logPath)).trim().split("\n");
+    assert.equal(lines.length, 1);
+    const event = JSON.parse(lines[0]);
+    assert.equal(event.workspaceKey, "testkey1234567");
+    assert.equal(event.workspaceRootHash, "abcdef123456");
+  } finally {
+    if (previousXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
+    else process.env.XDG_DATA_HOME = previousXdgDataHome;
+    await rm(dataHome, { recursive: true, force: true });
+  }
+});
+
 test("parseWorkspaceMemoryCandidates redacts secrets in extraction rejection log", async () => {
   const dataHome = await mkdtemp(join(tmpdir(), "wm-extraction-redact-data-"));
   const previousXdgDataHome = process.env.XDG_DATA_HOME;

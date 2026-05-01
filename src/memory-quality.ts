@@ -78,13 +78,37 @@ export function isFeedbackQualityViolation(text: string): boolean {
   return true;
 }
 
-export function isDecisionQualityViolation(text: string): boolean {
-  const futureRule = /\b(?:use|keep|prefer|avoid|do not|don't|must|should|never|always|require|choose|reject)\b/i.test(text)
+export function hasFutureRule(text: string): boolean {
+  return /\b(?:use|keep|prefer|avoid|do not|don't|must|should|never|always|require|choose|reject)\b/i.test(text)
     || /(?:使用|保持|避免|不要|必須|必须|應該|应该|選擇|选择)/u.test(text);
-  if (!futureRule) return true;
+}
+
+export function isArchitectureLikeDecision(text: string): boolean {
+  if (/\b(?:[A-Z][A-Z0-9]*_[A-Z0-9_]*|[A-Z][A-Z0-9]{3,})\b/.test(text)) return true;
+  if (/\b(?:schema|model|scoring|retention|cap|evidence|normalization|root cause|architecture(?!\s+keywords?)|boundary|rule|memory system)\b/i.test(text)) return true;
+  if (/(?:模型|架構|架构|证据|證據|規則|规则|邊界|边界|記憶系統|记忆系统|原因|採用|采用)/u.test(text)) return true;
+  return false;
+}
+
+export function isImplementationStatusDecision(text: string): boolean {
   if (/\b(?:implemented|added|updated|fixed|completed|reviewed)\b/i.test(text)) return true;
   if (/\b(?:was|were|has been|had been)\b/i.test(text) && /\b(?:previous|last|latest|this session|this wave|already)\b/i.test(text)) return true;
   return false;
+}
+
+export function isDecisionQualityViolation(text: string): boolean {
+  if (hasFutureRule(text)) {
+    if (isImplementationStatusDecision(text)) return true;
+    return false;
+  }
+
+  if (isArchitectureLikeDecision(text)) {
+    if (isImplementationStatusDecision(text)) return true;
+    if (/\b(?:session|wave|task|test|CI|compatibility|commit)\b/i.test(text)) return true;
+    return false;
+  }
+
+  return true;
 }
 
 function isRawErrorViolation(text: string): boolean {

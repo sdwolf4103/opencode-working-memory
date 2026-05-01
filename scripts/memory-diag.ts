@@ -9,7 +9,7 @@ import { existsSync } from "node:fs";
 import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { dataHome, extractionRejectionLogPath, migrationLogPath, workspaceKey, workspaceMemoryPath, workspacePendingJournalPath } from "../src/paths.ts";
-import { assessMemoryQuality, HARD_QUALITY_REASONS } from "../src/memory-quality.ts";
+import { assessMemoryQuality, HARD_QUALITY_REASONS, isArchitectureLikeDecision } from "../src/memory-quality.ts";
 import { redactCredentials } from "../src/redaction.ts";
 import { scanWorkspaceResidues } from "../src/workspace-cleanup.ts";
 import { accountWorkspaceMemoryRender, renderWorkspaceMemory } from "../src/workspace-memory.ts";
@@ -72,7 +72,7 @@ export type MemoryDiagJSON = {
   }>;
 };
 
-type Command = "health" | "rejections" | "audit" | "explain" | "trace";
+type Command = "health" | "quality" | "coverage" | "disappearances" | "rejections" | "audit" | "explain" | "trace";
 type Origin = "explicit_trigger" | "compaction_candidate" | "manual" | "migration_check" | "unknown";
 
 type CliOptions = {
@@ -82,6 +82,11 @@ type CliOptions = {
   all?: boolean;
   softOnly?: boolean;
   triggerOnly?: boolean;
+  includeHistorical?: boolean;
+  quality?: boolean;
+  reason?: string;
+  unique?: boolean;
+  explain?: boolean;
   since?: string;
   migration?: string;
   memory?: string;
@@ -91,6 +96,7 @@ type RejectionLogRecord = {
   timestamp?: string;
   workspaceKey?: string;
   workspaceRoot?: string;
+  workspaceRootHash?: string;
   type?: LongTermType;
   source?: LongTermSource | string;
   origin?: string;
@@ -102,6 +108,7 @@ type RejectionLogRecord = {
 type NormalizedRejection = Required<Pick<RejectionLogRecord, "timestamp" | "type" | "text" | "reasons">> & {
   workspaceKey?: string;
   workspaceRoot?: string;
+  workspaceRootHash?: string;
   source?: string;
   origin: Origin;
   fromTrigger: boolean;
@@ -142,9 +149,13 @@ const ALLOWED_ORIGINS = new Set<Origin>([
 function usage(): string {
   return `Usage:
   bun scripts/memory-diag.ts health [--workspace <path>] [--all] [--raw] [--json]
+  bun scripts/memory-diag.ts quality [--workspace <path>] [--raw] [--json]
+  bun scripts/memory-diag.ts coverage [--workspace <path>] [--include-historical] [--raw] [--json]
+  bun scripts/memory-diag.ts disappearances [--workspace <path>] [--explain] [--raw] [--json]
+  bun scripts/memory-diag.ts rejections --quality [--workspace <path>] [--reason <reason>] [--unique] [--json] [--raw]
   bun scripts/memory-diag.ts explain [--workspace <path>] [--raw]
   bun scripts/memory-diag.ts trace --memory <id> [--workspace <path>] [--raw]
-  bun scripts/memory-diag.ts rejections [--soft-only] [--trigger-only] [--since 14d] [--raw]
+  bun scripts/memory-diag.ts rejections [--soft-only] [--trigger-only] [--since 14d] [--reason <reason>] [--unique] [--workspace <path>] [--raw]
   bun scripts/memory-diag.ts audit [--migration <id>] [--raw]
 `;
 }
@@ -161,7 +172,7 @@ function parseArgs(argv: string[]): { command: Command; options: CliOptions } {
     console.log(usage());
     process.exit(0);
   }
-  if (command !== "health" && command !== "rejections" && command !== "audit" && command !== "explain" && command !== "trace") {
+  if (command !== "health" && command !== "quality" && command !== "coverage" && command !== "disappearances" && command !== "rejections" && command !== "audit" && command !== "explain" && command !== "trace") {
     die(`Unknown subcommand: ${command}`);
   }
 
@@ -173,6 +184,10 @@ function parseArgs(argv: string[]): { command: Command; options: CliOptions } {
     else if (arg === "--all") options.all = true;
     else if (arg === "--soft-only") options.softOnly = true;
     else if (arg === "--trigger-only") options.triggerOnly = true;
+    else if (arg === "--include-historical") options.includeHistorical = true;
+    else if (arg === "--quality") options.quality = true;
+    else if (arg === "--unique") options.unique = true;
+    else if (arg === "--explain") options.explain = true;
     else if (arg === "--workspace") {
       const value = rest[++i];
       if (!value) die("--workspace requires a path");
@@ -181,6 +196,10 @@ function parseArgs(argv: string[]): { command: Command; options: CliOptions } {
       const value = rest[++i];
       if (!value) die("--since requires a duration or ISO timestamp");
       options.since = value;
+    } else if (arg === "--reason") {
+      const value = rest[++i];
+      if (!value) die("--reason requires a reason code");
+      options.reason = value;
     } else if (arg === "--migration") {
       const value = rest[++i];
       if (!value) die("--migration requires an id");
@@ -199,13 +218,21 @@ function parseArgs(argv: string[]): { command: Command; options: CliOptions } {
     if (options.json && options.all) die("health --json does not support --all");
   } else if (command === "explain" || command === "trace") {
     if (options.all) die(`${command} does not accept --all`);
+  } else if (command === "quality" || command === "coverage" || command === "disappearances" || command === "rejections") {
+    if (options.all) die(`${command} does not accept --all`);
   } else {
     if (options.all || options.workspace) die(`${command} does not accept --all or --workspace`);
   }
-  if (command !== "health" && options.json) die(`${command} does not accept --json`);
+  if (options.json && command !== "health" && command !== "quality" && command !== "coverage" && command !== "disappearances" && !(command === "rejections" && options.quality)) {
+    die(`${command} does not accept --json`);
+  }
   if (command !== "rejections" && (options.softOnly || options.triggerOnly || options.since)) {
     die(`${command} does not accept rejection filters`);
   }
+  if (command !== "coverage" && options.includeHistorical) die(`${command} does not accept --include-historical`);
+  if (command !== "rejections" && (options.quality || options.reason || options.unique)) die(`${command} does not accept rejection quality filters`);
+  if (command !== "disappearances" && options.explain) die(`${command} does not accept --explain`);
+  if (command === "rejections" && options.json && !options.quality) die("rejections --json requires --quality");
   if (command !== "audit" && options.migration) {
     die(`${command} does not accept --migration`);
   }
@@ -414,6 +441,24 @@ type WorkspaceDiagSnapshot = {
   summary: MemoryDiagJSON["summary"];
 };
 
+type MemoryInspectionReadModel = {
+  store: WorkspaceMemoryStore;
+  pending: PendingMemoryJournalStore;
+  evidenceEvents: EvidenceEventV1[];
+  rejectionRecords: NormalizedRejection[];
+  currentById: Map<string, LongTermMemoryEntry>;
+  evidenceByMemoryId: Map<string, EvidenceEventV1[]>;
+};
+
+type CoverageClass = "full_lifecycle" | "render_only" | "no_evidence" | "historical_absent_with_reason" | "historical_absent_unknown_reason";
+
+type DisappearanceReason = {
+  classification: "historical_absent_with_reason" | "historical_absent_unknown_reason";
+  terminalType: EvidenceEventType | "unknown";
+  reasonCodes: string[];
+  event?: EvidenceEventV1;
+};
+
 function uniqueStrings(values: string[]): string[] {
   return [...new Set(values.filter(Boolean))];
 }
@@ -421,6 +466,13 @@ function uniqueStrings(values: string[]): string[] {
 function eventMemoryId(event: EvidenceEventV1): string | undefined {
   return event.memory?.memoryId
     ?? event.relations?.map(relation => relation.memory?.memoryId).find((id): id is string => Boolean(id));
+}
+
+function eventMemoryIds(event: EvidenceEventV1): string[] {
+  return uniqueStrings([
+    event.memory?.memoryId ?? "",
+    ...(event.relations ?? []).map(relation => relation.memory?.memoryId ?? ""),
+  ]);
 }
 
 function isWithinDays(iso: string, days: number): boolean {
@@ -786,6 +838,7 @@ function normalizeRejection(record: RejectionLogRecord): NormalizedRejection | n
     timestamp: record.timestamp ?? "",
     workspaceKey: record.workspaceKey,
     workspaceRoot: record.workspaceRoot,
+    workspaceRootHash: record.workspaceRootHash,
     type: record.type ?? "project",
     source: record.source,
     origin,
@@ -813,11 +866,24 @@ function hasSoftReason(record: NormalizedRejection): boolean {
   return record.reasons.some(reason => !HARD_QUALITY_REASONS.has(reason));
 }
 
-async function runRejections(options: CliOptions): Promise<void> {
+function hasWorkspaceScope(record: NormalizedRejection): boolean {
+  return Boolean(record.workspaceKey || record.workspaceRoot || record.workspaceRootHash);
+}
+
+async function workspaceKeyForOption(options: CliOptions): Promise<string | undefined> {
+  return options.workspace ? workspaceKey(options.workspace) : undefined;
+}
+
+async function loadRejectionRecords(options: CliOptions): Promise<{ path: string; invalidLines: number; records: NormalizedRejection[] }> {
   const path = extractionRejectionLogPath();
   const { records, invalidLines } = await readJSONLFile<RejectionLogRecord>(path);
   const cutoff = sinceCutoff(options.since);
+  const requestedWorkspaceKey = await workspaceKeyForOption(options);
   let normalized = records.map(normalizeRejection).filter((record): record is NormalizedRejection => record !== null);
+
+  if (requestedWorkspaceKey) {
+    normalized = normalized.filter(record => !record.workspaceKey || record.workspaceKey === requestedWorkspaceKey);
+  }
   if (cutoff !== null) {
     normalized = normalized.filter(record => {
       const timestamp = new Date(record.timestamp).getTime();
@@ -826,6 +892,392 @@ async function runRejections(options: CliOptions): Promise<void> {
   }
   if (options.softOnly) normalized = normalized.filter(hasSoftReason);
   if (options.triggerOnly) normalized = normalized.filter(record => record.fromTrigger || record.origin === "explicit_trigger");
+  if (options.reason) normalized = normalized.filter(record => record.reasons.includes(options.reason ?? ""));
+
+  return { path, invalidLines, records: normalized };
+}
+
+function uniqueByCanonicalText(records: NormalizedRejection[]): NormalizedRejection[] {
+  const byText = new Map<string, NormalizedRejection>();
+  for (const record of records) {
+    const key = `${record.type}:${canonicalMemoryText(record.text)}`;
+    if (!byText.has(key)) byText.set(key, record);
+  }
+  return [...byText.values()];
+}
+
+function objectFromCounts<T extends string>(counts: Map<T, number>): Record<string, number> {
+  return Object.fromEntries(sortedCounts(counts));
+}
+
+function groupEvidenceByMemoryId(events: EvidenceEventV1[]): Map<string, EvidenceEventV1[]> {
+  const grouped = new Map<string, EvidenceEventV1[]>();
+  for (const event of events) {
+    for (const id of eventMemoryIds(event)) {
+      const bucket = grouped.get(id) ?? [];
+      bucket.push(event);
+      grouped.set(id, bucket);
+    }
+  }
+  return grouped;
+}
+
+async function buildInspectionReadModel(options: CliOptions): Promise<MemoryInspectionReadModel> {
+  const snapshot = await snapshotForOptions(options);
+  const rejections = await loadRejectionRecords(options);
+  return {
+    store: snapshot.store,
+    pending: snapshot.journal,
+    evidenceEvents: snapshot.allEvents,
+    rejectionRecords: rejections.records,
+    currentById: new Map(snapshot.store.entries.map(entry => [entry.id, entry])),
+    evidenceByMemoryId: groupEvidenceByMemoryId(snapshot.allEvents),
+  };
+}
+
+function terminalDisappearanceReason(events: EvidenceEventV1[]): DisappearanceReason {
+  const terminal = [...events].reverse().find(event =>
+    event.type === "memory_removed_capacity"
+      || event.type === "promotion_absorbed_exact"
+      || event.type === "promotion_absorbed_identity"
+      || event.type === "promotion_superseded"
+  );
+  const renderOmission = [...events].reverse().find(event => event.type === "render_omitted");
+  const event = terminal ?? renderOmission;
+  if (!event) {
+    return { classification: "historical_absent_unknown_reason", terminalType: "unknown", reasonCodes: [] };
+  }
+  return {
+    classification: "historical_absent_with_reason",
+    terminalType: event.type,
+    reasonCodes: event.reasonCodes,
+    event,
+  };
+}
+
+function coverageClassForMemory(id: string, model: MemoryInspectionReadModel): CoverageClass {
+  const events = model.evidenceByMemoryId.get(id) ?? [];
+  if (!model.currentById.has(id)) return terminalDisappearanceReason(events).classification;
+  if (events.length === 0) return "no_evidence";
+  if (events.every(event => event.phase === "render")) return "render_only";
+  return "full_lifecycle";
+}
+
+function eventCounts(events: EvidenceEventV1[]): { total: number; byType: Record<string, number>; byPhase: Record<string, number> } {
+  return {
+    total: events.length,
+    byType: objectFromCounts(countBy(events.map(event => event.type))),
+    byPhase: objectFromCounts(countBy(events.map(event => event.phase))),
+  };
+}
+
+function coverageRows(model: MemoryInspectionReadModel, includeHistorical: boolean): Array<{
+  id: string;
+  class: CoverageClass;
+  current: boolean;
+  type?: LongTermType;
+  eventCounts: ReturnType<typeof eventCounts>;
+}> {
+  const ids = new Set<string>(model.currentById.keys());
+  if (includeHistorical) {
+    for (const id of model.evidenceByMemoryId.keys()) ids.add(id);
+  }
+  return [...ids].sort().map(id => {
+    const entry = model.currentById.get(id);
+    const events = model.evidenceByMemoryId.get(id) ?? [];
+    return {
+      id,
+      class: coverageClassForMemory(id, model),
+      current: Boolean(entry),
+      type: entry?.type ?? events.find(event => event.memory?.memoryId === id)?.memory?.type,
+      eventCounts: eventCounts(events),
+    };
+  });
+}
+
+function disappearanceRows(model: MemoryInspectionReadModel): Array<{
+  id: string;
+  classification: DisappearanceReason["classification"];
+  terminalType: DisappearanceReason["terminalType"];
+  reasonCodes: string[];
+  event?: EvidenceEventV1;
+  events: EvidenceEventV1[];
+}> {
+  const rows = [...model.evidenceByMemoryId.entries()]
+    .filter(([id]) => !model.currentById.has(id))
+    .map(([id, events]) => {
+      const reason = terminalDisappearanceReason(events);
+      return { id, ...reason, events };
+    });
+  return rows.sort((a, b) => a.classification.localeCompare(b.classification) || a.id.localeCompare(b.id));
+}
+
+function formatDetails(details: EvidenceEventV1["details"]): string {
+  if (!details || Object.keys(details).length === 0) return "none";
+  return Object.entries(details).map(([key, value]) => `${key}=${Array.isArray(value) ? value.join("|") : String(value)}`).join(" ");
+}
+
+function retentionClockSummary(entries: LongTermMemoryEntry[]): { present: number; missing: number; invalid: number } {
+  let present = 0;
+  let missing = 0;
+  let invalid = 0;
+  for (const entry of entries) {
+    if (entry.retentionClock === undefined) {
+      missing += 1;
+    } else if (!Number.isFinite(entry.retentionClock) || entry.retentionClock <= 0) {
+      invalid += 1;
+    } else {
+      present += 1;
+    }
+  }
+  return { present, missing, invalid };
+}
+
+function rejectionQualitySummary(records: NormalizedRejection[]): {
+  totalRecords: number;
+  uniqueTexts: number;
+  workspaceScopedCount: number;
+  legacyUnscopedCount: number;
+  reasonDistribution: Record<string, number>;
+  uniqueReasonDistribution: Record<string, number>;
+  possibleFalsePositiveGroups: Record<string, { count: number; samples: string[] }>;
+} {
+  const uniqueRecords = uniqueByCanonicalText(records);
+  const badDecisionUnique = uniqueRecords.filter(record => record.reasons.includes("bad_decision"));
+  const groups: Record<string, { count: number; samples: string[] }> = {
+    architecture_like_possible_false_positive: { count: 0, samples: [] },
+    clearly_garbage: { count: 0, samples: [] },
+    ambiguous: { count: 0, samples: [] },
+  };
+
+  for (const record of badDecisionUnique) {
+    const hardReasons = record.reasons.filter(reason => HARD_QUALITY_REASONS.has(reason));
+    const statusLike = /\b(?:implemented|added|updated|fixed|completed|reviewed|tests?|CI|commit|wave|phase|task|session)\b/i.test(record.text);
+    const group = isArchitectureLikeDecision(record.text) && hardReasons.length === 0 && !statusLike
+      ? "architecture_like_possible_false_positive"
+      : hardReasons.length > 0 || statusLike
+        ? "clearly_garbage"
+        : "ambiguous";
+    groups[group].count += 1;
+    if (groups[group].samples.length < 5) groups[group].samples.push(truncate(cleanText(record.text, false), 120));
+  }
+
+  return {
+    totalRecords: records.length,
+    uniqueTexts: uniqueRecords.length,
+    workspaceScopedCount: records.filter(hasWorkspaceScope).length,
+    legacyUnscopedCount: records.filter(record => !hasWorkspaceScope(record)).length,
+    reasonDistribution: objectFromCounts(countBy(records.flatMap(record => record.reasons))),
+    uniqueReasonDistribution: objectFromCounts(countBy(uniqueRecords.flatMap(record => record.reasons))),
+    possibleFalsePositiveGroups: groups,
+  };
+}
+
+function rejectionFalsePositiveRisk(summary: ReturnType<typeof rejectionQualitySummary>): "low" | "high" {
+  const possible = summary.possibleFalsePositiveGroups.architecture_like_possible_false_positive.count;
+  return possible >= 3 || (summary.uniqueTexts > 0 && possible / summary.uniqueTexts >= 0.5) ? "high" : "low";
+}
+
+async function runCoverage(options: CliOptions): Promise<void> {
+  const model = await buildInspectionReadModel(options);
+  const rows = coverageRows(model, options.includeHistorical === true);
+  const classCounts = objectFromCounts(countBy(rows.map(row => row.class)));
+
+  if (options.json) {
+    console.log(JSON.stringify({
+      version: 1,
+      generatedAt: new Date().toISOString(),
+      classCounts,
+      memories: rows,
+    }, null, 2));
+    return;
+  }
+
+  console.log("Memory evidence coverage");
+  console.log("");
+  console.log("Class counts:");
+  for (const cls of ["full_lifecycle", "render_only", "no_evidence", "historical_absent_with_reason", "historical_absent_unknown_reason"] as CoverageClass[]) {
+    console.log(`  ${cls}: ${classCounts[cls] ?? 0}`);
+  }
+  console.log("");
+  console.log("Per-memory rows:");
+  if (rows.length === 0) console.log("  (none)");
+  for (const row of rows) {
+    const phases = row.eventCounts.byPhase;
+    console.log(`  ${row.id} ${row.class} current=${row.current ? "yes" : "no"} total=${row.eventCounts.total} extraction=${phases.extraction ?? 0} promotion=${phases.promotion ?? 0} render=${phases.render ?? 0} storage=${phases.storage ?? 0}`);
+  }
+}
+
+async function runDisappearances(options: CliOptions): Promise<void> {
+  const model = await buildInspectionReadModel(options);
+  const rows = disappearanceRows(model);
+
+  if (options.json) {
+    console.log(JSON.stringify({
+      version: 1,
+      generatedAt: new Date().toISOString(),
+      disappearances: rows.map(row => ({
+        id: row.id,
+        classification: row.classification,
+        terminalType: row.terminalType,
+        reasonCodes: row.reasonCodes,
+        eventCounts: eventCounts(row.events),
+        details: options.explain ? row.event?.details : undefined,
+      })),
+    }, null, 2));
+    return;
+  }
+
+  console.log("Memory disappearances");
+  console.log("");
+  if (rows.length === 0) {
+    console.log("No evidence-only memories found.");
+    return;
+  }
+  for (const row of rows) {
+    const reasons = row.reasonCodes.length > 0 ? row.reasonCodes.join(",") : "none";
+    console.log(`Memory ${row.id}: ${row.classification} terminal=${row.terminalType} reasons=${reasons}`);
+    if (options.explain) {
+      console.log(`  events: ${row.events.map(event => event.type).join(", ")}`);
+      if (row.event?.type === "memory_removed_capacity") {
+        console.log(`  memory_removed_capacity details: ${formatDetails(row.event.details)}`);
+      }
+      const renderTypeCap = row.events.find(event => event.type === "render_omitted" && event.reasonCodes.includes("type_cap"));
+      if (renderTypeCap) {
+        console.log(`  render_omitted type-cap observation: reasons=${renderTypeCap.reasonCodes.join(",")} details=${formatDetails(renderTypeCap.details)}`);
+      }
+    }
+  }
+}
+
+async function runQuality(options: CliOptions): Promise<void> {
+  const model = await buildInspectionReadModel(options);
+  const active = model.store.entries.filter(entry => entry.status !== "superseded");
+  const retention = retentionCandidatesForDiag(model.store);
+  const clocks = retentionClockSummary(active);
+  const disappearances = disappearanceRows(model);
+  const evidenceCovered = active.filter(entry => (model.evidenceByMemoryId.get(entry.id) ?? []).length > 0).length;
+  const rejectionSummary = rejectionQualitySummary(model.rejectionRecords);
+  const falsePositiveRisk = rejectionFalsePositiveRisk(rejectionSummary);
+  const typeCounts = Object.fromEntries(TYPES.map(type => [type, active.filter(entry => entry.type === type).length]));
+  const capsFull = active.length >= model.store.limits.maxEntries || TYPES.some(type => (typeCounts[type] ?? 0) >= RETENTION_TYPE_MAX[type]);
+  const unknownDisappearances = disappearances.filter(row => row.classification === "historical_absent_unknown_reason").length;
+  const status = unknownDisappearances > 0 || clocks.invalid > 0
+    ? "degraded"
+    : capsFull || rejectionSummary.legacyUnscopedCount > 0 || falsePositiveRisk === "high"
+      ? "warning"
+      : "ok";
+  const summaryText = `Summary: Workspace memory quality is ${status}: ${active.length} active memories, ${evidenceCovered}/${active.length} with evidence, ${disappearances.length} evidence-only disappearances (${unknownDisappearances} unknown), ${clocks.invalid} invalid retention clocks, and ${rejectionSummary.legacyUnscopedCount} legacy unscoped rejection records.`;
+  const caps = {
+    active: active.length,
+    maxEntries: model.store.limits.maxEntries,
+    rendered: retention.rendered.length,
+    typeCapped: retention.typeCapped.length,
+    globalCapped: retention.globalCapped.length,
+    typeCounts,
+    capsFull,
+  };
+  const evidence = {
+    currentWithEvidence: evidenceCovered,
+    currentWithoutEvidence: active.length - evidenceCovered,
+    evidenceMemoryIds: model.evidenceByMemoryId.size,
+    disappearances: disappearances.length,
+    unknownDisappearances,
+    withTerminalReason: disappearances.length - unknownDisappearances,
+  };
+
+  if (options.json) {
+    console.log(JSON.stringify({
+      version: 1,
+      generatedAt: new Date().toISOString(),
+      status,
+      summaryText,
+      store: { active: active.length, pending: model.pending.entries.length, superseded: model.store.entries.length - active.length },
+      caps,
+      retention: clocks,
+      evidence,
+      rejections: { ...rejectionSummary, falsePositiveRisk },
+    }, null, 2));
+    return;
+  }
+
+  console.log("Memory quality inspection");
+  console.log("");
+  console.log(summaryText);
+  console.log("");
+  console.log("Caps:");
+  console.log(`  active: ${caps.active} / ${caps.maxEntries}`);
+  for (const type of TYPES) {
+    const count = caps.typeCounts[type] ?? 0;
+    const limit = RETENTION_TYPE_MAX[type];
+    const marker = count >= limit ? " FULL" : "";
+    console.log(`  ${type}: ${count} / ${limit}${marker}`);
+  }
+  console.log(`  rendered: ${caps.rendered}`);
+  console.log(`  type-capped entries: ${caps.typeCapped}`);
+  console.log(`  global-cap overflow: ${caps.globalCapped}`);
+  console.log(`  caps full: ${caps.capsFull ? "yes" : "no"}`);
+  console.log("");
+  console.log("Retention clocks:");
+  console.log(`  present: ${clocks.present}`);
+  console.log(`  missing: ${clocks.missing}`);
+  console.log(`  invalid: ${clocks.invalid}`);
+  console.log("");
+  console.log("Evidence:");
+  console.log(`  current with evidence: ${evidence.currentWithEvidence}`);
+  console.log(`  current without evidence: ${evidence.currentWithoutEvidence}`);
+  console.log(`  evidence memory ids: ${evidence.evidenceMemoryIds}`);
+  console.log(`  disappearances: ${evidence.disappearances}`);
+  console.log(`  unknown disappearances: ${evidence.unknownDisappearances}`);
+  console.log("");
+  console.log("Rejection scoping:");
+  console.log(`  total records: ${rejectionSummary.totalRecords}`);
+  console.log(`  workspace scoped: ${rejectionSummary.workspaceScopedCount}`);
+  console.log(`  legacy unscoped: ${rejectionSummary.legacyUnscopedCount}`);
+  console.log(`  false-positive risk: ${falsePositiveRisk}`);
+}
+
+async function runRejections(options: CliOptions): Promise<void> {
+  const { path, invalidLines, records } = await loadRejectionRecords(options);
+  const normalized = options.unique ? uniqueByCanonicalText(records) : records;
+
+  if (options.quality) {
+    const summary = rejectionQualitySummary(records);
+    if (options.json) {
+      console.log(JSON.stringify({
+        version: 1,
+        generatedAt: new Date().toISOString(),
+        ...summary,
+      }, null, 2));
+      return;
+    }
+
+    console.log("Extraction rejection quality inspection");
+    console.log("");
+    console.log("Possible false-positive grouping is heuristic, not deterministic truth.");
+    console.log(`logPath=${cleanPath(path, options.raw)}`);
+    if (invalidLines > 0) console.log(`Invalid JSONL lines skipped: ${invalidLines}`);
+    console.log("");
+    console.log(`Total records: ${summary.totalRecords}`);
+    console.log(`Unique texts: ${summary.uniqueTexts}`);
+    console.log(`Workspace scoped: ${summary.workspaceScopedCount}`);
+    console.log(`Legacy unscoped: ${summary.legacyUnscopedCount}`);
+    console.log("");
+    console.log("Reason distribution (raw records):");
+    for (const [reason, count] of Object.entries(summary.reasonDistribution)) console.log(`  ${reason.padEnd(36)} ${count}`);
+    if (Object.keys(summary.reasonDistribution).length === 0) console.log("  (none)");
+    console.log("");
+    console.log("Reason distribution (unique text):");
+    for (const [reason, count] of Object.entries(summary.uniqueReasonDistribution)) console.log(`  ${reason.padEnd(36)} ${count}`);
+    if (Object.keys(summary.uniqueReasonDistribution).length === 0) console.log("  (none)");
+    console.log("");
+    console.log("Possible false-positive groups (heuristic, not deterministic):");
+    for (const [group, data] of Object.entries(summary.possibleFalsePositiveGroups)) {
+      console.log(`  ${group}: ${data.count}`);
+      for (const sample of data.samples) console.log(`    - ${JSON.stringify(cleanText(sample, options.raw))}`);
+    }
+    return;
+  }
 
   console.log("Extraction rejection summary");
   console.log("");
@@ -1073,6 +1525,9 @@ async function runTrace(options: CliOptions): Promise<void> {
 const { command, options } = parseArgs(process.argv.slice(2));
 
 if (command === "health") await runHealth(options);
+else if (command === "quality") await runQuality(options);
+else if (command === "coverage") await runCoverage(options);
+else if (command === "disappearances") await runDisappearances(options);
 else if (command === "rejections") await runRejections(options);
 else if (command === "audit") await runAudit(options);
 else if (command === "explain") await runExplain(options);

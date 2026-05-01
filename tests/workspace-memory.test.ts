@@ -1029,6 +1029,143 @@ test("normalizeWorkspaceMemoryWithAccounting redacts credentials before accounti
   assert.equal(result.store.entries[0].text, "Admin PIN 是 [REDACTED]");
 });
 
+test("retentionClock backfill: missing clock becomes createdAt timestamp", async () => {
+  const root = "/repo";
+  const createdAt = "2026-01-02T03:04:05.000Z";
+  const memory = {
+    ...entry("backfill-created", "Use durable createdAt for retention backfill", "decision"),
+    createdAt,
+    updatedAt: "2026-04-01T03:04:05.000Z",
+  };
+  const store: WorkspaceMemoryStore = {
+    version: 1,
+    workspace: { root, key: "abc" },
+    limits: { maxRenderedChars: LONG_TERM_LIMITS.maxRenderedChars, maxEntries: LONG_TERM_LIMITS.maxEntries },
+    migrations: ["2026-04-28-quality-cleanup", "2026-04-26-p0-cleanup"],
+    entries: [memory],
+    updatedAt: createdAt,
+  };
+
+  const result = await normalizeWorkspaceMemoryWithAccounting(root, store);
+
+  assert.equal(result.store.entries[0].retentionClock, new Date(createdAt).getTime());
+});
+
+test("retentionClock backfill: invalid createdAt uses updatedAt", async () => {
+  const root = "/repo";
+  const updatedAt = "2026-02-03T04:05:06.000Z";
+  const memory = {
+    ...entry("backfill-updated", "Use updatedAt only when createdAt is invalid", "decision"),
+    createdAt: "not-a-date",
+    updatedAt,
+  };
+  const store: WorkspaceMemoryStore = {
+    version: 1,
+    workspace: { root, key: "abc" },
+    limits: { maxRenderedChars: LONG_TERM_LIMITS.maxRenderedChars, maxEntries: LONG_TERM_LIMITS.maxEntries },
+    migrations: ["2026-04-28-quality-cleanup", "2026-04-26-p0-cleanup"],
+    entries: [memory],
+    updatedAt,
+  };
+
+  const result = await normalizeWorkspaceMemoryWithAccounting(root, store);
+
+  assert.equal(result.store.entries[0].retentionClock, new Date(updatedAt).getTime());
+});
+
+test("retentionClock backfill: both invalid uses Date.now()", async () => {
+  const root = "/repo";
+  const before = Date.now();
+  const memory = {
+    ...entry("backfill-now", "Use current wall clock when stored timestamps are invalid", "decision"),
+    createdAt: "not-a-date",
+    updatedAt: "also-not-a-date",
+  };
+  const store: WorkspaceMemoryStore = {
+    version: 1,
+    workspace: { root, key: "abc" },
+    limits: { maxRenderedChars: LONG_TERM_LIMITS.maxRenderedChars, maxEntries: LONG_TERM_LIMITS.maxEntries },
+    migrations: ["2026-04-28-quality-cleanup", "2026-04-26-p0-cleanup"],
+    entries: [memory],
+    updatedAt: new Date(before).toISOString(),
+  };
+
+  const result = await normalizeWorkspaceMemoryWithAccounting(root, store);
+  const after = Date.now();
+  const retentionClock = result.store.entries[0].retentionClock;
+
+  assert.equal(typeof retentionClock, "number");
+  assert.ok(Number.isFinite(retentionClock));
+  assert.ok((retentionClock ?? 0) >= before);
+  assert.ok((retentionClock ?? 0) <= after);
+});
+
+test("retentionClock backfill: valid clock is unchanged", async () => {
+  const root = "/repo";
+  const createdAt = "2026-01-02T03:04:05.000Z";
+  const retentionClock = new Date("2025-12-31T00:00:00.000Z").getTime();
+  const memory = {
+    ...entry("backfill-valid", "Preserve existing valid retention clocks", "decision"),
+    createdAt,
+    updatedAt: "2026-04-01T03:04:05.000Z",
+    retentionClock,
+  };
+  const store: WorkspaceMemoryStore = {
+    version: 1,
+    workspace: { root, key: "abc" },
+    limits: { maxRenderedChars: LONG_TERM_LIMITS.maxRenderedChars, maxEntries: LONG_TERM_LIMITS.maxEntries },
+    migrations: ["2026-04-28-quality-cleanup", "2026-04-26-p0-cleanup"],
+    entries: [memory],
+    updatedAt: createdAt,
+  };
+
+  const result = await normalizeWorkspaceMemoryWithAccounting(root, store);
+
+  assert.equal(result.store.entries[0].retentionClock, retentionClock);
+});
+
+test("retentionClock backfill: rendered IDs unchanged before and after", async () => {
+  const root = "/repo";
+  const oldCreatedAt = "2026-01-01T00:00:00.000Z";
+  const newCreatedAt = "2026-02-01T00:00:00.000Z";
+  const entries = [
+    {
+      ...entry("with-clock", "Decision with a pre-existing retention clock", "decision"),
+      createdAt: newCreatedAt,
+      updatedAt: newCreatedAt,
+      retentionClock: new Date(newCreatedAt).getTime(),
+    },
+    {
+      ...entry("missing-clock", "Decision missing a retention clock but with createdAt", "decision"),
+      createdAt: oldCreatedAt,
+      updatedAt: "2026-04-01T00:00:00.000Z",
+    },
+  ];
+  const baseStore: WorkspaceMemoryStore = {
+    version: 1,
+    workspace: { root, key: "abc" },
+    limits: { maxRenderedChars: LONG_TERM_LIMITS.maxRenderedChars, maxEntries: LONG_TERM_LIMITS.maxEntries },
+    migrations: ["2026-04-28-quality-cleanup", "2026-04-26-p0-cleanup"],
+    entries,
+    updatedAt: newCreatedAt,
+  };
+  const prefilledStore: WorkspaceMemoryStore = {
+    ...baseStore,
+    entries: entries.map(memory => ({
+      ...memory,
+      retentionClock: memory.retentionClock ?? new Date(memory.createdAt).getTime(),
+    })),
+  };
+
+  const missingClockResult = await normalizeWorkspaceMemoryWithAccounting(root, baseStore);
+  const prefilledResult = await normalizeWorkspaceMemoryWithAccounting(root, prefilledStore);
+
+  assert.deepEqual(
+    missingClockResult.kept.map(memory => memory.id),
+    prefilledResult.kept.map(memory => memory.id),
+  );
+});
+
 test("normalizeWorkspaceMemoryWithAccounting reports overflow capacity drops", async () => {
   const root = "/repo";
   const now = new Date().toISOString();
@@ -2178,4 +2315,109 @@ test("loadWorkspaceMemory normalizes and persists credentials from legacy unreda
     }
     await rm(sandbox, { recursive: true, force: true });
   }
+});
+
+function decisionEntry(id: string, text: string, timestampMs: number): LongTermMemoryEntry {
+  const timestamp = new Date(timestampMs).toISOString();
+  return {
+    id,
+    type: "decision",
+    text,
+    source: "compaction",
+    confidence: 0.75,
+    status: "active",
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    retentionClock: timestampMs,
+  };
+}
+
+test("enforceLongTermLimitsWithAccounting capacity drops return 3 lower-ranked decisions in dropped", () => {
+  const now = Date.UTC(2026, 4, 1, 6, 24, 0);
+  const thirtyDaysAgo = now - 30 * DAY_MS;
+  const existingDecisions = Array.from({ length: 10 }, (_, i) =>
+    decisionEntry(
+      `existing-decision-${i}`,
+      `Existing durable architecture decision ${i}`,
+      thirtyDaysAgo,
+    )
+  );
+  const newDecisions = Array.from({ length: 3 }, (_, i) =>
+    decisionEntry(
+      `new-decision-${i}`,
+      `Newer durable architecture decision ${i}`,
+      now,
+    )
+  );
+
+  const result = enforceLongTermLimitsWithAccounting([...existingDecisions, ...newDecisions]);
+  const capacityDrops = result.dropped.filter(event => event.reason === "rejected_capacity");
+  const droppedIds = new Set(capacityDrops.map(event => event.memory.id));
+  const capacityEvidence = result.evidence.filter(event => event.type === "memory_removed_capacity");
+
+  assert.equal(capacityDrops.length, 3);
+  assert.equal(capacityEvidence.length, 3);
+  for (const event of capacityEvidence) {
+    assert.equal(event.phase, "storage");
+    assert.equal(event.outcome, "removed");
+    assert.ok(event.memory?.memoryId, "capacity evidence should include removed memory id");
+    assert.ok(event.memory.memoryKeyHash, "capacity evidence should include removed memory key hash");
+    assert.ok(event.memory.identityKeyHash, "capacity evidence should include removed identity key hash");
+    assert.equal(droppedIds.has(event.memory.memoryId), true);
+    assert.ok(event.relations?.[0]?.memory.memoryKeyHash, "removed relation should include memory key hash");
+    assert.ok(event.relations?.[0]?.memory.identityKeyHash, "removed relation should include identity key hash");
+    assert.deepEqual(event.reasonCodes, ["type_cap"]);
+  }
+});
+
+test("enforceLongTermLimitsWithAccounting emits global_cap evidence for global cap losers", () => {
+  const now = Date.UTC(2026, 4, 1, 6, 24, 0);
+  const entries: LongTermMemoryEntry[] = [
+    ...Array.from({ length: RETENTION_TYPE_MAX.feedback }, (_, i) =>
+      decisionEntry(`global-feedback-${i}`, `Global cap feedback ${i}`, now)
+    ).map(memory => ({ ...memory, type: "feedback" as const })),
+    ...Array.from({ length: RETENTION_TYPE_MAX.decision }, (_, i) =>
+      decisionEntry(`global-decision-${i}`, `Global cap decision ${i}`, now)
+    ),
+    ...Array.from({ length: RETENTION_TYPE_MAX.project }, (_, i) =>
+      decisionEntry(`global-project-${i}`, `Global cap project ${i}`, now)
+    ).map(memory => ({ ...memory, type: "project" as const })),
+    ...Array.from({ length: RETENTION_TYPE_MAX.reference }, (_, i) =>
+      decisionEntry(`global-reference-${i}`, `Global cap reference ${i}`, now)
+    ).map(memory => ({ ...memory, type: "reference" as const })),
+  ];
+
+  const result = enforceLongTermLimitsWithAccounting(entries);
+  const capacityEvidence = result.evidence.filter(event => event.type === "memory_removed_capacity");
+  const globalCapEvidence = capacityEvidence.filter(event => event.reasonCodes.includes("global_cap"));
+
+  assert.equal(entries.length, 34);
+  assert.equal(result.kept.length, LONG_TERM_LIMITS.maxEntries);
+  assert.equal(globalCapEvidence.length, entries.length - LONG_TERM_LIMITS.maxEntries);
+  assert.equal(capacityEvidence.some(event => event.reasonCodes.includes("type_cap")), false);
+  assert.ok(globalCapEvidence.every(event => event.phase === "storage" && event.outcome === "removed"));
+});
+
+test("accountWorkspaceMemoryRender emits render_omitted for type_cap with 11 decisions", () => {
+  const now = Date.UTC(2026, 4, 1, 6, 24, 0);
+  const store: WorkspaceMemoryStore = {
+    version: 1,
+    workspace: { root: "/repo", key: "abc" },
+    limits: { maxRenderedChars: LONG_TERM_LIMITS.maxRenderedChars, maxEntries: LONG_TERM_LIMITS.maxEntries },
+    entries: Array.from({ length: 11 }, (_, i) =>
+      decisionEntry(`render-decision-${i}`, `Render durable decision ${i}`, now)
+    ),
+    updatedAt: new Date(now).toISOString(),
+    lastActivityAt: new Date(now).toISOString(),
+  };
+
+  const accounting = accountWorkspaceMemoryRender(store);
+  const typeCapOmissions = accounting.omitted.filter(item => item.reason === "type_cap");
+  const typeCapEvidence = accounting.evidence.filter(event =>
+    event.type === "render_omitted" && event.reasonCodes.includes("type_cap")
+  );
+
+  assert.equal(accounting.rendered.length, RETENTION_TYPE_MAX.decision);
+  assert.equal(typeCapOmissions.length, 1);
+  assert.equal(typeCapEvidence.length, 1);
 });

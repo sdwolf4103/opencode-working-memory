@@ -23,7 +23,8 @@
  * - Parses compaction summaries for memory candidates and merges them
  */
 
-import { rm } from "fs/promises";
+import { createHash } from "node:crypto";
+import { realpath, rm } from "fs/promises";
 import type { Plugin } from "@opencode-ai/plugin";
 import {
   extractExplicitMemoriesWithEvidence,
@@ -57,7 +58,7 @@ import {
   addRecentDecision,
   renderHotSessionState,
 } from "./session-state.ts";
-import { sessionStatePath } from "./paths.ts";
+import { sessionStatePath, workspaceKey } from "./paths.ts";
 import {
   latestUserText,
   latestCompactionSummary,
@@ -181,6 +182,19 @@ async function warnMemoryHook(scope: string, error: unknown, root?: string): Pro
       details: { message },
     }).catch(() => undefined);
   }
+}
+
+async function workspaceRootHash(root: string): Promise<string> {
+  const resolved = await realpath(root).catch(() => root);
+  return createHash("sha256").update(resolved).digest("hex").slice(0, 16);
+}
+
+async function workspaceIdentity(root: string): Promise<{ workspaceKey: string; workspaceRootHash: string }> {
+  const [workspaceKeyValue, workspaceRootHashValue] = await Promise.all([
+    workspaceKey(root),
+    workspaceRootHash(root),
+  ]);
+  return { workspaceKey: workspaceKeyValue, workspaceRootHash: workspaceRootHashValue };
 }
 
 export const MemoryV2Plugin: Plugin = async (input) => {
@@ -728,7 +742,9 @@ export const MemoryV2Plugin: Plugin = async (input) => {
           // Parse latest compaction summary for memory candidates, stage them into
           // durable pending journal, then promote pending memories.
           const summary = await latestCompactionSummary(client, sessionID);
-          const parseResult = summary ? parseWorkspaceMemoryCandidatesWithEvidence(summary) : { entries: [], evidence: [] };
+          const parseResult = summary
+            ? parseWorkspaceMemoryCandidatesWithEvidence(summary, await workspaceIdentity(directory))
+            : { entries: [], evidence: [] };
           await appendEvidenceEvents(directory, parseResult.evidence.map(event => ({
             ...event,
             sessionHash: sessionID,
