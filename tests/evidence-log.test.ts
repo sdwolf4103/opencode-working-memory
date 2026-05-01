@@ -132,6 +132,48 @@ test("queryEvidenceEvents filters by type outcome and memory id", async () => {
   }
 });
 
+test("memory_removed_capacity event round-trips through append and query", async () => {
+  const root = await tempRoot();
+  try {
+    await appendEvidenceEvent(root, eventInput({
+      type: "memory_removed_capacity",
+      phase: "storage",
+      outcome: "removed",
+      reasonCodes: ["global_cap"],
+      memory: { memoryId: "removed-memory", type: "reference", source: "compaction", status: "active" },
+      relations: [{ role: "removed", memory: { memoryId: "removed-memory", type: "reference", source: "compaction", status: "active" } }],
+      details: {
+        type: "reference",
+        globalCap: 28,
+        retentionClock: Date.UTC(2026, 4, 1),
+        createdAt: "2026-05-01T00:00:00.000Z",
+        source: "compaction",
+      },
+    }));
+
+    const result = await queryEvidenceEvents(root, {
+      types: ["memory_removed_capacity"],
+      phases: ["storage"],
+      outcomes: ["removed"],
+      memoryId: "removed-memory",
+    });
+
+    assert.equal(result.length, 1);
+    assert.equal(result[0].type, "memory_removed_capacity");
+    assert.equal(result[0].phase, "storage");
+    assert.equal(result[0].outcome, "removed");
+    assert.deepEqual(result[0].details, {
+      type: "reference",
+      globalCap: 28,
+      retentionClock: Date.UTC(2026, 4, 1),
+      createdAt: "2026-05-01T00:00:00.000Z",
+      source: "compaction",
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("queryEvidenceEvents supports newestFirst and limit", async () => {
   const root = await tempRoot();
   try {
@@ -239,6 +281,7 @@ test("evidence relation roles reject sublimation placeholders at compile-time su
     "reinforced_by",
     "rendered",
     "omitted",
+    "removed",
   ];
 
   assert.equal(allowedRoles.includes("candidate"), true);

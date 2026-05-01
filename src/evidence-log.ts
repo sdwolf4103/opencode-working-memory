@@ -22,6 +22,7 @@ export type EvidenceEventType =
   | "memory_reinforced"
   | "render_selected"
   | "render_omitted"
+  | "memory_removed_capacity"
   | "storage_corrupt_json_quarantined"
   | "storage_stale_lock_recovered"
   | "storage_lock_timeout"
@@ -45,6 +46,7 @@ export type EvidenceOutcome =
   | "superseded"
   | "rendered"
   | "omitted"
+  | "removed"
   | "retried"
   | "exhausted"
   | "reinforced"
@@ -73,7 +75,8 @@ export type EvidenceRelation = {
     | "reinforced"
     | "reinforced_by"
     | "rendered"
-    | "omitted";
+    | "omitted"
+    | "removed";
   memory?: MemoryEvidenceRef;
 };
 

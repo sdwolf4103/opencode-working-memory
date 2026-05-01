@@ -17,6 +17,7 @@ import type { EvidenceEventInput, MemoryEvidenceRef } from "./evidence-log.ts";
 const MIN_ENVELOPE_LENGTH = 80;
 const MIGRATION_ID = "2026-04-26-p0-cleanup";
 const QUALITY_CLEANUP_MIGRATION_ID = "2026-04-28-quality-cleanup";
+const RETENTION_CLOCK_BACKFILL_MIGRATION_ID = "2026-05-01-retention-clock-backfill";
 
 export type MemoryConsolidationReason =
   | "promoted"
@@ -129,6 +130,7 @@ function hasSecurityOrMigrationChange(
     if (beforeEntry.text !== afterEntry.text) return true;
     if ((beforeEntry.rationale ?? "") !== (afterEntry.rationale ?? "")) return true;
     if (beforeEntry.status !== afterEntry.status) return true;
+    if ((beforeEntry.retentionClock ?? null) !== (afterEntry.retentionClock ?? null)) return true;
   }
 
   const beforeMigrations = JSON.stringify(before.migrations ?? []);
@@ -184,7 +186,8 @@ export async function normalizeWorkspaceMemoryWithAccounting(
   root: string,
   store: WorkspaceMemoryStore,
 ): Promise<WorkspaceMemoryNormalizationResult> {
-  const nowIso = new Date().toISOString();
+  const nowMs = Date.now();
+  const nowIso = new Date(nowMs).toISOString();
 
   let result: WorkspaceMemoryStore = {
     ...store,
@@ -236,6 +239,15 @@ export async function normalizeWorkspaceMemoryWithAccounting(
     result = runMigrationP0Cleanup(result, nowIso);
   }
 
+  result.entries = result.entries.map(entry => backfillRetentionClock(entry, nowMs));
+  if (!result.migrations.includes(RETENTION_CLOCK_BACKFILL_MIGRATION_ID)) {
+    result = {
+      ...result,
+      migrations: [...result.migrations, RETENTION_CLOCK_BACKFILL_MIGRATION_ID],
+      updatedAt: nowIso,
+    };
+  }
+
   // P0 accounting only considers active entries. Entries that were already
   // superseded before this normalization are preserved in storage; entries that
   // lose during this enforcement are reported via accounting events but are not
@@ -260,6 +272,24 @@ export async function normalizeWorkspaceMemoryWithAccounting(
     evidence: accounting.evidence,
     events: [...accounting.dropped, ...accounting.absorbed, ...accounting.superseded],
   };
+}
+
+function backfillRetentionClock(entry: LongTermMemoryEntry, nowMs: number): LongTermMemoryEntry {
+  if (Number.isFinite(entry.retentionClock)) {
+    return entry;
+  }
+
+  const createdAtMs = new Date(entry.createdAt).getTime();
+  if (Number.isFinite(createdAtMs)) {
+    return { ...entry, retentionClock: createdAtMs };
+  }
+
+  const updatedAtMs = new Date(entry.updatedAt).getTime();
+  if (Number.isFinite(updatedAtMs)) {
+    return { ...entry, retentionClock: updatedAtMs };
+  }
+
+  return { ...entry, retentionClock: nowMs };
 }
 
 export function runMigrationP0Cleanup(
@@ -470,6 +500,31 @@ function consolidationEvent(
   };
 }
 
+function capacityRemovalEvidence(
+  memory: LongTermMemoryEntry,
+  reason: "type_cap" | "global_cap" | "capacity",
+): EvidenceEventInput {
+  return {
+    type: "memory_removed_capacity",
+    phase: "storage",
+    outcome: "removed",
+    reasonCodes: [reason],
+    memory: memoryEvidenceRef(memory),
+    relations: [{
+      role: "removed",
+      memory: memoryEvidenceRef(memory),
+    }],
+    details: {
+      type: memory.type,
+      globalCap: LONG_TERM_LIMITS.maxEntries,
+      ...(reason === "type_cap" ? { typeCap: RETENTION_TYPE_MAX[memory.type] } : {}),
+      ...(typeof memory.retentionClock === "number" && Number.isFinite(memory.retentionClock) ? { retentionClock: memory.retentionClock } : {}),
+      ...(memory.createdAt ? { createdAt: memory.createdAt } : {}),
+      ...(memory.source ? { source: memory.source } : {}),
+    },
+  };
+}
+
 /** Choose better memory when identity/topic keys conflict */
 function chooseBetterMemory(
   a: LongTermMemoryEntry,
@@ -525,6 +580,13 @@ export function enforceLongTermLimitsWithAccounting(
   const capped = applyTypeMaxCaps(sorted);
   const kept = capped.slice(0, LONG_TERM_LIMITS.maxEntries);
   const keptIds = new Set(kept.map(entry => entry.id));
+  const cappedIds = new Set(capped.map(entry => entry.id));
+  const typeCapLosers = sorted.filter(entry => !cappedIds.has(entry.id));
+  const globalCapLosers = capped.filter(entry => !keptIds.has(entry.id));
+  const capacityEvidence: EvidenceEventInput[] = [
+    ...typeCapLosers.map(entry => capacityRemovalEvidence(entry, "type_cap")),
+    ...globalCapLosers.map(entry => capacityRemovalEvidence(entry, "global_cap")),
+  ];
   const capacityDropped = sorted
     .filter(entry => !keptIds.has(entry.id))
     .map(entry => consolidationEvent(entry, "rejected_capacity"));
@@ -534,7 +596,7 @@ export function enforceLongTermLimitsWithAccounting(
     dropped: [...dedupeResult.dropped, ...capacityDropped],
     absorbed: dedupeResult.absorbed,
     superseded: dedupeResult.superseded,
-    evidence: dedupeResult.evidence,
+    evidence: [...dedupeResult.evidence, ...capacityEvidence],
   };
 }
 

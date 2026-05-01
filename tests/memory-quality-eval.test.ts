@@ -136,6 +136,33 @@ test("decision must be future-facing rule, not completed implementation note", (
   assert.equal(assessMemoryQuality({ type: "decision", text: "Added semantic merge tests in the previous wave", source: "compaction" }).accepted, false);
 });
 
+test("bad_decision 3-tier gate: architecture-like decisions accepted without future-rule imperative", () => {
+  const architectureLikeCases = [
+    { text: "Rule 不在記憶系統 schema 內，歸用戶（agent.md / claude.md），系統最多到 Preference + Suggestion", type: "decision" as const },
+    { text: "Ghost memory root cause: normalization 把 capacity losers 從 store 移除時沒有 emit terminal evidence", type: "decision" as const },
+    { text: "BASE_HALF_LIFE_DAYS 應從 60 降低到 45", type: "decision" as const },
+    { text: "採用 decay-rate 模型取代 priority+penalty 模型", type: "decision" as const },
+    { text: "從 scoring 移除 confidence，目前是固定值無意義", type: "decision" as const },
+  ];
+
+  const stillRejectedCases = [
+    { text: "Implemented phase 2 and updated tests", type: "decision" as const },
+    { text: "Implemented CI_SCHEMA_UPDATE for compatibility run 42", type: "decision" as const },
+    { text: "Session reviewed the architecture model changes", type: "decision" as const },
+    { text: "Some random text with no architecture keywords or future rules", type: "decision" as const },
+  ];
+
+  for (const entry of architectureLikeCases) {
+    const result = assessMemoryQuality({ ...entry, source: "compaction" });
+    assert.equal(result.reasons.includes("bad_decision"), false, `${entry.text} -> ${result.reasons.join(",")}`);
+  }
+
+  for (const entry of stillRejectedCases) {
+    const result = assessMemoryQuality({ ...entry, source: "compaction" });
+    assert.equal(result.reasons.includes("bad_decision"), true, `${entry.text} -> ${result.reasons.join(",")}`);
+  }
+});
+
 test("shared quality gate owns extractor low-quality syntax rejections", () => {
   const rejected = [
     { type: "project" as const, text: "fix: add new feature" },
