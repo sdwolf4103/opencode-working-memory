@@ -20,6 +20,7 @@ export type EvidenceEventType =
   | "promotion_retry_scheduled"
   | "promotion_retry_exhausted"
   | "memory_reinforced"
+  | "memory_migration_superseded"
   | "render_selected"
   | "render_omitted"
   | "memory_removed_capacity"
