@@ -1,5 +1,8 @@
 import type { EvidenceEventType, EvidenceEventV1, EvidenceOutcome } from "../../src/evidence-log.ts";
 import type { LongTermMemoryEntry, LongTermSource, LongTermType, PendingMemoryJournalStore, WorkspaceMemoryStore } from "../../src/types.ts";
+import type { Command } from "./command-metadata.ts";
+
+export type { Command, HiddenCommand, VisibleCommand } from "./command-metadata.ts";
 
 export type MemoryRenderStatus =
   | "rendered"
@@ -47,8 +50,6 @@ export type MemoryDiagJSON = {
   }>;
 };
 
-export type Command = "status" | "rejected" | "missing" | "explain" | "coverage" | "audit";
-export type LegacyCommand = "health" | "quality" | "rejections" | "disappearances" | "trace";
 export type Origin = "explicit_trigger" | "compaction_candidate" | "manual" | "migration_check" | "unknown";
 
 export type CliOptions = {
@@ -61,14 +62,11 @@ export type CliOptions = {
   softOnly?: boolean;
   triggerOnly?: boolean;
   includeHistorical?: boolean;
-  quality?: boolean;
   reason?: string;
-  unique?: boolean;
   explain?: boolean;
   since?: string;
   migration?: string;
   memory?: string;
-  legacyCommand?: LegacyCommand;
   positional?: string[];
   auditMode?: "coverage" | "migrations";
 };

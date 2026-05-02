@@ -47,8 +47,8 @@ async function writeWorkspaceStore(root: string, entries: LongTermMemoryEntry[],
   await writeFile(path, JSON.stringify(store, null, 2), "utf8");
 }
 
-async function runMemoryDiagHealth(root: string): Promise<string> {
-  return runMemoryDiag(["health", "--workspace", root]);
+async function runMemoryDiagStatusVerbose(root: string): Promise<string> {
+  return runMemoryDiag(["status", "--workspace", root, "--verbose"]);
 }
 
 async function runMemoryDiag(args: string[]): Promise<string> {
@@ -96,27 +96,26 @@ function evidence(overrides: Partial<EvidenceEventInput>): EvidenceEventInput {
   };
 }
 
-test("health handles missing workspace store as empty", async () => {
+test("status handles missing workspace store as empty", async () => {
   const root = mkdtempSync(join(tmpdir(), "opencode-memory-diag-missing-health-"));
   try {
-    const stdout = await runMemoryDiag(["health", "--workspace", root]);
+    const stdout = await runMemoryDiag(["status", "--workspace", root]);
 
-    assert.match(stdout, /memory store: missing or unreadable \(treated as empty\)/);
-    assert.match(stdout, /pending journal: missing \(treated as empty\)/);
-    assert.match(stdout, /Stored active memories: 0/);
-    assert.match(stdout, /Pending journal:\n\s+total: 0/);
+    assert.match(stdout, /Memory status/);
+    assert.match(stdout, /active memories: 0/);
+    assert.match(stdout, /pending: 0/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
 
-test("quality handles missing workspace store as empty", async () => {
+test("status verbose handles missing workspace store as empty", async () => {
   const root = mkdtempSync(join(tmpdir(), "opencode-memory-diag-missing-quality-"));
   try {
-    const stdout = await runMemoryDiag(["quality", "--workspace", root]);
+    const stdout = await runMemoryDiag(["status", "--workspace", root, "--verbose"]);
 
-    assert.match(stdout, /Memory quality inspection/);
-    assert.match(stdout, /0 active memories/);
+    assert.match(stdout, /Memory status inspection/);
+    assert.match(stdout, /Caps:/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -136,15 +135,15 @@ test("coverage and disappearances handle missing workspace store as empty", asyn
   }
 });
 
-test("health with conflicting flags shows usage error", async () => {
+test("status with unsupported all flag shows usage error", async () => {
   const root = mkdtempSync(join(tmpdir(), "opencode-memory-diag-conflicting-flags-"));
   try {
     await assert.rejects(
-      runMemoryDiagResult(["health", "--all", "--workspace", root]),
+      runMemoryDiagResult(["status", "--all", "--workspace", root]),
       (error: unknown) => {
         const err = error as { code?: number; stderr?: string };
         assert.notEqual(err.code, 0);
-        assert.match(err.stderr ?? "", /Use either --all or --workspace, not both/);
+        assert.match(err.stderr ?? "", /status does not accept --all/);
         assert.match(err.stderr ?? "", /Usage:/);
         return true;
       },
@@ -185,26 +184,21 @@ test("memory-diag defaults to status when no subcommand is supplied", async () =
   assert.equal(result.stderr, "");
 });
 
-test("legacy health alias emits deprecation notice and still runs", async () => {
+test("removed legacy aliases return unknown subcommand", async () => {
   const root = mkdtempSync(join(tmpdir(), "opencode-memory-diag-legacy-health-"));
   try {
-    const result = await runMemoryDiagResult(["health", "--workspace", root]);
-
-    assert.match(result.stdout, /Workspace memory health/);
-    assert.match(result.stderr, /Note: 'health' is now 'status'\. This alias will be removed in v2\.0\./);
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
-test("legacy trace alias emits deprecation notice and still traces memory", async () => {
-  const root = mkdtempSync(join(tmpdir(), "opencode-memory-diag-legacy-trace-"));
-  try {
-    const result = await runMemoryDiagResult(["trace", "--memory", "test-id", "--workspace", root]);
-
-    assert.match(result.stdout, /Memory test-id: unknown/);
-    assert.match(result.stdout, /Lifecycle:/);
-    assert.match(result.stderr, /Note: 'trace --memory <id>' is now 'explain <memory-id>'\. This alias will be removed in v2\.0\./);
+    for (const command of ["health", "quality", "rejections", "disappearances", "trace"]) {
+      await assert.rejects(
+        runMemoryDiagResult([command, "--workspace", root]),
+        (error: unknown) => {
+          const err = error as { code?: number; stderr?: string };
+          assert.notEqual(err.code, 0);
+          assert.match(err.stderr ?? "", new RegExp(`Unknown subcommand: ${command}`));
+          assert.match(err.stderr ?? "", /Usage:/);
+          return true;
+        },
+      );
+    }
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -219,11 +213,12 @@ test("memory health reports stored vs rendered retention counts", async () => {
     ];
     await writeWorkspaceStore(root, entries);
 
-    const stdout = await runMemoryDiagHealth(root);
+    const stdout = await runMemoryDiagStatusVerbose(root);
 
-    assert.match(stdout, /Stored active memories:/);
-    assert.match(stdout, /Rendered candidates:/);
-    assert.match(stdout, /feedback\s+stored=17\s+rendered=10/);
+    assert.match(stdout, /Memory status inspection/);
+    assert.match(stdout, /active: 28 \/ 28/);
+    assert.match(stdout, /rendered: 20/);
+    assert.match(stdout, /feedback: 17 \/ 10 FULL/);
     assert.match(stdout, /Top rendered candidates:\n\s+- strength=/);
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -242,15 +237,14 @@ test("memory health reports dormancy and retention monitoring deprecations", asy
     }));
     await writeWorkspaceStore(root, entries, { lastActivityAt });
 
-    const stdout = await runMemoryDiagHealth(root);
+    const stdout = await runMemoryDiagStatusVerbose(root);
 
     assert.match(stdout, /Dormancy:/);
     assert.match(stdout, /wall days since activity: 19\.0/);
     assert.match(stdout, /dormant discount active: yes/);
     assert.match(stdout, /dormant days past grace: 5\.0/);
-    assert.match(stdout, /high_importance_ratio: 40\.0% .* ALERT/);
-    assert.match(stdout, /safety_critical_count: 6 .*deprecated.* WARNING/);
-    assert.match(stdout, /max_reinforced_count: 2 \(20\.0%, alert > 10%\) ALERT/);
+    assert.match(stdout, /Top rendered candidates:/);
+    assert.match(stdout, /Weakest active memories:/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -267,9 +261,9 @@ test("memory health reports global cap overflow separately from type caps", asyn
     ];
     await writeWorkspaceStore(root, entries);
 
-    const stdout = await runMemoryDiagHealth(root);
+    const stdout = await runMemoryDiagStatusVerbose(root);
 
-    assert.match(stdout, /Rendered candidates: 28/);
+    assert.match(stdout, /rendered: 28/);
     assert.match(stdout, /type-capped entries: 0/);
     assert.match(stdout, /global-cap overflow: 6/);
   } finally {
@@ -282,14 +276,13 @@ test("memory health reports missing dormancy and non-alert monitoring defaults",
   try {
     await writeWorkspaceStore(root, [], { omitLastActivityAt: true });
 
-    const stdout = await runMemoryDiagHealth(root);
+    const stdout = await runMemoryDiagStatusVerbose(root);
 
     assert.match(stdout, /lastActivityAt: \(missing\)/);
     assert.match(stdout, /wall days since activity: unknown/);
     assert.match(stdout, /dormant discount active: no/);
-    assert.match(stdout, /high_importance_ratio: 0\.0% \(alert > 30%\)\n/);
-    assert.match(stdout, /safety_critical_count: 0 \(deprecated field\)\n/);
-    assert.match(stdout, /max_reinforced_count: 0 \(alert > 10% active\)/);
+    assert.match(stdout, /Top rendered candidates:\n\s+\(none\)/);
+    assert.match(stdout, /Weakest active memories:\n\s+\(none\)/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -311,8 +304,8 @@ test("memory health --json prints parseable privacy-safe diagnostics matching hu
       evidence({ type: "render_selected", phase: "render", outcome: "rendered", memory: { memoryId: "mem-rendered", type: "feedback", source: "explicit", status: "active" }, reasonCodes: ["within_caps", "within_char_budget"] }),
     ]);
 
-    const human = await runMemoryDiagHealth(root);
-    const jsonText = await runMemoryDiag(["health", "--workspace", root, "--json"]);
+    const human = await runMemoryDiagStatusVerbose(root);
+    const jsonText = await runMemoryDiag(["status", "--workspace", root, "--json"]);
     const parsed = JSON.parse(jsonText) as {
       version: 1;
       summary: { storedActive: number; rendered: number; pending: number; rejectedLast7Days: number; corruptStoresQuarantinedLast30Days: number };
@@ -321,9 +314,9 @@ test("memory health --json prints parseable privacy-safe diagnostics matching hu
     };
 
     assert.equal(parsed.version, 1);
-    assert.equal(parsed.summary.storedActive, Number(human.match(/Stored active memories: (\d+)/)?.[1]));
-    assert.equal(parsed.summary.rendered, Number(human.match(/Rendered candidates: (\d+)/)?.[1]));
-    assert.equal(parsed.summary.pending, Number(human.match(/Pending journal:\n\s+total: (\d+)/)?.[1]));
+    assert.equal(parsed.summary.storedActive, Number(human.match(/active: (\d+) \/ 28/)?.[1]));
+    assert.equal(parsed.summary.rendered, Number(human.match(/rendered: (\d+)/)?.[1]));
+    assert.equal(parsed.summary.pending, 1);
     assert.equal(parsed.summary.rejectedLast7Days, 1);
     assert.equal(parsed.summary.corruptStoresQuarantinedLast30Days, 1);
     assert.ok(parsed.recentEvents.some(event => event.eventId && event.type === "render_selected" && event.outcome === "rendered" && event.createdAt && event.reasonCodes.includes("within_caps")));
@@ -383,7 +376,7 @@ test("memory-diag explain shows rendered, omitted, pending, and evidence reason 
   }
 });
 
-test("memory-diag trace prints lifecycle relations and redacts secrets", async () => {
+test("memory-diag explain --memory prints lifecycle relations and redacts secrets", async () => {
   const root = await mkdtemp(join(tmpdir(), "opencode-memory-diag-trace-"));
   try {
     await writeWorkspaceStore(root, [
@@ -399,7 +392,7 @@ test("memory-diag trace prints lifecycle relations and redacts secrets", async (
       evidence({ type: "render_omitted", phase: "render", outcome: "omitted", memory: { memoryId: "mem-life", type: "decision", source: "compaction" }, relations: [{ role: "omitted", memory: { memoryId: "mem-life" } }], reasonCodes: ["superseded"] }),
     ]);
 
-    const stdout = await runMemoryDiag(["trace", "--workspace", root, "--memory", "mem-life"]);
+    const stdout = await runMemoryDiag(["explain", "--workspace", root, "--memory", "mem-life"]);
 
     assert.match(stdout, /Memory mem-life: omitted_superseded/);
     assert.match(stdout, /Lifecycle:/);
@@ -439,21 +432,10 @@ test("memory-diag explain positional memory id prints lifecycle", async () => {
   }
 });
 
-test("memory-diag trace requires --memory and reports unknown IDs", async () => {
+test("memory-diag explain --memory reports unknown IDs", async () => {
   const root = await mkdtemp(join(tmpdir(), "opencode-memory-diag-trace-unknown-"));
   try {
-    await assert.rejects(
-      execFileAsync(process.execPath, ["--experimental-strip-types", "scripts/memory-diag.ts", "trace", "--workspace", root], { cwd: repoRoot }),
-      (error: unknown) => {
-        const err = error as { code?: number; stderr?: string };
-        assert.notEqual(err.code, 0);
-        assert.match(err.stderr ?? "", /--memory requires an id/);
-        assert.match(err.stderr ?? "", /Usage:/);
-        return true;
-      },
-    );
-
-    const stdout = await runMemoryDiag(["trace", "--workspace", root, "--memory", "missing-memory"]);
+    const stdout = await runMemoryDiag(["explain", "--workspace", root, "--memory", "missing-memory"]);
     assert.match(stdout, /Memory missing-memory: unknown/);
     assert.match(stdout, /Lifecycle:\n\(none\)/);
   } finally {
@@ -481,12 +463,12 @@ async function setupQualityFixture(): Promise<string> {
   return root;
 }
 
-test("quality human output includes summary and aggregate inspection counts", async () => {
+test("status verbose output includes summary and aggregate inspection counts", async () => {
   const root = await setupQualityFixture();
   try {
-    const stdout = await runMemoryDiag(["quality", "--workspace", root]);
+    const stdout = await runMemoryDiag(["status", "--workspace", root, "--verbose"]);
 
-    assert.match(stdout, /Memory quality inspection/);
+    assert.match(stdout, /Memory status inspection/);
     assert.match(stdout, /Summary: Workspace memory quality is degraded:/);
     assert.match(stdout, /Caps:\n\s+active: 28 \/ 28/);
     assert.match(stdout, /decision: 14 \/ 10 FULL/);
@@ -499,26 +481,18 @@ test("quality human output includes summary and aggregate inspection counts", as
   }
 });
 
-test("quality --json includes summaryText, caps, retention, evidence, and rejections", async () => {
+test("status --json includes summary status fields", async () => {
   const root = await setupQualityFixture();
   try {
-    const stdout = await runMemoryDiag(["quality", "--workspace", root, "--json"]);
+    const stdout = await runMemoryDiag(["status", "--workspace", root, "--json"]);
     const parsed = JSON.parse(stdout) as {
-      summaryText: string;
-      caps: { active: number; capsFull: boolean };
-      retention: { invalid: number };
-      evidence: { currentWithEvidence: number; unknownDisappearances: number };
-      rejections: { workspaceScopedCount: number; legacyUnscopedCount: number };
+      summary: { storedActive: number; status: string; evidenceCoveragePercent: number; needsAttention: string[] };
     };
 
-    assert.match(parsed.summaryText, /Workspace memory quality is degraded/);
-    assert.equal(parsed.caps.active, LONG_TERM_LIMITS.maxEntries);
-    assert.equal(parsed.caps.capsFull, true);
-    assert.equal(parsed.retention.invalid, 1);
-    assert.equal(parsed.evidence.currentWithEvidence, 1);
-    assert.equal(parsed.evidence.unknownDisappearances, 1);
-    assert.equal(parsed.rejections.workspaceScopedCount, 1);
-    assert.equal(parsed.rejections.legacyUnscopedCount, 1);
+    assert.equal(parsed.summary.storedActive, LONG_TERM_LIMITS.maxEntries);
+    assert.equal(parsed.summary.status, "degraded");
+    assert.equal(typeof parsed.summary.evidenceCoveragePercent, "number");
+    assert.ok(parsed.summary.needsAttention.length > 0);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -732,25 +706,6 @@ test("missing --json includes disappearances and additive summary", async () => 
   }
 });
 
-test("legacy disappearances --explain emits deprecation notice and detailed output", async () => {
-  const root = await mkdtemp(join(tmpdir(), "opencode-memory-diag-disappear-legacy-"));
-  try {
-    await writeWorkspaceStore(root, [entry("current", "Current memory", "feedback")]);
-    await appendEvidenceEvents(root, [
-      evidence({ type: "promotion_promoted", phase: "promotion", outcome: "promoted", memory: { memoryId: "historical-unknown", type: "decision", source: "compaction" }, reasonCodes: ["new_workspace_entry"] }),
-    ]);
-
-    const result = await runMemoryDiagResult(["disappearances", "--workspace", root, "--explain"]);
-
-    assert.match(result.stderr, /Note: 'disappearances' is now 'missing'\. This alias will be removed in v2\.0\./);
-    assert.match(result.stdout, /^Memory disappearances/);
-    assert.match(result.stdout, /Memory historical-unknown: historical_absent_unknown_reason terminal=unknown/);
-    assert.match(result.stdout, /events:/);
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
 test("rejected default output is concise with top reasons and samples", async () => {
   const root = await mkdtemp(join(tmpdir(), "opencode-memory-diag-rejected-"));
   try {
@@ -817,59 +772,6 @@ test("rejected --json includes quality summary and false-positive risk", async (
     assert.equal(parsed.totalRecords, 2);
     assert.equal(parsed.uniqueTexts, 1);
     assert.equal(parsed.falsePositiveRisk, "high");
-    assert.equal(parsed.possibleFalsePositiveGroups.architecture_like_possible_false_positive.count, 1);
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
-test("rejections --quality --reason bad_decision --unique groups architecture-like samples heuristically", async () => {
-  const root = await mkdtemp(join(tmpdir(), "opencode-memory-diag-rejections-quality-"));
-  try {
-    const key = await workspaceKey(root);
-    const now = new Date().toISOString();
-    await writeRejectionRecords([
-      { timestamp: now, workspaceKey: key, type: "decision", source: "compaction", text: "Retention scoring model uses evidence caps to avoid normalization drift", reasons: ["bad_decision"] },
-      { timestamp: now, workspaceKey: key, type: "decision", source: "compaction", text: "Implemented phase 2 and updated tests", reasons: ["bad_decision"] },
-      { timestamp: now, type: "decision", source: "compaction", text: "Maybe useful", reasons: ["bad_decision"] },
-    ]);
-
-    const stdout = await runMemoryDiag(["rejections", "--quality", "--workspace", root, "--reason", "bad_decision", "--unique"]);
-
-    assert.match(stdout, /Extraction rejection quality inspection/);
-    assert.match(stdout, /Possible false-positive grouping is heuristic, not deterministic truth/);
-    assert.match(stdout, /architecture_like_possible_false_positive: 1/);
-    assert.match(stdout, /clearly_garbage: 1/);
-    assert.match(stdout, /ambiguous: 1/);
-    assert.doesNotMatch(stdout, /deterministic truth\s*:/);
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
-test("rejections --quality --json includes scoping, unique reasons, and possible false-positive groups", async () => {
-  const root = await mkdtemp(join(tmpdir(), "opencode-memory-diag-rejections-json-"));
-  try {
-    const key = await workspaceKey(root);
-    const now = new Date().toISOString();
-    await writeRejectionRecords([
-      { timestamp: now, workspaceKey: key, workspaceRootHash: "hash", type: "decision", source: "compaction", text: "Memory system schema boundary should remain stable", reasons: ["bad_decision"] },
-      { timestamp: now, type: "feedback", source: "compaction", text: "Wave 1 completed successfully", reasons: ["progress_snapshot", "bad_feedback"] },
-    ]);
-
-    const stdout = await runMemoryDiag(["rejections", "--quality", "--workspace", root, "--json"]);
-    const parsed = JSON.parse(stdout) as {
-      workspaceScopedCount: number;
-      legacyUnscopedCount: number;
-      falsePositiveRisk: string;
-      uniqueReasonDistribution: Record<string, number>;
-      possibleFalsePositiveGroups: Record<string, { count: number }>;
-    };
-
-    assert.equal(parsed.workspaceScopedCount, 1);
-    assert.equal(parsed.legacyUnscopedCount, 1);
-    assert.equal(parsed.falsePositiveRisk, "high");
-    assert.equal(parsed.uniqueReasonDistribution.bad_decision, 1);
     assert.equal(parsed.possibleFalsePositiveGroups.architecture_like_possible_false_positive.count, 1);
   } finally {
     await rm(root, { recursive: true, force: true });

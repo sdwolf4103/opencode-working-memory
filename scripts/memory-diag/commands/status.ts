@@ -6,7 +6,6 @@ import { retentionCandidatesForDiag, retentionClockSummary, daysSinceIso } from 
 import { rejectionFalsePositiveRisk, rejectionQualitySummary } from "../rejections-model.ts";
 import { isWithinDays, memoryDiagJSONFromSnapshot } from "../workspace-snapshot.ts";
 import type { CliOptions, CommandResult, MemoryInspectionReadModel } from "../types.ts";
-import { runHealth } from "./health.ts";
 
 export function buildStatusReadout(model: MemoryInspectionReadModel, now = Date.now()): StatusReadout {
   const active = model.store.entries.filter(entry => entry.status !== "superseded");
@@ -81,8 +80,6 @@ export function buildStatusReadout(model: MemoryInspectionReadModel, now = Date.
 }
 
 export async function runStatus(options: CliOptions): Promise<CommandResult> {
-  if (options.legacyCommand === "health" && options.all) return runHealth(options);
-
   const now = Date.now();
   const model = await buildInspectionReadModel(options);
   const readout = buildStatusReadout(model, now);

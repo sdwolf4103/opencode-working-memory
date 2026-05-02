@@ -2,14 +2,16 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { parseArgs } from "../scripts/memory-diag/cli.ts";
 
-test("help returns usage without exiting", () => {
+test("help returns usage without exposing hidden or removed commands", () => {
   const parsed = parseArgs(["--help"]);
 
   assert.equal(parsed.ok, true);
   assert.equal("help" in parsed && parsed.help, true);
   assert.match(parsed.usage, /Usage:/);
   assert.match(parsed.usage, /memory-diag \[status\]/);
-  assert.doesNotMatch(parsed.usage, /health/);
+  for (const command of ["health", "quality", "rejections", "disappearances", "trace", "coverage", "audit"]) {
+    assert.doesNotMatch(parsed.usage, new RegExp(command));
+  }
 });
 
 test("status defaults when no subcommand", () => {
@@ -30,17 +32,41 @@ test("unknown command returns usage error", () => {
   assert.match(parsed.usage, /Usage:/);
 });
 
+test("removed legacy aliases are ordinary unknown subcommands", () => {
+  for (const command of ["health", "quality", "rejections", "disappearances", "trace"]) {
+    const parsed = parseArgs([command]);
+
+    assert.equal(parsed.ok, false, command);
+    if (parsed.ok) continue;
+    assert.equal(parsed.message, `Unknown subcommand: ${command}`);
+    assert.match(parsed.usage, /Usage:/);
+  }
+});
+
+test("hidden maintainer commands are accepted with neutral notices", () => {
+  const coverage = parseArgs(["coverage"]);
+  assert.equal(coverage.ok, true);
+  assert.equal("command" in coverage && coverage.command, "coverage");
+  assert.equal("deprecationNotice" in coverage && coverage.deprecationNotice, "Note: 'coverage' is a maintainer-only diagnostic and is not part of the public CLI surface.");
+
+  const audit = parseArgs(["audit"]);
+  assert.equal(audit.ok, true);
+  assert.equal("command" in audit && audit.command, "audit");
+  assert.equal("deprecationNotice" in audit && audit.deprecationNotice, "Note: 'audit' is a maintainer-only diagnostic and is not part of the public CLI surface.");
+});
+
 test("current command flag validation messages are preserved", () => {
   const cases: Array<{ args: string[]; message: string }> = [
-    { args: ["health", "--json", "--all"], message: "health --json does not support --all" },
-    { args: ["quality", "--all"], message: "quality does not accept --all" },
+    { args: ["status", "--all"], message: "status does not accept --all" },
     { args: ["coverage", "--all"], message: "coverage does not accept --all" },
-    { args: ["disappearances", "--all"], message: "disappearances does not accept --all" },
-    { args: ["rejections", "--all"], message: "rejections does not accept --all" },
+    { args: ["missing", "--all"], message: "missing does not accept --all" },
+    { args: ["rejected", "--all"], message: "rejected does not accept --all" },
     { args: ["audit", "--workspace", "/tmp/workspace"], message: "audit does not accept --all or --workspace" },
     { args: ["explain", "--all"], message: "explain does not accept --all" },
-    { args: ["trace", "--all", "--memory", "mem-1"], message: "trace does not accept --all" },
-    { args: ["quality", "--since", "forever"], message: "quality does not accept rejection filters" },
+    { args: ["status", "--since", "forever"], message: "status does not accept rejection filters" },
+    { args: ["status", "--reason", "bad_decision"], message: "status does not accept rejection filters" },
+    { args: ["status", "--quality"], message: "Unknown option: --quality" },
+    { args: ["rejected", "--unique"], message: "Unknown option: --unique" },
   ];
 
   for (const item of cases) {
@@ -52,78 +78,13 @@ test("current command flag validation messages are preserved", () => {
   }
 });
 
-test("trace without memory returns current required id error", () => {
-  const parsed = parseArgs(["trace"]);
-
-  assert.equal(parsed.ok, false);
-  if (parsed.ok) return;
-  assert.equal(parsed.message, "--memory requires an id");
-  assert.match(parsed.usage, /Usage:/);
-});
-
-test("health with all and workspace returns current conflict error", () => {
-  const parsed = parseArgs(["health", "--all", "--workspace", "/tmp/workspace"]);
-
-  assert.equal(parsed.ok, false);
-  if (parsed.ok) return;
-  assert.equal(parsed.message, "Use either --all or --workspace, not both");
-  assert.match(parsed.usage, /Usage:/);
-});
-
-test("rejections invalid since value returns current error", () => {
-  const parsed = parseArgs(["rejections", "--since", "forever"]);
+test("rejected invalid since value returns current error", () => {
+  const parsed = parseArgs(["rejected", "--since", "forever"]);
 
   assert.equal(parsed.ok, false);
   if (parsed.ok) return;
   assert.equal(parsed.message, "Invalid --since value: forever");
   assert.match(parsed.usage, /Usage:/);
-});
-
-test("legacy health alias emits deprecation notice and maps to status", () => {
-  const parsed = parseArgs(["health"]);
-
-  assert.equal(parsed.ok, true);
-  assert.equal("command" in parsed && parsed.command, "status");
-  assert.equal("options" in parsed && parsed.options.legacyCommand, "health");
-  assert.equal("deprecationNotice" in parsed && parsed.deprecationNotice, "Note: 'health' is now 'status'. This alias will be removed in v2.0.");
-});
-
-test("legacy quality alias sets verbose and emits deprecation notice", () => {
-  const parsed = parseArgs(["quality"]);
-
-  assert.equal(parsed.ok, true);
-  assert.equal("command" in parsed && parsed.command, "status");
-  assert.equal("options" in parsed && parsed.options.verbose, true);
-  assert.equal("options" in parsed && parsed.options.legacyCommand, "quality");
-  assert.equal("deprecationNotice" in parsed && parsed.deprecationNotice, "Note: 'quality' is now 'status --verbose'. This alias will be removed in v2.0.");
-});
-
-test("legacy rejections alias emits deprecation notice", () => {
-  const parsed = parseArgs(["rejections"]);
-
-  assert.equal(parsed.ok, true);
-  assert.equal("command" in parsed && parsed.command, "rejected");
-  assert.equal("options" in parsed && parsed.options.legacyCommand, "rejections");
-  assert.equal("deprecationNotice" in parsed && parsed.deprecationNotice, "Note: 'rejections' is now 'rejected'. This alias will be removed in v2.0.");
-});
-
-test("legacy disappearances alias emits deprecation notice", () => {
-  const parsed = parseArgs(["disappearances"]);
-
-  assert.equal(parsed.ok, true);
-  assert.equal("command" in parsed && parsed.command, "missing");
-  assert.equal("options" in parsed && parsed.options.legacyCommand, "disappearances");
-  assert.equal("deprecationNotice" in parsed && parsed.deprecationNotice, "Note: 'disappearances' is now 'missing'. This alias will be removed in v2.0.");
-});
-
-test("legacy trace alias emits deprecation notice", () => {
-  const parsed = parseArgs(["trace", "--memory", "mem-1"]);
-
-  assert.equal(parsed.ok, true);
-  assert.equal("command" in parsed && parsed.command, "explain");
-  assert.equal("options" in parsed && parsed.options.legacyCommand, "trace");
-  assert.equal("options" in parsed && parsed.options.memory, "mem-1");
-  assert.equal("deprecationNotice" in parsed && parsed.deprecationNotice, "Note: 'trace --memory <id>' is now 'explain <memory-id>'. This alias will be removed in v2.0.");
 });
 
 test("explain accepts positional memory id", () => {
