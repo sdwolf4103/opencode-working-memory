@@ -200,30 +200,35 @@ The goal is to remember durable facts, not every detail.
 
 Historical cleanup is intentionally conservative: extraction-time filtering may reject more aggressively, but one-time migration cleanup only supersedes high-confidence garbage patterns. This protects existing durable memories written in declarative style, such as "API endpoint is X" or "Product branding is Y".
 
-For local development cleanup, use:
+### Memory Diagnostics CLI
+
+Use the read-only diagnostics CLI when you want to understand what memory is doing for the current workspace.
+
+| Question | Command |
+|---|---|
+| Is memory healthy? | `npx --package opencode-working-memory memory-diag` or `npx --package opencode-working-memory memory-diag status` |
+| Why was something rejected? | `npx --package opencode-working-memory memory-diag rejected` |
+| Where did my memory go? | `npx --package opencode-working-memory memory-diag missing` |
+| Why is this memory shown or hidden? | `npx --package opencode-working-memory memory-diag explain <memory-id>` |
+
+Global options:
+
+- `--workspace <path>` — inspect another workspace; defaults to the current directory.
+- `--verbose` — show detailed diagnostics.
+- `--json` — print machine-readable output where supported.
+
+Examples:
 
 ```bash
-npm run cleanup:workspaces -- --dry-run
-npm run cleanup:workspaces -- --quarantine
+npx --package opencode-working-memory memory-diag status
+npx --package opencode-working-memory memory-diag rejected --verbose
+npx --package opencode-working-memory memory-diag missing --workspace /path/to/project
+npx --package opencode-working-memory memory-diag status --json
 ```
 
-The cleanup command only quarantines definite temp/test workspace residues by default. It does not delete unknown missing-root workspaces.
+The npm package is opencode-working-memory; the installed bin is memory-diag, so package-qualified npx avoids resolving a different package named memory-diag.
 
-### Local Inspection CLI
-
-Maintainers can run read-only inspection surfaces without telemetry or mutation. Human output redacts absolute paths and credentials by default; pass `--raw` only when you intentionally need local paths.
-
-```bash
-bun scripts/memory-diag.ts quality --workspace /path/to/repo
-bun scripts/memory-diag.ts coverage --workspace /path/to/repo --include-historical
-bun scripts/memory-diag.ts disappearances --workspace /path/to/repo --explain
-bun scripts/memory-diag.ts rejections --quality --reason bad_decision --unique
-```
-
-- `quality` summarizes store caps, retention clocks, evidence coverage, disappearances, and rejection scoping.
-- `coverage` classifies per-memory evidence lifecycle coverage, optionally including historical evidence-only memory IDs.
-- `disappearances --explain` reports evidence memory IDs absent from the current store with terminal capacity, promotion, supersession, or render-omission context when available.
-- `rejections --quality` groups rejection records by scope, reason distribution, and heuristic possible false-positive buckets.
+Maintainer-only diagnostics and cleanup commands are intentionally not documented here. Future work: move those internal commands to `docs/development.md`.
 
 ## Configuration
 
@@ -261,13 +266,12 @@ cd opencode-working-memory
 npm install
 npm test
 npm run typecheck
-npm run cleanup:workspaces -- --dry-run
 ```
 
 ## Requirements
 
 - OpenCode plugin API `>=1.2.0 <2.0.0`
-- Node.js >= 18.0.0
+- Node.js >= 22.6.0 (for `memory-diag` CLI, which runs TypeScript with `--experimental-strip-types`)
 
 ## Limitations
 

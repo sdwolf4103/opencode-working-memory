@@ -25,6 +25,6 @@
     "allowImportingTsExtensions": true,
     "noEmit": true
   },
-  "include": ["index.ts", "src/**/*.ts"],
+  "include": ["index.ts", "src/**/*.ts", "scripts/memory-diag.ts", "scripts/memory-diag/**/*.ts"],
   "exclude": ["node_modules", "dist"]
 }

@@ -204,13 +204,21 @@ cat ~/.local/share/opencode-working-memory/workspaces/*/sessions/*.json | jq
 
 ### Inspect Retention Health
 
-From a source checkout, maintainers can inspect stored vs rendered memory behavior:
+Use the diagnostics CLI to check memory health for the current workspace:
 
 ```bash
-bun scripts/memory-diag.ts health
+npx --package opencode-working-memory memory-diag status
+# or from a source checkout:
+npm run diag -- status
 ```
 
-The health output includes stored active memories, rendered candidates, type caps, global cap overflow, dormancy status, retention monitoring alerts, and strength-ranked top/weakest entries.
+For detailed diagnostics, use `--verbose`:
+
+```bash
+npx --package opencode-working-memory memory-diag status --verbose
+```
+
+The status output includes overall health (OK/WARNING/DEGRADED), key metrics, and suggested next steps when attention is needed.
 
 ### Clear Workspace Memory
 
