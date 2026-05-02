@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.3] - 2026-05-02
+
+### Added
+
+- Published the read-only `memory-diag` package binary for package-qualified `npx --package opencode-working-memory memory-diag` usage.
+- Added user-facing diagnostics commands for concise status, rejected memory review, missing memory review, and per-memory explanation.
+
+### Changed
+
+- Reworked the diagnostics CLI into focused command, model, formatter, and utility modules while preserving legacy aliases and maintainer diagnostics.
+- Updated README and configuration docs to document the supported `memory-diag` CLI workflow and package-qualified `npx` usage.
+- Raised the Node.js requirement to `>=22.6.0` for the TypeScript diagnostics CLI runtime.
+
+### Fixed
+
+- Avoided repeated workspace snapshot construction in status diagnostics.
+- Replaced per-memory evidence summary lookups with grouped evidence processing to avoid N+1 diagnostics work.
+- Added top-level CLI error handling for cleaner user-facing failures.
+- Removed a diagnostics model circular dependency by extracting evidence grouping helpers to a neutral module.
+
 ## [1.5.1] - 2026-04-30
 
 ### Added

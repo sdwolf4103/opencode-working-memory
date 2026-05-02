@@ -1,5 +1,34 @@
 # Release Notes
 
+## 1.5.3 (2026-05-02)
+
+### Published Memory Diagnostics CLI
+
+This release makes the read-only workspace memory diagnostics CLI available as the package binary `memory-diag`, with user-facing commands for checking memory health and understanding why memories are rejected, missing, shown, or hidden.
+
+> Good memory is selective memory — and diagnostics should explain the selection.
+
+### What Changed
+
+- **Published CLI bin**: run diagnostics with `npx --package opencode-working-memory memory-diag` or `memory-diag status`.
+- **User-facing commands**: `status`, `rejected`, `missing`, and `explain <memory-id>` are documented as the supported public workflow.
+- **Legacy compatibility**: existing maintainer and legacy commands remain accepted with deprecation notices where applicable.
+- **Cleaner CLI architecture**: the former monolithic diagnostics script is now split into focused command, model, formatter, and utility modules.
+- **Faster diagnostics**: evidence grouping avoids repeated per-memory evidence queries in snapshot diagnostics.
+- **Cleaner failures**: top-level CLI error handling now reports usage and unexpected command errors without noisy stack traces.
+- **Docs alignment**: README and configuration docs now use package-qualified `npx` commands to avoid resolving an unrelated package named `memory-diag`.
+
+### Requirements
+
+- Node.js `>=22.6.0` is now required because the published diagnostics binary runs TypeScript through Node's `--experimental-strip-types` support.
+
+### Validation
+
+- `npm run typecheck` — `TYPECHECK_PASS`
+- `npm test` — 358 tests passing, `TEST_PASS`
+
+---
+
 ## 1.5.1 (2026-04-30)
 
 ### Evidence Loop and Explainability
