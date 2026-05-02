@@ -2,15 +2,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import type { EvidenceEventType, EvidenceEventV1, EvidenceOutcome, EvidencePhase } from "../src/evidence-log.ts";
 import type { MemoryInspectionReadModel, WorkspaceDiagSnapshot } from "../scripts/memory-diag/types.ts";
-import { formatWorkspaceHealth } from "../scripts/memory-diag/formatters/health.ts";
-import { formatQuality } from "../scripts/memory-diag/formatters/quality.ts";
 import { formatCoverage } from "../scripts/memory-diag/formatters/coverage.ts";
-import { formatDisappearances } from "../scripts/memory-diag/formatters/disappearances.ts";
-import { formatRejectionQuality } from "../scripts/memory-diag/formatters/rejections.ts";
 import { formatMigrationAudit } from "../scripts/memory-diag/formatters/audit.ts";
 import { formatExplain } from "../scripts/memory-diag/formatters/explain.ts";
+import { buildMissingJSON, formatMissing } from "../scripts/memory-diag/formatters/missing.ts";
 import { formatTrace } from "../scripts/memory-diag/formatters/trace.ts";
-import { rejectionQualitySummary } from "../scripts/memory-diag/rejections-model.ts";
 
 function emptyInspectionModel(): MemoryInspectionReadModel {
   return {
@@ -60,36 +56,6 @@ function event(overrides: Partial<EvidenceEventV1> & { type: EvidenceEventType; 
   };
 }
 
-test("health formatter includes existing retention cap label", () => {
-  const output = formatWorkspaceHealth({
-    root: "/tmp/workspace",
-    key: "workspace-key",
-    memoryPath: "/tmp/workspace-memory.json",
-    pendingPath: "/tmp/workspace-pending-journal.json",
-    raw: false,
-    now: new Date("2026-01-01T00:00:00.000Z").getTime(),
-    includeTitle: true,
-  }, { rawStore: null, rawJournal: null, pendingExists: false });
-
-  assert.match(output, /Workspace memory health/);
-  assert.match(output, /Retention caps:/);
-});
-
-test("quality formatter includes caps and retention clock sections", () => {
-  const output = formatQuality(emptyInspectionModel(), new Date("2026-01-01T00:00:00.000Z").getTime());
-
-  assert.match(output, /Caps:/);
-  assert.match(output, /Retention clocks:/);
-});
-
-test("rejection quality formatter includes reason distribution sections", () => {
-  const summary = rejectionQualitySummary([]);
-  const output = formatRejectionQuality({ path: "/tmp/rejections.jsonl", invalidLines: 0, summary, raw: false });
-
-  assert.match(output, /Reason distribution \(raw records\):/);
-  assert.match(output, /Reason distribution \(unique text\):/);
-});
-
 test("coverage formatter includes class counts section", () => {
   const output = formatCoverage([]);
 
@@ -97,10 +63,27 @@ test("coverage formatter includes class counts section", () => {
   assert.match(output, /Per-memory rows:\n  \(none\)/);
 });
 
-test("disappearances formatter preserves empty-state label", () => {
-  const output = formatDisappearances([]);
+test("missing formatter verbose output preserves disappearance details", () => {
+  const output = formatMissing([], { verbose: true });
 
-  assert.match(output, /No evidence-only memories found\./);
+  assert.match(output, /No missing memories found\./);
+});
+
+test("missing JSON includes disappearance rows and summary", () => {
+  const rows = [{
+    id: "historical-1",
+    classification: "historical_absent_unknown_reason" as const,
+    terminalType: "unknown" as const,
+    reasonCodes: [],
+    events: [event({ type: "extraction_candidate_accepted", phase: "extraction", outcome: "accepted" })],
+    event: undefined,
+  }];
+
+  const output = buildMissingJSON(rows, { generatedAt: "2026-01-01T00:00:00.000Z" });
+
+  assert.equal(output.version, 1);
+  assert.deepEqual(output.summary, { total: 1, explained: 0, needsReview: 1 });
+  assert.deepEqual((output.disappearances as Array<{ id: string }>)[0]?.id, "historical-1");
 });
 
 test("trace formatter includes lifecycle section", () => {

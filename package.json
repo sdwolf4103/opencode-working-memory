@@ -1,6 +1,6 @@
 {
   "name": "opencode-working-memory",
-  "version": "1.5.3",
+  "version": "1.5.4",
   "description": "Three-layer memory architecture for OpenCode with workspace memory and hot session state",
   "type": "module",
   "main": "index.ts",
@@ -24,7 +24,6 @@
     "diag": "node --experimental-strip-types scripts/memory-diag.ts",
     "typecheck": "tsc --noEmit && node -e \"console.log('TYPECHECK_PASS')\"",
     "test": "node --import ./tests/setup-xdg-data-home.ts --test --experimental-strip-types tests/*.test.ts && node -e \"console.log('TEST_PASS')\"",
-    "cleanup:workspaces": "node --experimental-strip-types scripts/dev/cleanup-workspaces.ts",
     "check:compat": "npm install --no-save @opencode-ai/plugin@latest && npm run typecheck && npm test"
   },
   "keywords": [

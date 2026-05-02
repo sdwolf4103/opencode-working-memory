@@ -1,5 +1,26 @@
 # Release Notes
 
+## 1.5.4 (2026-05-02)
+
+### Memory Diagnostics Surface Cleanup
+
+This cleanup release keeps the newly published `memory-diag` CLI small before legacy spellings become compatibility debt.
+
+### What Changed
+
+- **Official commands only**: the public CLI surface is `status`, `rejected`, `missing`, and `explain`.
+- **Pre-public aliases removed**: old spellings such as `health`, `quality`, `rejections`, `disappearances`, and `trace` are no longer recognized.
+- **Maintainer diagnostics clarified**: hidden `coverage` and `audit` commands remain available as maintainer-only diagnostics and stay out of public usage output.
+- **Cleaner internals**: current command metadata now has one source of truth, and legacy command/formatter wrappers were removed.
+- **Internal cleanup script hidden**: the workspace cleanup helper is no longer exposed as an npm script; the underlying development tool remains in `scripts/dev/`.
+
+### Validation
+
+- `npm run typecheck` — `TYPECHECK_PASS`
+- `npm test` — 347 tests passing, `TEST_PASS`
+
+---
+
 ## 1.5.3 (2026-05-02)
 
 ### Published Memory Diagnostics CLI

@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.4] - 2026-05-02
+
+### Changed
+
+- Centralized the supported `memory-diag` command metadata for the official public commands: `status`, `rejected`, `missing`, and `explain`.
+- Removed pre-public legacy aliases so unsupported spellings now use the standard unknown-subcommand path instead of carrying v2.0 compatibility debt.
+- Kept `coverage` and `audit` as hidden maintainer diagnostics with neutral maintainer-only notices.
+- Removed public npm script exposure for the internal workspace cleanup tool while keeping the development tool in the repository.
+
+### Fixed
+
+- Moved missing-memory disappearance detail formatting into the official `missing` formatter before deleting legacy disappearance formatter code.
+
 ## [1.5.3] - 2026-05-02
 
 ### Added
