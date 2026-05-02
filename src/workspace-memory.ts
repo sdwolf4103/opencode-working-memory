@@ -12,6 +12,7 @@ import {
   reinforceMemory,
 } from "./retention.ts";
 import type { EvidenceEventInput, MemoryEvidenceRef } from "./evidence-log.ts";
+import { appendEvidenceEvents } from "./evidence-log.ts";
 
 // Minimum length for workspace_memory envelope: <workspace_memory>\n...\n</workspace_memory>
 const MIN_ENVELOPE_LENGTH = 80;
@@ -73,6 +74,17 @@ export type QualityCleanupMigrationLogEntry = {
   afterStatus: "superseded";
 };
 
+export type P0CleanupMigrationResult = {
+  store: WorkspaceMemoryStore;
+  events: EvidenceEventInput[];
+};
+
+export type QualityCleanupMigrationResult = {
+  store: WorkspaceMemoryStore;
+  events: QualityCleanupMigrationLogEntry[];
+  evidence: EvidenceEventInput[];
+};
+
 export async function emptyWorkspaceMemory(root: string): Promise<WorkspaceMemoryStore> {
   const nowIso = new Date().toISOString();
   return {
@@ -114,6 +126,14 @@ export async function loadWorkspaceMemory(root: string): Promise<WorkspaceMemory
   // writes for ordering/capacity/timestamp-only normalization.
   if (hasSecurityOrMigrationChange(store, normalized.store)) {
     await atomicWriteJSON(path, normalized.store);
+
+    // loadWorkspaceMemory has a narrow migration side effect: when a first-load
+    // migration actually supersedes entries, append evidence for those storage
+    // changes. Migration IDs keep this idempotent on repeated loads.
+    const migrationEvidence = normalized.evidence.filter(event => event.type === "memory_migration_superseded");
+    if (migrationEvidence.length > 0) {
+      await appendEvidenceEvents(root, migrationEvidence);
+    }
   }
 
   return normalized.store;
@@ -159,8 +179,15 @@ export async function updateWorkspaceMemoryWithAccounting(
   const fallback = await emptyWorkspaceMemory(root);
   let finalResult: WorkspaceMemoryNormalizationResult | undefined;
   const store = await updateJSON(path, () => fallback, async current => {
-    const normalized = await normalizeWorkspaceMemory(root, current);
-    finalResult = await normalizeWorkspaceMemoryWithAccounting(root, await updater(normalized));
+    const currentNormalization = await normalizeWorkspaceMemoryWithAccounting(root, current);
+    const currentMigrationEvidence = currentNormalization.evidence.filter(event => event.type === "memory_migration_superseded");
+    finalResult = await normalizeWorkspaceMemoryWithAccounting(root, await updater(currentNormalization.store));
+    if (currentMigrationEvidence.length > 0) {
+      finalResult = {
+        ...finalResult,
+        evidence: [...currentMigrationEvidence, ...finalResult.evidence],
+      };
+    }
     return finalResult.store;
   });
 
@@ -224,10 +251,12 @@ export async function normalizeWorkspaceMemoryWithAccounting(
   const beforeQualityCleanup = result;
   const qualityCleanup = runMigrationQualityCleanup(result, nowIso);
   result = qualityCleanup.store;
+  let migrationEvidence: EvidenceEventInput[] = [];
   let skipRemainingMigrations = false;
   if (qualityCleanup.events.length > 0) {
     try {
       await appendQualityCleanupMigrationLog(qualityCleanup.events);
+      migrationEvidence = [...migrationEvidence, ...qualityCleanup.evidence];
     } catch (error) {
       console.error("[memory] failed to write quality cleanup migration log:", error);
       console.error("[memory] aborting migration to maintain audit trail integrity");
@@ -236,7 +265,9 @@ export async function normalizeWorkspaceMemoryWithAccounting(
     }
   }
   if (!skipRemainingMigrations) {
-    result = runMigrationP0Cleanup(result, nowIso);
+    const p0Cleanup = runMigrationP0Cleanup(result, nowIso);
+    result = p0Cleanup.store;
+    migrationEvidence = [...migrationEvidence, ...p0Cleanup.events];
   }
 
   result.entries = result.entries.map(entry => backfillRetentionClock(entry, nowMs));
@@ -269,7 +300,7 @@ export async function normalizeWorkspaceMemoryWithAccounting(
     dropped: accounting.dropped,
     absorbed: accounting.absorbed,
     superseded: accounting.superseded,
-    evidence: accounting.evidence,
+    evidence: [...migrationEvidence, ...accounting.evidence],
     events: [...accounting.dropped, ...accounting.absorbed, ...accounting.superseded],
   };
 }
@@ -295,31 +326,38 @@ function backfillRetentionClock(entry: LongTermMemoryEntry, nowMs: number): Long
 export function runMigrationP0Cleanup(
   store: WorkspaceMemoryStore,
   nowIso: string,
-): WorkspaceMemoryStore {
+): P0CleanupMigrationResult {
   if (store.migrations?.includes(MIGRATION_ID)) {
-    return store;
+    return { store, events: [] };
   }
 
+  const events: EvidenceEventInput[] = [];
   const entries = store.entries.map(entry => {
     if (entry.source !== "compaction") return entry;
     if (entry.type !== "project") return entry;
+    if (entry.status === "superseded") return entry;
 
     if (isProgressSnapshotViolation(entry.text)) {
-      return {
+      const superseded = {
         ...entry,
         status: "superseded" as const,
         updatedAt: nowIso,
       };
+      events.push(migrationSupersededEvidence(superseded, ["migration:p0_cleanup"], MIGRATION_ID));
+      return superseded;
     }
 
     return entry;
   });
 
   return {
-    ...store,
-    entries,
-    migrations: [...(store.migrations || []), MIGRATION_ID],
-    updatedAt: nowIso,
+    store: {
+      ...store,
+      entries,
+      migrations: [...(store.migrations || []), MIGRATION_ID],
+      updatedAt: nowIso,
+    },
+    events,
   };
 }
 
@@ -333,12 +371,13 @@ async function appendQualityCleanupMigrationLog(events: QualityCleanupMigrationL
 export function runMigrationQualityCleanup(
   store: WorkspaceMemoryStore,
   nowIso: string,
-): { store: WorkspaceMemoryStore; events: QualityCleanupMigrationLogEntry[] } {
+): QualityCleanupMigrationResult {
   if (store.migrations?.includes(QUALITY_CLEANUP_MIGRATION_ID)) {
-    return { store, events: [] };
+    return { store, events: [], evidence: [] };
   }
 
   const events: QualityCleanupMigrationLogEntry[] = [];
+  const evidence: EvidenceEventInput[] = [];
   let changed = false;
   const entries = store.entries.map(entry => {
     if (entry.source !== "compaction") return entry;
@@ -372,12 +411,19 @@ export function runMigrationQualityCleanup(
       ...hardReasons.map(reason => `quality:${reason}`),
     ]);
 
-    return {
+    const superseded = {
       ...entry,
       status: "superseded" as const,
       updatedAt: nowIso,
       tags: [...tags],
     };
+    evidence.push(migrationSupersededEvidence(
+      superseded,
+      ["migration:quality_cleanup", ...hardReasons.map(reason => `quality:${reason}`)],
+      QUALITY_CLEANUP_MIGRATION_ID,
+      { hardReasons },
+    ));
+    return superseded;
   });
 
   return {
@@ -388,6 +434,7 @@ export function runMigrationQualityCleanup(
       updatedAt: changed ? nowIso : store.updatedAt,
     },
     events,
+    evidence,
   };
 }
 
@@ -525,6 +572,29 @@ function capacityRemovalEvidence(
   };
 }
 
+function migrationSupersededEvidence(
+  memory: LongTermMemoryEntry,
+  reasonCodes: string[],
+  migrationId: string,
+  details: EvidenceEventInput["details"] = {},
+): EvidenceEventInput {
+  return {
+    type: "memory_migration_superseded",
+    phase: "storage",
+    outcome: "superseded",
+    memory: memoryEvidenceRef(memory),
+    relations: [{ role: "superseded", memory: memoryEvidenceRef(memory) }],
+    reasonCodes,
+    details: {
+      migrationId,
+      type: memory.type,
+      source: memory.source,
+      ...details,
+    },
+    textPreview: memory.text,
+  };
+}
+
 /** Choose better memory when identity/topic keys conflict */
 function chooseBetterMemory(
   a: LongTermMemoryEntry,
@@ -631,6 +701,11 @@ export function dedupeLongTermEntriesWithAccounting(entries: LongTermMemoryEntry
   const evidence: EvidenceEventInput[] = [];
 
   // For project/reference/feedback: dedupe by concrete identity or exact canonical text.
+  // Feedback is grouped with project/reference for entity dedupe, but
+  // workspaceMemoryIdentityKey() returns exact key for feedback (no concrete
+  // identity extraction). This means feedback absorbed_identity is currently
+  // impossible. When identity key extraction is extended to all types, feedback
+  // with matching concrete identifiers will correctly produce absorbed_identity.
   const projectRefEntries = entries.filter(e => e.type === "project" || e.type === "reference" || e.type === "feedback");
 
   // Build identity key dedup for project/reference/feedback.
@@ -674,7 +749,7 @@ export function dedupeLongTermEntriesWithAccounting(entries: LongTermMemoryEntry
       const dropped = retained === entry ? existing : entry;
       const reason = workspaceMemoryExactKey(entry) === workspaceMemoryExactKey(existing)
         ? "absorbed_exact" as const
-        : "superseded_existing" as const;
+        : "superseded_existing" as const; // v1.5.4 placeholder: unreachable until numbered refs
       const reinforced = reinforceMemory(
         retained,
         reinforcementSessionId(retained, dropped),

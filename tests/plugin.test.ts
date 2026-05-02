@@ -339,6 +339,69 @@ test("compaction prompt forbids progress and session-internal memory candidates"
   }
 });
 
+test("compaction prompt includes existing-memory wording reuse guidance", async () => {
+  const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-prompt-"));
+  try {
+    const plugin = await MemoryV2Plugin({ directory: tmpDir, client: mockRootClient() });
+    const output = { prompt: "", context: [] as string[] };
+
+    await (plugin as Record<string, Function>)["experimental.session.compacting"](
+      { sessionID: "prompt-wording-reuse-session", model: {} },
+      output,
+    );
+
+    assert.match(output.prompt, /Existing workspace memory may already contain durable facts/);
+    assert.match(output.prompt, /do not create a rephrased duplicate/);
+    assert.match(output.prompt, /reuse the existing memory wording exactly whenever possible/);
+    assert.match(output.prompt, /new, materially corrected, or materially more specific/);
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("compaction prompt does not introduce CRUD memory directives", async () => {
+  const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-prompt-"));
+  try {
+    const plugin = await MemoryV2Plugin({ directory: tmpDir, client: mockRootClient() });
+    const output = { prompt: "", context: [] as string[] };
+
+    await (plugin as Record<string, Function>)["experimental.session.compacting"](
+      { sessionID: "prompt-no-crud-session", model: {} },
+      output,
+    );
+
+    assert.doesNotMatch(output.prompt, /\bREPLACE\b/);
+    assert.doesNotMatch(output.prompt, /\bDROP\b/);
+    assert.doesNotMatch(output.prompt, /\bREINFORCE\s+\[M/);
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("compaction prompt preserves Memory candidates output format", async () => {
+  const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-prompt-"));
+  try {
+    const plugin = await MemoryV2Plugin({ directory: tmpDir, client: mockRootClient() });
+    const output = { prompt: "", context: [] as string[] };
+
+    await (plugin as Record<string, Function>)["experimental.session.compacting"](
+      { sessionID: "prompt-format-session", model: {} },
+      output,
+    );
+
+    assert.match(
+      output.prompt,
+      /Format when there ARE durable memories:\nMemory candidates:\n- \[feedback\|decision\|project\|reference\] future-facing durable fact/,
+    );
+    assert.match(
+      output.prompt,
+      /Format when there are NO durable memories:\nMemory candidates:\n\(none\)/,
+    );
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
 test("compaction hook merges existing output.context from other plugins", async () => {
   const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-test-"));
 

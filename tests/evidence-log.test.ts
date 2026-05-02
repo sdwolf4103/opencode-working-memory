@@ -174,6 +174,41 @@ test("memory_removed_capacity event round-trips through append and query", async
   }
 });
 
+test("memory_migration_superseded event round-trips through append and query", async () => {
+  const root = await tempRoot();
+  try {
+    await appendEvidenceEvent(root, eventInput({
+      type: "memory_migration_superseded",
+      phase: "storage",
+      outcome: "superseded",
+      reasonCodes: ["migration:quality_cleanup", "quality:progress_snapshot"],
+      memory: { memoryId: "migrated-memory", type: "project", source: "compaction", status: "superseded" },
+      relations: [{ role: "superseded", memory: { memoryId: "migrated-memory", type: "project", source: "compaction", status: "superseded" } }],
+      details: {
+        migrationId: "2026-04-28-quality-cleanup",
+        type: "project",
+        source: "compaction",
+      },
+    }));
+
+    const result = await queryEvidenceEvents(root, {
+      types: ["memory_migration_superseded"],
+      phases: ["storage"],
+      outcomes: ["superseded"],
+      memoryId: "migrated-memory",
+    });
+
+    assert.equal(result.length, 1);
+    assert.equal(result[0].type, "memory_migration_superseded");
+    assert.equal(result[0].phase, "storage");
+    assert.equal(result[0].outcome, "superseded");
+    assert.ok(result[0].reasonCodes.includes("migration:quality_cleanup"));
+    assert.equal(result[0].memory?.status, "superseded");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("queryEvidenceEvents supports newestFirst and limit", async () => {
   const root = await tempRoot();
   try {

@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import type { LongTermMemoryEntry, WorkspaceMemoryStore } from "../src/types.ts";
 import { HOT_STATE_LIMITS, LONG_TERM_LIMITS } from "../src/types.ts";
 import { workspaceKey, workspaceMemoryPath } from "../src/paths.ts";
+import { queryEvidenceEvents } from "../src/evidence-log.ts";
 import {
   renderWorkspaceMemory,
   accountWorkspaceMemoryRender,
@@ -562,6 +563,23 @@ test("dedupeLongTermEntriesWithAccounting reinforces absorbed exact duplicates",
   ));
 });
 
+test("dedupeLongTermEntriesWithAccounting decision same-identity variants absorb exact only", () => {
+  const retained = entry("decision-a", "Use pnpm for package management!!!", "decision");
+  const duplicate = entry("decision-b", "use pnpm for package management", "decision");
+
+  assert.notEqual(retained.text, duplicate.text);
+  assert.equal(workspaceMemoryIdentityKey(retained), workspaceMemoryIdentityKey(duplicate));
+  assert.equal(workspaceMemoryExactKey(retained), workspaceMemoryExactKey(duplicate));
+
+  const result = dedupeLongTermEntriesWithAccounting([retained, duplicate]);
+
+  assert.equal(result.kept.length, 1);
+  assert.equal(result.absorbed.length, 1);
+  assert.equal(result.absorbed[0].reason, "absorbed_exact");
+  assert.equal(result.superseded.length, 0);
+  assert.equal(result.absorbed.some(event => event.reason === "superseded_existing"), false);
+});
+
 test("dedupeLongTermEntriesWithAccounting emits identity reinforcement evidence", () => {
   const now = Date.now();
   const retained: LongTermMemoryEntry = {
@@ -999,6 +1017,16 @@ test("workspaceMemoryExactKey uses pending-compatible canonical semantics", () =
   assert.equal(workspaceMemoryExactKey(entry), "decision:opencode uses npm cache for plugin loading");
 });
 
+test("workspaceMemoryIdentityKey returns exact key for feedback entries", () => {
+  const feedback = entry(
+    "feedback-exact-identity",
+    "User prefers references to mention `.opencode/opencode.json` explicitly.",
+    "feedback",
+  );
+
+  assert.equal(workspaceMemoryIdentityKey(feedback), workspaceMemoryExactKey(feedback));
+});
+
 test("normalizeWorkspaceMemoryWithAccounting redacts credentials before accounting", async () => {
   const root = "/repo";
   const now = new Date().toISOString();
@@ -1248,6 +1276,50 @@ test("updateWorkspaceMemoryWithAccounting emits accounting events for persisted 
     } else {
       process.env.XDG_DATA_HOME = previousXdgDataHome;
     }
+    await rm(sandbox, { recursive: true, force: true });
+  }
+});
+
+test("updateWorkspaceMemoryWithAccounting includes migration evidence from pre-update normalization", async () => {
+  const sandbox = await mkdtemp(join(tmpdir(), "wm-accounting-migration-update-"));
+  const dataHome = join(sandbox, "xdg-data-home");
+  const root = join(sandbox, "workspace");
+  const previousXdgDataHome = process.env.XDG_DATA_HOME;
+  process.env.XDG_DATA_HOME = dataHome;
+
+  try {
+    await mkdir(root, { recursive: true });
+    const now = "2026-04-26T00:00:00.000Z";
+    const storePath = await workspaceMemoryPath(root);
+    await mkdir(dirname(storePath), { recursive: true });
+    await writeFile(storePath, JSON.stringify({
+      version: 1,
+      workspace: { root, key: await workspaceKey(root) },
+      limits: { maxRenderedChars: LONG_TERM_LIMITS.maxRenderedChars, maxEntries: LONG_TERM_LIMITS.maxEntries },
+      entries: [{
+        id: "update_p0_progress",
+        type: "project",
+        text: "Phase 1-4 completed successfully",
+        source: "compaction",
+        confidence: 0.75,
+        status: "active",
+        createdAt: now,
+        updatedAt: now,
+      }],
+      migrations: ["2026-04-28-quality-cleanup"],
+      updatedAt: now,
+    }, null, 2), "utf8");
+
+    const result = await updateWorkspaceMemoryWithAccounting(root, store => store);
+    const migrationEvidence = result.evidence.filter(event => event.type === "memory_migration_superseded");
+
+    assert.equal(result.store.entries.find(memory => memory.id === "update_p0_progress")?.status, "superseded");
+    assert.equal(migrationEvidence.length, 1);
+    assert.deepEqual(migrationEvidence[0].reasonCodes, ["migration:p0_cleanup"]);
+    assert.equal(migrationEvidence[0].memory?.memoryId, "update_p0_progress");
+  } finally {
+    if (previousXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
+    else process.env.XDG_DATA_HOME = previousXdgDataHome;
     await rm(sandbox, { recursive: true, force: true });
   }
 });
@@ -1604,7 +1676,7 @@ test("redactCredentials is idempotent and also redacts rationale text", () => {
       })),
     },
     now,
-  );
+  ).store;
   assert.equal(migrated.entries[0].text, "Admin PIN 是 [REDACTED]");
   assert.equal(migrated.entries[0].rationale, "password: [REDACTED]");
 });
@@ -1663,14 +1735,69 @@ test("runMigrationP0Cleanup marks only non-explicit project snapshots and runs o
   };
 
   const once = runMigrationP0Cleanup(store, now);
-  assert.deepEqual(once.migrations, ["2026-04-26-p0-cleanup"]);
-  assert.equal(once.entries.find(e => e.id === "project-snapshot")?.status, "superseded");
-  assert.equal(once.entries.find(e => e.id === "project-explicit")?.status, "active");
-  assert.equal(once.entries.find(e => e.id === "feedback-snapshot-like")?.status, "active");
+  assert.deepEqual(once.store.migrations, ["2026-04-26-p0-cleanup"]);
+  assert.equal(once.store.entries.find(e => e.id === "project-snapshot")?.status, "superseded");
+  assert.equal(once.store.entries.find(e => e.id === "project-explicit")?.status, "active");
+  assert.equal(once.store.entries.find(e => e.id === "feedback-snapshot-like")?.status, "active");
+  assert.equal(once.events.length, 1);
+  assert.equal(once.events[0].type, "memory_migration_superseded");
+  assert.equal(once.events[0].phase, "storage");
+  assert.equal(once.events[0].outcome, "superseded");
+  assert.ok(once.events[0].reasonCodes.includes("migration:p0_cleanup"));
+  assert.equal(once.events[0].memory?.memoryId, "project-snapshot");
 
-  const twice = runMigrationP0Cleanup(once, later);
-  assert.deepEqual(twice.migrations, ["2026-04-26-p0-cleanup"], "migration id should not duplicate");
-  assert.equal(twice.entries.find(e => e.id === "project-snapshot")?.updatedAt, once.entries.find(e => e.id === "project-snapshot")?.updatedAt);
+  const twice = runMigrationP0Cleanup(once.store, later);
+  assert.deepEqual(twice.store.migrations, ["2026-04-26-p0-cleanup"], "migration id should not duplicate");
+  assert.equal(twice.store.entries.find(e => e.id === "project-snapshot")?.updatedAt, once.store.entries.find(e => e.id === "project-snapshot")?.updatedAt);
+  assert.equal(twice.events.length, 0);
+});
+
+test("loadWorkspaceMemory appends P0 migration evidence once", async () => {
+  const sandbox = await mkdtemp(join(tmpdir(), "wm-p0-evidence-"));
+  const dataHome = join(sandbox, "xdg-data-home");
+  const root = join(sandbox, "workspace");
+  const previousXdgDataHome = process.env.XDG_DATA_HOME;
+  process.env.XDG_DATA_HOME = dataHome;
+
+  try {
+    await mkdir(root, { recursive: true });
+    const now = "2026-04-26T00:00:00.000Z";
+    const storePath = await workspaceMemoryPath(root);
+    await mkdir(dirname(storePath), { recursive: true });
+    await writeFile(storePath, JSON.stringify({
+      version: 1,
+      workspace: { root, key: await workspaceKey(root) },
+      limits: { maxRenderedChars: LONG_TERM_LIMITS.maxRenderedChars, maxEntries: LONG_TERM_LIMITS.maxEntries },
+      entries: [{
+        id: "p0_progress",
+        type: "project",
+        text: "Phase 1-4 completed successfully",
+        source: "compaction",
+        confidence: 0.75,
+        status: "active",
+        createdAt: now,
+        updatedAt: now,
+      }],
+      migrations: ["2026-04-28-quality-cleanup"],
+      updatedAt: now,
+    }, null, 2), "utf8");
+
+    const firstLoad = await loadWorkspaceMemory(root);
+    await loadWorkspaceMemory(root);
+    const events = await queryEvidenceEvents(root, { types: ["memory_migration_superseded"] });
+
+    assert.equal(firstLoad.entries.find(memory => memory.id === "p0_progress")?.status, "superseded");
+    assert.equal(events.length, 1);
+    assert.equal(events[0].type, "memory_migration_superseded");
+    assert.equal(events[0].phase, "storage");
+    assert.equal(events[0].outcome, "superseded");
+    assert.deepEqual(events[0].reasonCodes, ["migration:p0_cleanup"]);
+    assert.equal(events[0].memory?.memoryId, "p0_progress");
+  } finally {
+    if (previousXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
+    else process.env.XDG_DATA_HOME = previousXdgDataHome;
+    await rm(sandbox, { recursive: true, force: true });
+  }
 });
 
 test("quality cleanup migration preserves soft-only feedback and decision violations", async () => {
@@ -1794,6 +1921,56 @@ test("quality cleanup migration writes audit log for hard supersedes", async () 
     else process.env.XDG_DATA_HOME = previousXdgDataHome;
     await rm(root, { recursive: true, force: true });
     await rm(dataHome, { recursive: true, force: true });
+  }
+});
+
+test("quality cleanup migration appends superseded evidence with hard reasons", async () => {
+  const sandbox = await mkdtemp(join(tmpdir(), "wm-quality-evidence-"));
+  const dataHome = join(sandbox, "xdg-data-home");
+  const root = join(sandbox, "workspace");
+  const previousXdgDataHome = process.env.XDG_DATA_HOME;
+  process.env.XDG_DATA_HOME = dataHome;
+
+  try {
+    await mkdir(root, { recursive: true });
+    const now = "2026-04-28T00:00:00.000Z";
+    const storePath = await workspaceMemoryPath(root);
+    await mkdir(dirname(storePath), { recursive: true });
+    await writeFile(storePath, JSON.stringify({
+      version: 1,
+      workspace: { root, key: await workspaceKey(root) },
+      limits: { maxRenderedChars: LONG_TERM_LIMITS.maxRenderedChars, maxEntries: LONG_TERM_LIMITS.maxEntries },
+      entries: [{
+        id: "quality_progress",
+        type: "project",
+        text: "Test suite: 1237 tests pass, 226 suites",
+        source: "compaction",
+        confidence: 0.75,
+        status: "active",
+        createdAt: now,
+        updatedAt: now,
+        staleAfterDays: 60,
+      }],
+      migrations: [],
+      updatedAt: now,
+    }, null, 2), "utf8");
+
+    const loaded = await loadWorkspaceMemory(root);
+    const events = await queryEvidenceEvents(root, { types: ["memory_migration_superseded"] });
+
+    assert.equal(loaded.entries.find(memory => memory.id === "quality_progress")?.status, "superseded");
+    assert.equal(events.length, 1);
+    assert.equal(events[0].type, "memory_migration_superseded");
+    assert.equal(events[0].phase, "storage");
+    assert.equal(events[0].outcome, "superseded");
+    assert.ok(events[0].reasonCodes.includes("migration:quality_cleanup"));
+    assert.ok(events[0].reasonCodes.includes("quality:progress_snapshot"));
+    assert.equal(events[0].memory?.memoryId, "quality_progress");
+    assert.equal(events[0].memory?.status, "superseded");
+  } finally {
+    if (previousXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
+    else process.env.XDG_DATA_HOME = previousXdgDataHome;
+    await rm(sandbox, { recursive: true, force: true });
   }
 });
 
