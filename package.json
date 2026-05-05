@@ -1,6 +1,6 @@
 {
   "name": "opencode-working-memory",
-  "version": "1.5.4",
+  "version": "1.5.5",
   "description": "Three-layer memory architecture for OpenCode with workspace memory and hot session state",
   "type": "module",
   "main": "index.ts",

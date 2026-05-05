@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.5] - 2026-05-05
+
+### Added
+
+- Section-aware greedy line accumulator for hot session state rendering that fits whole lines instead of truncating mid-line.
+- `accountHotSessionStateRender()` accounting function returning prompt text, omitted items, and char budget for v2 evidence extension.
+- Exported types for render accounting diagnostics: `HotStateSection`, `HotStateOmissionReason`, `HotStateOmittedItem`, `HotSessionStateRenderAccounting`.
+- 9 direct unit tests for hot session state rendering covering empty state, ranking, section caps, char budget, boundary conditions, header suppression, wrapper parity, and newline counting.
+- Two-layer omission model: section caps first (`section_cap`), then char budget (`char_budget`), with clear per-item omission reasons.
+
+### Changed
+
+- Hot session state rendering no longer uses blunt `.slice(0, maxRenderedChars)` prompt truncation.
+- Header-only sections are suppressed: a section is only rendered if at least one entry line fits the char budget.
+- `renderHotSessionState()` is now a delegation wrapper to `accountHotSessionStateRender().prompt`, preserving backward compatibility.
+- Fixed `docs/configuration.md` active-file ranking formula: was `count * action_weight * recency_decay` with weights 4/3/2/1, now correctly `ACTION_WEIGHT[action] + count * 3` with weights edit 50, write 45, grep 30, read 20, tie-break by `lastSeen` descending.
+- Clarified `README.md` system prompt injection order: workspace memory and hot state index positions depend on whether workspace memory state is available.
+
+### Fixed
+
+- Hot session state prompt could be truncated mid-line under the old `.slice()` budget enforcement.
+
 ## [1.5.4] - 2026-05-02
 
 ### Changed

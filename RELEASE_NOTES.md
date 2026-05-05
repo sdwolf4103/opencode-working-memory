@@ -1,5 +1,43 @@
 # Release Notes
 
+## 1.5.5 (2026-05-05)
+
+### Hot State Rendering Health
+
+This release replaces blunt prompt truncation with a section-aware greedy renderer that fits whole lines and suppresses empty sections, plus render accounting types for future diagnostics.
+
+> **Good rendering is selective too.** If a section doesn't fit, omit it — don't cut it in half.
+
+### What Changed
+
+- **Whole-line rendering**: the hot session state prompt no longer truncates mid-line with `.slice(0, maxRenderedChars)`. A greedy line accumulator fits complete lines and stops when the next line would exceed the 700-char budget.
+- **Header-only sections suppressed**: a section heading is only rendered if at least one entry fits alongside it. No more orphaned `active_files:` headers with no content underneath.
+- **Render accounting**: `accountHotSessionStateRender()` now returns `prompt`, `omitted[]`, and `maxRenderedChars` so future v2 diagnostics can surface which items fell out and why.
+- **Two-layer omission model**: section caps (`section_cap`) trim per-type overflow first, then the char budget (`char_budget`) trims anything that doesn't fit. Each omitted item carries its reason and section.
+- **Backward-compatible wrapper**: `renderHotSessionState()` delegates to the accounting function and returns just the prompt string, preserving existing plugin behavior.
+
+### Docs Fixes
+
+- **Active-file ranking formula corrected**: `docs/configuration.md` now matches the actual implementation — `ACTION_WEIGHT[action] + count * 3` with weights edit 50, write 45, grep 30, read 20, tie-break by `lastSeen` descending. The old docs claimed `count * action_weight * recency_decay` with weights 4/3/2/1.
+- **Injection order clarified**: README now explains that workspace memory and hot state system-prompt positions depend on whether workspace memory state is available.
+
+### Not Included Yet
+
+- Evidence events for omitted items are deferred to v2, pending a `memory-diag` consumer to avoid unused storage litter.
+
+### Upgrade Notes
+
+- No configuration changes required.
+- Existing workspace memory files remain compatible.
+- Hot session state rendering behavior is intentionally different (cleaner output, no mid-line cuts), but the same information is presented when it fits within the budget.
+
+### Validation
+
+- `npm run typecheck` — `TYPECHECK_PASS`
+- `npm test` — 356 tests passing, `TEST_PASS`
+
+---
+
 ## 1.5.4 (2026-05-02)
 
 ### Memory Diagnostics Surface Cleanup
