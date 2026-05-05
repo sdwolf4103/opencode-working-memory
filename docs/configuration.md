@@ -87,16 +87,33 @@ const HOT_STATE_LIMITS = {
 
 ## Active File Scoring
 
-Files are ranked by action type:
+Files are ranked by action type plus repeated access count:
 
 | Action | Weight | Description |
 |--------|--------|-------------|
-| `write` | 4 | File created/overwritten |
-| `edit` | 3 | File modified |
-| `read` | 2 | File read |
-| `grep` | 1 | Grep searched in file |
+| `edit` | 50 | File modified |
+| `write` | 45 | File created/overwritten |
+| `grep` | 30 | Grep searched in file |
+| `read` | 20 | File read |
 
-Score formula: `count * action_weight * recency_decay`
+Score formula: `ACTION_WEIGHT[action] + count * 3`
+
+When scores tie, the most recent `lastSeen` timestamp sorts first. There is no recency decay factor in the score itself.
+
+## Hot Session State Truncation
+
+Hot state rendering applies section caps before the character budget:
+
+| Section | Rendered cap |
+|---------|--------------|
+| `active_files` | 8 |
+| `open_errors` | 3 |
+| `recent_decisions` | 8 |
+| `pending_memories` | 6 |
+
+After section caps, the renderer applies the 700-character budget with whole-line inclusion only. The prefix line is counted against the budget, and a section heading is emitted only when at least one entry from that section fits; header-only sections are suppressed.
+
+`accountHotSessionStateRender()` returns prompt and omission accounting for future diagnostics. Evidence event integration for hot-state render omissions is planned for v2.
 
 ## Error Categories
 

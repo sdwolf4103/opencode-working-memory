@@ -85,10 +85,12 @@ OpenCode Working Memory adds durable memory without making extra LLM/API calls.
                    ▼
 ┌──────────────────────────────────────┐
 │ ⚡ Prompt Context                     │
-│ system[1]: frozen workspace memory   │
-│ system[2+]: hot session state        │
+│ system[1]*: frozen workspace memory  │
+│ system[2+]*: hot session state       │
 └──────────────────────────────────────┘
 ```
+
+\* Conceptually, workspace memory is pushed first when it is non-empty, and hot session state is pushed after workspace memory. If workspace memory is empty, hot state may be the first plugin-added system message. Actual `system[]` indices also depend on OpenCode and other plugins, so `system[1]` / `system[2+]` is a simplified model.
 
 **Zero extra API calls:** OpenCode Working Memory does not call the model on its own. Memory extraction is folded into OpenCode's built-in compaction request.
 

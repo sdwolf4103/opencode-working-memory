@@ -189,49 +189,150 @@ export function clearErrorsForSuccessfulCommand(state: SessionState, command: st
   state.updatedAt = new Date().toISOString();
 }
 
+export type HotStateSection = "active_files" | "open_errors" | "recent_decisions" | "pending_memories";
+
+export type HotStateOmissionReason = "section_cap" | "char_budget";
+
+export type HotStateOmittedItem = {
+  section: HotStateSection;
+  reason: HotStateOmissionReason;
+  text: string;
+  memoryId?: string;
+};
+
+export type HotSessionStateRenderAccounting = {
+  prompt: string;
+  omitted: HotStateOmittedItem[];
+  maxRenderedChars: number;
+};
+
+type HotStateRenderItem = {
+  section: HotStateSection;
+  line: string;
+  memoryId?: string;
+};
+
+type HotStateRenderSection = {
+  heading: `${HotStateSection}:`;
+  items: HotStateRenderItem[];
+};
+
+const HOT_STATE_PREFIX = "Hot session state (current session):";
+
+export function accountHotSessionStateRender(state: SessionState, workspaceRoot: string): HotSessionStateRenderAccounting {
+  const maxRenderedChars = HOT_STATE_LIMITS.maxRenderedChars;
+  const omitted: HotStateOmittedItem[] = [];
+  const sections = buildHotStateRenderSections(state, workspaceRoot, omitted);
+
+  if (sections.every(section => section.items.length === 0)) {
+    return { prompt: "", omitted, maxRenderedChars };
+  }
+
+  const lines: string[] = [HOT_STATE_PREFIX];
+  let renderedEntryCount = 0;
+
+  for (const section of sections) {
+    let headingRendered = false;
+
+    for (const item of section.items) {
+      if (headingRendered) {
+        if (wouldFit(lines, item.line, maxRenderedChars)) {
+          lines.push(item.line);
+          renderedEntryCount += 1;
+        } else {
+          omitted.push(omitHotStateItem(item, "char_budget"));
+        }
+        continue;
+      }
+
+      if (wouldFit(lines, section.heading, maxRenderedChars)
+        && wouldFit([...lines, section.heading], item.line, maxRenderedChars)) {
+        lines.push(section.heading, item.line);
+        headingRendered = true;
+        renderedEntryCount += 1;
+      } else {
+        omitted.push(omitHotStateItem(item, "char_budget"));
+      }
+    }
+  }
+
+  if (renderedEntryCount === 0) return { prompt: "", omitted, maxRenderedChars };
+
+  return { prompt: lines.join("\n"), omitted, maxRenderedChars };
+}
+
 export function renderHotSessionState(state: SessionState, workspaceRoot: string): string {
-  const activeFiles = rankActiveFiles(state.activeFiles).slice(0, HOT_STATE_LIMITS.maxActiveFilesRendered);
+  return accountHotSessionStateRender(state, workspaceRoot).prompt;
+}
+
+function buildHotStateRenderSections(
+  state: SessionState,
+  workspaceRoot: string,
+  omitted: HotStateOmittedItem[],
+): HotStateRenderSection[] {
+  const activeFiles = rankActiveFiles(state.activeFiles).map(item => ({
+    section: "active_files" as const,
+    line: `- ${displayPath(workspaceRoot, item.path)} (${item.action}, ${item.count}x)`,
+  }));
   const openErrors = [...state.openErrors]
     .sort((a, b) => b.lastSeen - a.lastSeen)
-    .slice(0, HOT_STATE_LIMITS.maxOpenErrorsRendered);
-  const decisions = state.recentDecisions.slice(-HOT_STATE_LIMITS.maxRecentDecisionsStored);
-  const pendingMemories = dedupePendingMemories(state.pendingMemories)
-    .slice(-HOT_STATE_LIMITS.maxPendingMemoriesRendered);
+    .map(err => ({
+      section: "open_errors" as const,
+      line: `- [${err.category}] ${err.summary}`,
+    }));
+  const decisions = state.recentDecisions.map(item => ({
+    section: "recent_decisions" as const,
+    line: `- ${item.text}`,
+  }));
+  const pendingMemories = dedupePendingMemories(state.pendingMemories).map(item => ({
+    section: "pending_memories" as const,
+    line: `- [${item.type}] ${item.text}`,
+    memoryId: item.id,
+  }));
 
-  if (activeFiles.length === 0 && openErrors.length === 0 && decisions.length === 0 && pendingMemories.length === 0) return "";
+  const renderedActiveFiles = capHotStateItems(activeFiles, HOT_STATE_LIMITS.maxActiveFilesRendered, "start", omitted);
+  const renderedOpenErrors = capHotStateItems(openErrors, HOT_STATE_LIMITS.maxOpenErrorsRendered, "start", omitted);
+  const renderedDecisions = capHotStateItems(decisions, HOT_STATE_LIMITS.maxRecentDecisionsStored, "end", omitted);
+  const renderedPendingMemories = capHotStateItems(
+    pendingMemories,
+    HOT_STATE_LIMITS.maxPendingMemoriesRendered,
+    "end",
+    omitted,
+  );
 
-  const lines: string[] = ["Hot session state (current session):"];
+  return [
+    { heading: "active_files:", items: renderedActiveFiles },
+    { heading: "open_errors:", items: renderedOpenErrors },
+    { heading: "recent_decisions:", items: renderedDecisions },
+    { heading: "pending_memories:", items: renderedPendingMemories },
+  ];
+}
 
-  if (activeFiles.length > 0) {
-    lines.push("active_files:");
-    for (const item of activeFiles) {
-      const viewPath = displayPath(workspaceRoot, item.path);
-      lines.push(`- ${viewPath} (${item.action}, ${item.count}x)`);
-    }
-  }
+function capHotStateItems(
+  items: HotStateRenderItem[],
+  cap: number,
+  keep: "start" | "end",
+  omitted: HotStateOmittedItem[],
+): HotStateRenderItem[] {
+  if (items.length <= cap) return items;
 
-  if (openErrors.length > 0) {
-    lines.push("open_errors:");
-    for (const err of openErrors) {
-      lines.push(`- [${err.category}] ${err.summary}`);
-    }
-  }
+  const renderedItems = keep === "start" ? items.slice(0, cap) : items.slice(-cap);
+  const omittedItems = keep === "start" ? items.slice(cap) : items.slice(0, items.length - cap);
+  omitted.push(...omittedItems.map(item => omitHotStateItem(item, "section_cap")));
+  return renderedItems;
+}
 
-  if (decisions.length > 0) {
-    lines.push("recent_decisions:");
-    for (const decision of decisions) {
-      lines.push(`- ${decision.text}`);
-    }
-  }
+function omitHotStateItem(item: HotStateRenderItem, reason: HotStateOmissionReason): HotStateOmittedItem {
+  return {
+    section: item.section,
+    reason,
+    text: item.line,
+    ...(item.memoryId ? { memoryId: item.memoryId } : {}),
+  };
+}
 
-  if (pendingMemories.length > 0) {
-    lines.push("pending_memories:");
-    for (const memory of pendingMemories) {
-      lines.push(`- [${memory.type}] ${memory.text}`);
-    }
-  }
-
-  return lines.join("\n").slice(0, HOT_STATE_LIMITS.maxRenderedChars);
+function wouldFit(lines: string[], nextLine: string, maxRenderedChars: number): boolean {
+  return [...lines, nextLine].join("\n").length <= maxRenderedChars;
 }
 
 function rankActiveFiles(activeFiles: ActiveFile[]): ActiveFile[] {
