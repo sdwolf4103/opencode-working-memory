@@ -266,14 +266,6 @@ Default behavior:
 
 See [Configuration](docs/configuration.md) for customization options.
 
-## Roadmap
-
-Current focus:
-
-- Add explicit delete tombstones so removed memories do not get re-extracted.
-- Monitor numbered refs and protected replacements with `memory-diag commands` before tightening automatic replacement policy further.
-- Explore tiered hot/warm/cold storage after the retention model has more real-world data.
-
 ## Documentation
 
 - [Architecture Overview](docs/architecture.md)
