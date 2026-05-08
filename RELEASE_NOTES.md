@@ -91,12 +91,6 @@ npx --package opencode-working-memory memory-diag revert --event <event-id>
 - If a compaction snapshot ID is present and mismatched, all numbered commands from that summary are rejected with `missing_memory_ref_snapshot`.
 - If the model omits the snapshot ID, v1.6 falls back to exact memory ref validation for compatibility and command effectiveness.
 
-### Not Included Yet
-
-- Semantic duplicate detection is still out of scope; numbered refs solve explicit compaction-targeted maintenance, not fuzzy topic matching.
-- Hot state evidence emission remains deferred to v2 until there is a `memory-diag` consumer for omitted hot-state items.
-- Automatic cleanup of old low-quality memories is not expanded in this release; new quality gates apply to new candidates.
-
 ### Upgrade Notes
 
 - No configuration changes required.
