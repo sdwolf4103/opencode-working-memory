@@ -212,6 +212,65 @@ Memory candidates:
   assert.match(result.evidence[0].textPreview ?? "", /accounting evidence events/);
 });
 
+test("parseWorkspaceMemoryCandidatesWithEvidence returns mixed valid commands and entries", () => {
+  const summary = `
+Memory candidates:
+REINFORCE [M3]
+REPLACE [M4] [decision] Use numbered refs for safe memory consolidation.
+- [feedback] User prefers concise implementation handoffs.
+`;
+
+  const result = parseWorkspaceMemoryCandidatesWithEvidence(summary);
+
+  assert.deepEqual(result.commands, [
+    { kind: "REINFORCE", ref: "M3" },
+    { kind: "REPLACE", ref: "M4", type: "decision", text: "Use numbered refs for safe memory consolidation." },
+  ]);
+  assert.equal(result.entries.length, 1);
+  assert.equal(result.entries[0].type, "feedback");
+  assert.equal(result.entries[0].text, "User prefers concise implementation handoffs.");
+});
+
+test("parseWorkspaceMemoryCandidatesWithEvidence rejects malformed command attempts", () => {
+  const summary = `
+Memory candidates:
+REINFORCE M3
+REINFORCE [X3]
+REPLACE [M3] text without type
+REPLACE [M3] [invalid] text
+REPLACE [M3] [decision]
+`;
+
+  const result = parseWorkspaceMemoryCandidatesWithEvidence(summary);
+  const rejections = result.evidence.filter(event => event.type === "extraction_candidate_rejected");
+
+  assert.equal(result.entries.length, 0);
+  assert.deepEqual(result.commands, []);
+  assert.equal(rejections.length, 5);
+  assert.ok(rejections.every(event => event.phase === "extraction"));
+  assert.ok(rejections.every(event => event.outcome === "rejected"));
+  assert.deepEqual(rejections.map(event => event.reasonCodes[0]), [
+    "invalid_memory_ref",
+    "invalid_memory_ref",
+    "invalid_memory_type",
+    "invalid_memory_type",
+    "empty_replacement_text",
+  ]);
+});
+
+test("parseWorkspaceMemoryCandidates accepts bracketed candidates without bullets", () => {
+  const summary = `
+Memory candidates:
+[project] This repository uses local JSON stores for workspace memory.
+`;
+
+  const items = parseWorkspaceMemoryCandidates(summary);
+
+  assert.equal(items.length, 1);
+  assert.equal(items[0].type, "project");
+  assert.equal(items[0].text, "This repository uses local JSON stores for workspace memory.");
+});
+
 test("compaction rejected candidate returns rejection evidence without secrets", () => {
   const summary = `
 Memory candidates:

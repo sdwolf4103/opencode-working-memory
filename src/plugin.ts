@@ -19,11 +19,11 @@
  * - Processes explicit memory from latest user text once per message id
  * - Injects frozen workspace memory and dynamic hot session state into system prompt
  * - Updates session state after tool execution
- * - Augments compaction context with memory, hot state, todos, and instruction
+ * - Augments compaction context with numbered memory refs, todos, and instruction
  * - Parses compaction summaries for memory candidates and merges them
  */
 
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { realpath, rm } from "fs/promises";
 import type { Plugin } from "@opencode-ai/plugin";
 import {
@@ -31,12 +31,17 @@ import {
   extractActiveFiles,
   extractErrorsFromBash,
   parseWorkspaceMemoryCandidatesWithEvidence,
+  staleAfterDaysFor,
+  type WorkspaceMemoryCommand,
 } from "./extractors.ts";
+import { assessMemoryQuality } from "./memory-quality.ts";
 import {
   loadWorkspaceMemory,
   updateWorkspaceMemory,
   updateWorkspaceMemoryWithAccounting,
   accountWorkspaceMemoryRender,
+  accountWorkspaceMemoryCompactionRefs,
+  workspaceMemoryExactKey,
   workspaceMemoryIdentityKey,
 } from "./workspace-memory.ts";
 import { reinforceMemory } from "./retention.ts";
@@ -66,7 +71,7 @@ import {
 } from "./opencode.ts";
 import { accountPendingPromotions, promotionAccountingEvidenceEvents } from "./promotion-accounting.ts";
 import { appendEvidenceEvent, appendEvidenceEvents, type EvidenceEventInput, type MemoryEvidenceRef } from "./evidence-log.ts";
-import { type LongTermMemoryEntry, WORKSPACE_MEMORY_CACHE_LIMITS } from "./types.ts";
+import { type CompactionMemoryRef, type LongTermMemoryEntry, LONG_TERM_LIMITS, WORKSPACE_MEMORY_CACHE_LIMITS } from "./types.ts";
 
 /**
  * Build the complete compaction prompt.
@@ -76,11 +81,14 @@ import { type LongTermMemoryEntry, WORKSPACE_MEMORY_CACHE_LIMITS } from "./types
  * Our template uses only ## Markdown headings and explicitly forbids YAML frontmatter,
  * horizontal rules, and delimiter lines.
  *
- * @param privateContext - Background context (workspace memory, hot session state,
+ * @param privateContext - Background context (numbered workspace memory refs,
  *   pending todos) from our plugin and any other plugins. Shown to the model to
  *   inform the summary but not copied verbatim.
  */
-function buildCompactionPrompt(privateContext: string): string {
+function buildCompactionPrompt(privateContext: string, compactionId?: string): string {
+  const snapshotInstruction = compactionId
+    ? `- If you emit any REINFORCE or REPLACE command, include \`Memory ref snapshot id: ${compactionId}\` as the first line under \"Memory candidates:\" so numbered refs match the correct compaction snapshot.`
+    : "";
   return [
     "Provide a detailed summary for continuing our conversation above.",
     "Focus on information that would help another agent continue the work: the goal, user instructions, completed work, current state, decisions, relevant files, and next steps.",
@@ -95,6 +103,7 @@ function buildCompactionPrompt(privateContext: string): string {
     "- Do not output horizontal rules.",
     "- Do not wrap the summary in delimiter lines such as ---.",
     "- Do not use code fences around the summary.",
+    ...(snapshotInstruction ? [snapshotInstruction] : []),
     "",
     "Use this structure:",
     "",
@@ -116,19 +125,19 @@ function buildCompactionPrompt(privateContext: string): string {
     "",
     "CRITICAL MEMORY RULES:",
     "- Most compactions should produce ZERO memories. Empty is correct when nothing durable changed.",
-    "- Existing workspace memory may already contain durable facts. If a fact is already present and still accurate, do not create a rephrased duplicate.",
-    "- If the same durable fact truly needs to be emitted again, reuse the existing memory wording exactly whenever possible.",
-    "- Only emit a new memory when the fact is new, materially corrected, or materially more specific than the existing memory.",
+    "- Existing memories are numbered [M#]. If an existing memory is still accurate, emit at most 3 lines like `REINFORCE [M#]`; do not rephrase it.",
+    "- Use `REPLACE [M#] [type] text` only for eligible unreinforced compaction-sourced memories where the old text itself needs correction; this is rarely the right choice.",
+    "- To supplement or correct a memory, REINFORCE the existing [M#] if it is still accurate, and also emit a new complete [type] candidate with the addition or correction. Do not use REPLACE for additions; do not reinforce a memory that is now inaccurate.",
     "- NO completion or progress statements: do not extract completed work, passing tests, commits, PR status, wave/task/phase completion, or current state.",
     "- NO session-internal implementation notes: do not extract what files were edited, what bug was just fixed, what command just ran, or what the assistant reviewed.",
-    "- feedback ONLY means stable user preferences or user instructions, written in imperative/future-facing form.",
-    "- decision ONLY means rules that apply to FUTURE work, not decisions already implemented in this session.",
-    "- project/reference ONLY when the fact is stable across sessions and hard to rediscover from the repository.",
+    "- decision = future rule/architecture choice; reference = stable lookup fact; project = stable project fact; feedback = stable user preference.",
+    "- Do not use decision for service names, IDs, URLs, file paths, or one-off session status; use reference/project or skip.",
     "- If unsure, skip it.",
     "",
     "Good memory examples:",
+    "- REINFORCE [M1]",
     "- [feedback] User prefers architecture reviews in Traditional Chinese.",
-    "- [decision] Do not add semantic merge to memory dedupe.",
+    "- [decision] Keep memory dedupe exact-only for decisions.",
     "- [project] This repository is an OpenCode plugin using local JSON stores.",
     "- [reference] Workspace memory is rendered as frozen system[1]; pending memories remain in hot state until compaction.",
     "",
@@ -139,11 +148,13 @@ function buildCompactionPrompt(privateContext: string): string {
     "- The assistant reviewed code reviewer feedback and updated the plan.",
     "- Commit a762e86 contains the owner scope fix.",
     "",
-    "Format when there ARE durable memories:",
+    "Format when there ARE REINFORCE/REPLACE commands or durable new candidates:",
     "Memory candidates:",
-    "- [feedback|decision|project|reference] future-facing durable fact",
+    "REINFORCE [M#]",
+    "REPLACE [M#] [feedback|decision|project|reference] corrected durable fact",
+    "- [feedback|decision|project|reference] new future-facing durable fact",
     "",
-    "Format when there are NO durable memories:",
+    "Format when there are NO REINFORCE/REPLACE commands or durable candidates:",
     "Memory candidates:",
     "(none)",
     "",
@@ -173,6 +184,20 @@ function safeErrorMessage(error: unknown): string {
   return message.replace(/\s+/g, " ").slice(0, 240);
 }
 
+type CompactionRefResolution =
+  | {
+      ok: true;
+      refSnapshot: CompactionMemoryRef;
+      target: LongTermMemoryEntry;
+      targetIndex: number;
+    }
+  | {
+      ok: false;
+      reason: "missing_memory_ref_snapshot" | "invalid_memory_ref" | "memory_ref_target_unavailable" | "memory_ref_target_changed";
+      refSnapshot?: CompactionMemoryRef;
+      target?: LongTermMemoryEntry;
+    };
+
 async function warnMemoryHook(scope: string, error: unknown, root?: string): Promise<void> {
   const message = safeErrorMessage(error);
   console.error(`[memory] ${scope} failed: ${message}`);
@@ -198,6 +223,10 @@ async function workspaceIdentity(root: string): Promise<{ workspaceKey: string; 
     workspaceRootHash(root),
   ]);
   return { workspaceKey: workspaceKeyValue, workspaceRootHash: workspaceRootHashValue };
+}
+
+function compactionIdFromSummary(summary: string): string | undefined {
+  return summary.match(/Memory ref snapshot id:\s*([a-zA-Z0-9_-]+)/i)?.[1];
 }
 
 export const MemoryV2Plugin: Plugin = async (input) => {
@@ -257,6 +286,227 @@ export const MemoryV2Plugin: Plugin = async (input) => {
       reasonCodes: ["pending_journal_append"],
       textPreview: memory.text,
     };
+  }
+
+  function memoryReinforcedEvidence(
+    memory: LongTermMemoryEntry | undefined,
+    ref: string,
+    outcome: "reinforced" | "rejected",
+    reasonCodes: string[],
+    details: EvidenceEventInput["details"] = {},
+  ): EvidenceEventInput {
+    const relationRole = outcome === "rejected" ? "target" : "reinforced";
+    return {
+      type: "memory_reinforced",
+      phase: "reinforcement",
+      outcome,
+      memory: memory ? memoryEvidenceRef(memory) : undefined,
+      relations: memory ? [{ role: relationRole, memory: memoryEvidenceRef(memory) }] : undefined,
+      reasonCodes,
+      details: {
+        ref,
+        ...details,
+      },
+      textPreview: memory?.text,
+    };
+  }
+
+  function replacementMemoryId(): string {
+    return `mem_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  }
+
+  function memoryReplacedEvidence(
+    oldMemory: LongTermMemoryEntry | undefined,
+    newMemory: LongTermMemoryEntry | undefined,
+    ref: string,
+    outcome: "superseded" | "rejected",
+    reasonCodes: string[],
+    details: EvidenceEventInput["details"] = {},
+  ): EvidenceEventInput {
+    const relations = outcome === "rejected"
+      ? [
+        ...(oldMemory ? [{ role: "target" as const, memory: memoryEvidenceRef(oldMemory) }] : []),
+      ]
+      : [
+        ...(oldMemory ? [{ role: "superseded" as const, memory: memoryEvidenceRef(oldMemory) }] : []),
+        ...(newMemory ? [{ role: "superseded_by" as const, memory: memoryEvidenceRef(newMemory) }] : []),
+      ];
+    return {
+      type: "memory_replaced_numbered_ref",
+      phase: "storage",
+      outcome,
+      memory: oldMemory ? memoryEvidenceRef(oldMemory) : undefined,
+      relations: relations.length > 0 ? relations : undefined,
+      reasonCodes,
+      details: {
+        ref,
+        ...details,
+      },
+      textPreview: newMemory?.text ?? oldMemory?.text,
+    };
+  }
+
+  function compactionRefByLabel(refs: CompactionMemoryRef[]): Map<string, CompactionMemoryRef> {
+    return new Map(refs.map(ref => [ref.ref.toUpperCase(), ref]));
+  }
+
+  function compactionSnapshotStatus(
+    refs: CompactionMemoryRef[],
+    expectedCompactionId: string | undefined,
+  ): { ok: true } | { ok: false; storedCompactionId: string } {
+    if (refs.length === 0) return { ok: false, storedCompactionId: "none" };
+
+    const ids = new Set(refs.map(ref => ref.compactionId).filter((id): id is string => typeof id === "string" && id.length > 0));
+    if (!expectedCompactionId) return { ok: true };
+    if (ids.size === 1 && ids.has(expectedCompactionId)) return { ok: true };
+    if (ids.size === 0) return { ok: false, storedCompactionId: "none" };
+    if (ids.size === 1) return { ok: false, storedCompactionId: [...ids][0] };
+    return { ok: false, storedCompactionId: "mixed" };
+  }
+
+  function resolveCompactionMemoryRef(
+    refs: CompactionMemoryRef[],
+    refsByLabel: Map<string, CompactionMemoryRef>,
+    entries: LongTermMemoryEntry[],
+    ref: string,
+  ): CompactionRefResolution {
+    if (refs.length === 0) {
+      return { ok: false, reason: "missing_memory_ref_snapshot" };
+    }
+
+    const refSnapshot = refsByLabel.get(ref.toUpperCase());
+    if (!refSnapshot) {
+      return { ok: false, reason: "invalid_memory_ref" };
+    }
+
+    const targetIndex = entries.findIndex(entry => entry.id === refSnapshot.memoryId);
+    const target = targetIndex >= 0 ? entries[targetIndex] : undefined;
+    if (!target || target.status !== "active") {
+      return { ok: false, reason: "memory_ref_target_unavailable", refSnapshot, target };
+    }
+
+    if (workspaceMemoryExactKey(target) !== refSnapshot.exactKey) {
+      return { ok: false, reason: "memory_ref_target_changed", refSnapshot, target };
+    }
+
+    return { ok: true, refSnapshot, target, targetIndex };
+  }
+
+  async function applyCompactionMemoryCommands(
+    sessionID: string,
+    commands: WorkspaceMemoryCommand[],
+    compactionId: string | undefined,
+  ): Promise<void> {
+    if (commands.length === 0) return;
+
+    const sessionState = await loadSessionState(directory, sessionID);
+    const snapshotStatus = compactionSnapshotStatus(sessionState.compactionMemoryRefs, compactionId);
+    const refs = snapshotStatus.ok ? sessionState.compactionMemoryRefs : [];
+    const refsByLabel = compactionRefByLabel(refs);
+    const evidence: EvidenceEventInput[] = [];
+    const now = Date.now();
+    let snapshotMismatchDetails: EvidenceEventInput["details"] = {};
+    if ("storedCompactionId" in snapshotStatus) {
+      snapshotMismatchDetails = {
+        ...(compactionId ? { compactionId } : {}),
+        storedCompactionId: snapshotStatus.storedCompactionId,
+      };
+    }
+
+    const updateResult = await updateWorkspaceMemoryWithAccounting(directory, workspaceMemory => {
+      for (const command of commands) {
+        const resolution = resolveCompactionMemoryRef(refs, refsByLabel, workspaceMemory.entries, command.ref);
+        if (resolution.ok === false) {
+          const memoryId = resolution.refSnapshot?.memoryId;
+          const details = memoryId ? { ...snapshotMismatchDetails, memoryId } : snapshotMismatchDetails;
+          if (command.kind === "REINFORCE") {
+            evidence.push(memoryReinforcedEvidence(resolution.target, command.ref, "rejected", [resolution.reason], details));
+          } else {
+            evidence.push(memoryReplacedEvidence(resolution.target, undefined, command.ref, "rejected", [resolution.reason], details));
+          }
+          continue;
+        }
+
+        const { refSnapshot, target, targetIndex } = resolution;
+        if (command.kind === "REINFORCE") {
+          const reinforced = reinforceMemory(target, sessionID, now);
+          if (reinforced === target) {
+            evidence.push(memoryReinforcedEvidence(target, command.ref, "rejected", ["numbered_ref_reinforce", "reinforcement_window_blocked"], {
+              memoryId: refSnapshot.memoryId,
+            }));
+            continue;
+          }
+
+          workspaceMemory.entries[targetIndex] = reinforced;
+          evidence.push(memoryReinforcedEvidence(reinforced, command.ref, "reinforced", ["numbered_ref_reinforce", "reinforcement_window_allowed"], {
+            memoryId: refSnapshot.memoryId,
+          }));
+          continue;
+        }
+
+        if (target.source !== "compaction") {
+          evidence.push(memoryReplacedEvidence(target, undefined, command.ref, "rejected", ["protected_memory_source"], {
+            memoryId: refSnapshot.memoryId,
+            source: target.source,
+          }));
+          continue;
+        }
+
+        if ((target.reinforcementCount ?? 0) > 0) {
+          evidence.push(memoryReplacedEvidence(target, undefined, command.ref, "rejected", ["protected_reinforced_target"], {
+            memoryId: refSnapshot.memoryId,
+            reinforcementCount: target.reinforcementCount ?? 0,
+          }));
+          continue;
+        }
+
+        const quality = assessMemoryQuality({ type: command.type, text: command.text, source: "compaction" });
+        if (!quality.accepted) {
+          evidence.push(memoryReplacedEvidence(target, undefined, command.ref, "rejected", quality.reasons, {
+            memoryId: refSnapshot.memoryId,
+          }));
+          continue;
+        }
+
+        const supersededTarget: LongTermMemoryEntry = {
+          ...target,
+          status: "superseded",
+          updatedAt: new Date(now).toISOString(),
+        };
+        const replacement: LongTermMemoryEntry = {
+          id: replacementMemoryId(),
+          type: command.type,
+          text: command.text.slice(0, LONG_TERM_LIMITS.maxEntryTextChars),
+          source: "compaction",
+          confidence: 0.75,
+          status: "active",
+          createdAt: new Date(now).toISOString(),
+          updatedAt: new Date(now).toISOString(),
+          retentionClock: now,
+          staleAfterDays: staleAfterDaysFor(command.type),
+          supersedes: [target.id],
+        };
+
+        workspaceMemory.entries[targetIndex] = supersededTarget;
+        workspaceMemory.entries.push(replacement);
+        evidence.push(memoryReplacedEvidence(supersededTarget, replacement, command.ref, "superseded", [
+          "numbered_ref_replace",
+          command.type === target.type ? "same_type_replace" : "cross_type_replace",
+        ], {
+          oldMemoryId: target.id,
+          newMemoryId: replacement.id,
+          oldType: target.type,
+          newType: command.type,
+        }));
+      }
+
+      return workspaceMemory;
+    });
+
+    await appendEvidenceEvents(directory, [...updateResult.evidence, ...evidence].map(event => ({
+      ...event,
+      sessionHash: sessionID,
+    })));
   }
 
   function pruneFrozenWorkspaceMemoryCache(now = Date.now()): void {
@@ -564,6 +814,13 @@ export const MemoryV2Plugin: Plugin = async (input) => {
     return props?.sessionID ?? props?.info?.id;
   }
 
+  async function clearCompactionMemoryRefs(sessionID: string): Promise<void> {
+    await updateSessionState(directory, sessionID, state => {
+      state.compactionMemoryRefs = [];
+      return state;
+    });
+  }
+
   return {
     // Inject workspace memory and hot session state into system prompt
     "experimental.chat.system.transform": async (hookInput, output) => {
@@ -692,23 +949,27 @@ export const MemoryV2Plugin: Plugin = async (input) => {
         // so we must explicitly carry forward any existing output.context.
         const otherContext = output.context.filter(Boolean).join("\n\n");
 
-        // Build our private context (workspace memory, hot state, todos)
+        // Build our private context (numbered workspace memory refs, todos)
         const contextParts: string[] = [];
 
-      // 1. Frozen workspace memory snapshot
-        const workspaceSnapshot = await getFrozenWorkspaceMemorySnapshot(directory, sessionID);
-        if (workspaceSnapshot.renderedPrompt) {
-          contextParts.push(workspaceSnapshot.renderedPrompt);
+        // 1. Compaction-only numbered workspace memory snapshot
+        const compactionId = randomUUID();
+        const workspaceStore = await loadWorkspaceMemory(directory);
+        const compactionRefs = accountWorkspaceMemoryCompactionRefs(workspaceStore);
+        const refsWithCompactionId = compactionRefs.refs.map(ref => ({ ...ref, compactionId }));
+        await updateSessionState(directory, sessionID, state => {
+          state.compactionMemoryRefs = refsWithCompactionId;
+          return state;
+        });
+        await appendEvidenceEvents(directory, compactionRefs.evidence.map(event => ({
+          ...event,
+          sessionHash: sessionID,
+        })));
+        if (compactionRefs.prompt) {
+          contextParts.push(compactionRefs.prompt);
         }
 
-        // 2. Hot session state
-        const sessionState = await loadSessionState(directory, sessionID);
-        const hotPrompt = renderHotSessionState(sessionState, directory);
-        if (hotPrompt) {
-          contextParts.push(hotPrompt);
-        }
-
-        // 3. Pending todos from OpenCode
+        // 2. Pending todos from OpenCode
         const todos = await pendingTodos(client, sessionID);
         const todosPrompt = renderTodosForCompaction(todos);
         if (todosPrompt) {
@@ -721,7 +982,7 @@ export const MemoryV2Plugin: Plugin = async (input) => {
           .join("\n\n");
 
         // Replace the default prompt entirely with our ---free template
-        output.prompt = buildCompactionPrompt(privateContext);
+        output.prompt = buildCompactionPrompt(privateContext, compactionId);
 
         // Clear context array since we consumed it into output.prompt.
         // Subsequent plugins that set output.prompt will also need to check
@@ -735,33 +996,40 @@ export const MemoryV2Plugin: Plugin = async (input) => {
     // Handle session events
     event: async ({ event }) => {
       if (event.type === "session.compacted") {
+        let sessionID: string | undefined;
         try {
-          const sessionID = sessionIDFromEventProperties(event.properties);
+          sessionID = sessionIDFromEventProperties(event.properties);
           if (!sessionID) return;
 
           // Sub-agents don't need post-compaction processing
           if (await isSubAgent(sessionID)) return;
 
-          // Parse latest compaction summary for memory candidates, stage them into
-          // durable pending journal, then promote pending memories.
-          const summary = await latestCompactionSummary(client, sessionID);
-          const parseResult = summary
-            ? parseWorkspaceMemoryCandidatesWithEvidence(summary, await workspaceIdentity(directory))
-            : { entries: [], evidence: [] };
-          await appendEvidenceEvents(directory, parseResult.evidence.map(event => ({
-            ...event,
-            sessionHash: sessionID,
-          })));
-          const candidates = parseResult.entries;
-          if (candidates.length > 0) {
-            await appendPendingMemories(directory, candidates);
-            await appendEvidenceEvents(directory, candidates.map(memory => ({
-              ...pendingAppendedEvidence(memory),
+          try {
+            // Parse latest compaction summary for memory candidates, stage them into
+            // durable pending journal, then promote pending memories.
+            const summary = await latestCompactionSummary(client, sessionID);
+            const compactionId = summary ? compactionIdFromSummary(summary) : undefined;
+            const parseResult = summary
+              ? parseWorkspaceMemoryCandidatesWithEvidence(summary, await workspaceIdentity(directory))
+              : { entries: [], commands: [], evidence: [] };
+            await appendEvidenceEvents(directory, parseResult.evidence.map(event => ({
+              ...event,
               sessionHash: sessionID,
             })));
-          }
+            await applyCompactionMemoryCommands(sessionID, parseResult.commands, compactionId);
+            const candidates = parseResult.entries;
+            if (candidates.length > 0) {
+              await appendPendingMemories(directory, candidates);
+              await appendEvidenceEvents(directory, candidates.map(memory => ({
+                ...pendingAppendedEvidence(memory),
+                sessionHash: sessionID,
+              })));
+            }
 
-          await promotePendingMemories(sessionID, { includeUnownedJournal: true });
+            await promotePendingMemories(sessionID, { includeUnownedJournal: true });
+          } finally {
+            await clearCompactionMemoryRefs(sessionID);
+          }
         } catch (error) {
           // Keep pending memories in session/journal for retry on next event/session.
           await warnMemoryHook("event.session.compacted", error, directory);

@@ -9,6 +9,8 @@ test("help returns usage without exposing hidden or removed commands", () => {
   assert.equal("help" in parsed && parsed.help, true);
   assert.match(parsed.usage, /Usage:/);
   assert.match(parsed.usage, /memory-diag \[status\]/);
+  assert.match(parsed.usage, /memory-diag commands/);
+  assert.match(parsed.usage, /memory-diag revert/);
   for (const command of ["health", "quality", "rejections", "disappearances", "trace", "coverage", "audit"]) {
     assert.doesNotMatch(parsed.usage, new RegExp(command));
   }
@@ -76,6 +78,41 @@ test("current command flag validation messages are preserved", () => {
     assert.equal(parsed.message, item.message);
     assert.match(parsed.usage, /Usage:/);
   }
+});
+
+test("commands accepts workspace json and verbose flags", () => {
+  const parsed = parseArgs(["commands", "--workspace", "/tmp/workspace", "--json", "--verbose"]);
+
+  assert.equal(parsed.ok, true);
+  assert.equal("command" in parsed && parsed.command, "commands");
+  assert.equal("options" in parsed && parsed.options.workspace, "/tmp/workspace");
+  assert.equal("options" in parsed && parsed.options.json, true);
+  assert.equal("options" in parsed && parsed.options.verbose, true);
+});
+
+test("revert accepts memory or event selectors and apply flag", () => {
+  const byMemory = parseArgs(["revert", "--memory", "mem-new", "--workspace", "/tmp/workspace", "--apply"]);
+  assert.equal(byMemory.ok, true);
+  assert.equal("command" in byMemory && byMemory.command, "revert");
+  assert.equal("options" in byMemory && byMemory.options.memory, "mem-new");
+  assert.equal("options" in byMemory && byMemory.options.workspace, "/tmp/workspace");
+  assert.equal("options" in byMemory && byMemory.options.apply, true);
+
+  const byEvent = parseArgs(["revert", "--event", "evt_1"]);
+  assert.equal(byEvent.ok, true);
+  assert.equal("command" in byEvent && byEvent.command, "revert");
+  assert.equal("options" in byEvent && byEvent.options.event, "evt_1");
+  assert.equal("options" in byEvent && byEvent.options.apply, undefined);
+});
+
+test("revert requires exactly one selector", () => {
+  const missing = parseArgs(["revert"]);
+  assert.equal(missing.ok, false);
+  if (!missing.ok) assert.equal(missing.message, "revert requires --memory or --event");
+
+  const both = parseArgs(["revert", "--memory", "mem-new", "--event", "evt_1"]);
+  assert.equal(both.ok, false);
+  if (!both.ok) assert.equal(both.message, "Use either --memory or --event, not both");
 });
 
 test("rejected invalid since value returns current error", () => {

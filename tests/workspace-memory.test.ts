@@ -10,6 +10,7 @@ import { queryEvidenceEvents } from "../src/evidence-log.ts";
 import {
   renderWorkspaceMemory,
   accountWorkspaceMemoryRender,
+  accountWorkspaceMemoryCompactionRefs,
   enforceLongTermLimits,
   dedupeLongTermEntriesWithAccounting,
   enforceLongTermLimitsWithAccounting,
@@ -42,6 +43,15 @@ test("default prompt budgets use calibrated conservative character caps", () => 
   assert.equal(LONG_TERM_LIMITS.maxRenderedChars, 3600);
   assert.equal(LONG_TERM_LIMITS.targetRenderedChars, 3000);
   assert.equal(HOT_STATE_LIMITS.maxRenderedChars, 700);
+});
+
+test("retention type caps use v1.6 decision headroom without changing other caps", () => {
+  assert.equal(RETENTION_TYPE_MAX.feedback, 10);
+  assert.equal(RETENTION_TYPE_MAX.decision, 12);
+  assert.equal(RETENTION_TYPE_MAX.project, 8);
+  assert.equal(RETENTION_TYPE_MAX.reference, 6);
+  assert.equal(LONG_TERM_LIMITS.maxEntries, 28);
+  assert.equal(LONG_TERM_LIMITS.maxRenderedChars, 3600);
 });
 
 function entry(id: string, text: string, type: LongTermMemoryEntry["type"] = "decision"): LongTermMemoryEntry {
@@ -157,6 +167,92 @@ test("renderWorkspaceMemory returns empty for no entries", () => {
 
   const rendered = renderWorkspaceMemory(store);
   assert.equal(rendered, "");
+});
+
+test("accountWorkspaceMemoryCompactionRefs returns empty prompt and refs for no entries", () => {
+  const store: WorkspaceMemoryStore = {
+    version: 1,
+    workspace: { root: "/repo", key: "abc" },
+    limits: { maxRenderedChars: LONG_TERM_LIMITS.maxRenderedChars, maxEntries: LONG_TERM_LIMITS.maxEntries },
+    entries: [],
+    updatedAt: new Date().toISOString(),
+  };
+
+  const accounting = accountWorkspaceMemoryCompactionRefs(store);
+
+  assert.equal(accounting.prompt, "");
+  assert.deepEqual(accounting.refs, []);
+});
+
+test("accountWorkspaceMemoryCompactionRefs renders numbered refs by type with snapshot keys", () => {
+  const originalNow = Date.now;
+  const capturedAt = Date.UTC(2026, 4, 7, 12, 0, 0);
+  Date.now = () => capturedAt;
+
+  try {
+    const createdAt = new Date(capturedAt).toISOString();
+    const entries: LongTermMemoryEntry[] = [
+      { ...entry("mem-feedback", "User requires verifier confirmation after each wave.", "feedback"), createdAt, updatedAt: createdAt, source: "explicit" },
+      { ...entry("mem-project", "This repository is an OpenCode plugin using local JSON stores.", "project"), createdAt, updatedAt: createdAt },
+      { ...entry("mem-decision", "Decision dedupe stays exact-only.", "decision"), createdAt, updatedAt: createdAt },
+      { ...entry("mem-reference", "Workspace memory is rendered as frozen system[1] during normal chat turns.", "reference"), createdAt, updatedAt: createdAt },
+      { ...entry("mem-superseded", "Superseded memory should not get a ref.", "decision"), status: "superseded" as const },
+    ];
+    const store: WorkspaceMemoryStore = {
+      version: 1,
+      workspace: { root: "/repo", key: "abc" },
+      limits: { maxRenderedChars: LONG_TERM_LIMITS.maxRenderedChars, maxEntries: LONG_TERM_LIMITS.maxEntries },
+      entries,
+      updatedAt: createdAt,
+      lastActivityAt: createdAt,
+    };
+
+    const accounting = accountWorkspaceMemoryCompactionRefs(store);
+
+    assert.equal(accounting.prompt, [
+      "Existing workspace memories available for consolidation:",
+      "feedback:",
+      "[M1] User requires verifier confirmation after each wave.",
+      "project:",
+      "[M2] This repository is an OpenCode plugin using local JSON stores.",
+      "decision:",
+      "[M3] Decision dedupe stays exact-only.",
+      "reference:",
+      "[M4] Workspace memory is rendered as frozen system[1] during normal chat turns.",
+    ].join("\n"));
+    assert.deepEqual(accounting.refs.map(ref => ref.ref), ["M1", "M2", "M3", "M4"]);
+    assert.deepEqual(accounting.refs.map(ref => ref.memoryId), ["mem-feedback", "mem-project", "mem-decision", "mem-reference"]);
+    assert.deepEqual(accounting.refs.map(ref => ref.exactKey), accounting.rendered.map(workspaceMemoryExactKey));
+    assert.deepEqual(accounting.refs.map(ref => ref.identityKey), accounting.rendered.map(workspaceMemoryIdentityKey));
+    assert.ok(accounting.refs.every(ref => ref.capturedAt === capturedAt));
+    assert.equal(accounting.refs.some(ref => ref.memoryId === "mem-superseded"), false);
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+test("accountWorkspaceMemoryCompactionRefs is bounded by long-term caps", () => {
+  const now = new Date().toISOString();
+  const entries: LongTermMemoryEntry[] = [
+    ...Array.from({ length: 10 }, (_, i) => entry(`compaction-feedback-${i}`, `Compaction feedback ${i}`, "feedback")),
+    ...Array.from({ length: 10 }, (_, i) => entry(`compaction-decision-${i}`, `Compaction decision ${i}`, "decision")),
+    ...Array.from({ length: 8 }, (_, i) => entry(`compaction-project-${i}`, `Compaction project ${i}`, "project")),
+    ...Array.from({ length: 6 }, (_, i) => entry(`compaction-reference-${i}`, `Compaction reference ${i}`, "reference")),
+  ].map(memory => ({ ...memory, createdAt: now, updatedAt: now }));
+  const store: WorkspaceMemoryStore = {
+    version: 1,
+    workspace: { root: "/repo", key: "abc" },
+    limits: { maxRenderedChars: LONG_TERM_LIMITS.maxRenderedChars, maxEntries: LONG_TERM_LIMITS.maxEntries },
+    entries,
+    updatedAt: now,
+    lastActivityAt: now,
+  };
+
+  const accounting = accountWorkspaceMemoryCompactionRefs(store);
+
+  assert.equal(accounting.refs.length, LONG_TERM_LIMITS.maxEntries);
+  assert.equal(accounting.prompt.includes("[M28]"), true);
+  assert.equal(accounting.prompt.includes("[M29]"), false);
 });
 
 test("accountWorkspaceMemoryRender reports rendered and omitted reasons", () => {
@@ -853,15 +949,15 @@ test("mixed retention scenario applies caps and reinforcement ordering", () => {
 
 test("type max sum above global cap still respects maxEntries", () => {
   const entries: LongTermMemoryEntry[] = [
-    ...Array.from({ length: 10 }, (_, i) => entry(`feedback-${i}`, `Unique feedback preference ${i}`, "feedback")),
-    ...Array.from({ length: 10 }, (_, i) => entry(`decision-${i}`, `Unique durable decision ${i}`, "decision")),
-    ...Array.from({ length: 8 }, (_, i) => entry(`project-${i}`, `Unique project fact ${i}`, "project")),
-    ...Array.from({ length: 6 }, (_, i) => entry(`reference-${i}`, `Unique reference fact ${i}`, "reference")),
+    ...Array.from({ length: RETENTION_TYPE_MAX.feedback }, (_, i) => entry(`feedback-${i}`, `Unique feedback preference ${i}`, "feedback")),
+    ...Array.from({ length: RETENTION_TYPE_MAX.decision }, (_, i) => entry(`decision-${i}`, `Unique durable decision ${i}`, "decision")),
+    ...Array.from({ length: RETENTION_TYPE_MAX.project }, (_, i) => entry(`project-${i}`, `Unique project fact ${i}`, "project")),
+    ...Array.from({ length: RETENTION_TYPE_MAX.reference }, (_, i) => entry(`reference-${i}`, `Unique reference fact ${i}`, "reference")),
   ];
 
   const kept = enforceLongTermLimits(entries);
 
-  assert.equal(entries.length, 34);
+  assert.equal(entries.length, Object.values(RETENTION_TYPE_MAX).reduce((sum, count) => sum + count, 0));
   assert.equal(kept.length, LONG_TERM_LIMITS.maxEntries);
 });
 
@@ -2509,7 +2605,7 @@ function decisionEntry(id: string, text: string, timestampMs: number): LongTermM
   };
 }
 
-test("enforceLongTermLimitsWithAccounting capacity drops return 3 lower-ranked decisions in dropped", () => {
+test("enforceLongTermLimitsWithAccounting keeps 11th and 12th decisions and type-caps the 13th", () => {
   const now = Date.UTC(2026, 4, 1, 6, 24, 0);
   const thirtyDaysAgo = now - 30 * DAY_MS;
   const existingDecisions = Array.from({ length: 10 }, (_, i) =>
@@ -2532,8 +2628,12 @@ test("enforceLongTermLimitsWithAccounting capacity drops return 3 lower-ranked d
   const droppedIds = new Set(capacityDrops.map(event => event.memory.id));
   const capacityEvidence = result.evidence.filter(event => event.type === "memory_removed_capacity");
 
-  assert.equal(capacityDrops.length, 3);
-  assert.equal(capacityEvidence.length, 3);
+  assert.equal(result.kept.filter(memory => memory.type === "decision").length, RETENTION_TYPE_MAX.decision);
+  assert.equal(result.kept.some(memory => memory.id === "new-decision-0"), true);
+  assert.equal(result.kept.some(memory => memory.id === "new-decision-1"), true);
+  assert.equal(result.kept.some(memory => memory.id === "new-decision-2"), true);
+  assert.equal(capacityDrops.length, 1);
+  assert.equal(capacityEvidence.length, 1);
   for (const event of capacityEvidence) {
     assert.equal(event.phase, "storage");
     assert.equal(event.outcome, "removed");
@@ -2568,20 +2668,20 @@ test("enforceLongTermLimitsWithAccounting emits global_cap evidence for global c
   const capacityEvidence = result.evidence.filter(event => event.type === "memory_removed_capacity");
   const globalCapEvidence = capacityEvidence.filter(event => event.reasonCodes.includes("global_cap"));
 
-  assert.equal(entries.length, 34);
+  assert.equal(entries.length, Object.values(RETENTION_TYPE_MAX).reduce((sum, count) => sum + count, 0));
   assert.equal(result.kept.length, LONG_TERM_LIMITS.maxEntries);
   assert.equal(globalCapEvidence.length, entries.length - LONG_TERM_LIMITS.maxEntries);
   assert.equal(capacityEvidence.some(event => event.reasonCodes.includes("type_cap")), false);
   assert.ok(globalCapEvidence.every(event => event.phase === "storage" && event.outcome === "removed"));
 });
 
-test("accountWorkspaceMemoryRender emits render_omitted for type_cap with 11 decisions", () => {
+test("accountWorkspaceMemoryRender emits render_omitted for type_cap with 13 decisions", () => {
   const now = Date.UTC(2026, 4, 1, 6, 24, 0);
   const store: WorkspaceMemoryStore = {
     version: 1,
     workspace: { root: "/repo", key: "abc" },
     limits: { maxRenderedChars: LONG_TERM_LIMITS.maxRenderedChars, maxEntries: LONG_TERM_LIMITS.maxEntries },
-    entries: Array.from({ length: 11 }, (_, i) =>
+    entries: Array.from({ length: 13 }, (_, i) =>
       decisionEntry(`render-decision-${i}`, `Render durable decision ${i}`, now)
     ),
     updatedAt: new Date(now).toISOString(),
@@ -2597,4 +2697,51 @@ test("accountWorkspaceMemoryRender emits render_omitted for type_cap with 11 dec
   assert.equal(accounting.rendered.length, RETENTION_TYPE_MAX.decision);
   assert.equal(typeCapOmissions.length, 1);
   assert.equal(typeCapEvidence.length, 1);
+});
+
+test("accountWorkspaceMemoryRender records char-budget omissions when 12 decisions crowd other types", () => {
+  const now = Date.UTC(2026, 4, 1, 6, 24, 0);
+  const longText = (prefix: string, i: number) => `${prefix} ${i}: ${"durable architecture context ".repeat(8)}`;
+  const entries: LongTermMemoryEntry[] = [
+    ...Array.from({ length: 2 }, (_, i) => ({
+      ...decisionEntry(`crowd-feedback-${i}`, longText("User feedback preference", i), now),
+      type: "feedback" as const,
+      source: "explicit" as const,
+    })),
+    ...Array.from({ length: 2 }, (_, i) => ({
+      ...decisionEntry(`crowd-project-${i}`, longText("Project fact", i), now),
+      type: "project" as const,
+    })),
+    ...Array.from({ length: RETENTION_TYPE_MAX.decision }, (_, i) =>
+      decisionEntry(`crowd-decision-${i}`, longText("Decision rule", i), now)
+    ),
+    ...Array.from({ length: 2 }, (_, i) => ({
+      ...decisionEntry(`crowd-reference-${i}`, longText("Reference fact", i), now),
+      type: "reference" as const,
+    })),
+  ];
+  const store: WorkspaceMemoryStore = {
+    version: 1,
+    workspace: { root: "/repo", key: "abc" },
+    limits: { maxRenderedChars: LONG_TERM_LIMITS.maxRenderedChars, maxEntries: LONG_TERM_LIMITS.maxEntries },
+    entries,
+    updatedAt: new Date(now).toISOString(),
+    lastActivityAt: new Date(now).toISOString(),
+  };
+
+  const accounting = accountWorkspaceMemoryRender(store);
+  const charBudgetOmissions = accounting.omitted.filter(item => item.reason === "char_budget");
+  const charBudgetEvidence = accounting.evidence.filter(event =>
+    event.type === "render_omitted" && event.reasonCodes.includes("char_budget")
+  );
+  const omittedIds = new Set(charBudgetOmissions.map(item => item.memory.id));
+  const evidenceIds = new Set(charBudgetEvidence.map(event => event.memory?.memoryId).filter(Boolean));
+
+  assert.ok(accounting.prompt.length <= LONG_TERM_LIMITS.maxRenderedChars);
+  assert.equal(accounting.omitted.some(item => item.reason === "type_cap"), false);
+  assert.equal(accounting.omitted.some(item => item.reason === "global_cap"), false);
+  assert.ok(charBudgetOmissions.length > 0, "crowded render should omit by char budget");
+  assert.ok(charBudgetOmissions.some(item => item.memory.type === "reference"), "later non-decision types should be accounted if crowded out");
+  assert.equal(charBudgetEvidence.length, charBudgetOmissions.length);
+  assert.deepEqual(evidenceIds, omittedIds);
 });

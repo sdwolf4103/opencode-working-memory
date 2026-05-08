@@ -52,8 +52,13 @@ export function extractExplicitMemories(text: string): LongTermMemoryEntry[] {
 
 export type WorkspaceMemoryParseResult = {
   entries: LongTermMemoryEntry[];
+  commands: WorkspaceMemoryCommand[];
   evidence: EvidenceEventInput[];
 };
+
+export type WorkspaceMemoryCommand =
+  | { kind: "REINFORCE"; ref: string }
+  | { kind: "REPLACE"; ref: string; type: LongTermType; text: string };
 
 function evidenceTextPreview(text: string, maxChars = 120): string {
   return redactCredentials(text).replace(/\s+/g, " ").trim().slice(0, maxChars);
@@ -191,7 +196,7 @@ export function extractExplicitMemoriesWithEvidence(text: string): WorkspaceMemo
     }
   }
 
-  return { entries, evidence };
+  return { entries, commands: [], evidence };
 }
 
 function classifyExplicitMemory(text: string): LongTermType {
@@ -395,6 +400,76 @@ function shouldAcceptWorkspaceMemoryCandidate(
   return evaluateWorkspaceMemoryCandidate(entry, options).accepted;
 }
 
+function commandAttemptReason(line: string): string {
+  const normalized = line.replace(/^\s*-\s*/, "").trim();
+  const reinforceMatch = normalized.match(/^REINFORCE\s+(.+)$/i);
+  if (reinforceMatch) {
+    return /^\[M[1-9]\d*\]$/i.test(reinforceMatch[1]?.trim() ?? "")
+      ? "invalid_memory_command"
+      : "invalid_memory_ref";
+  }
+
+  const replaceMatch = normalized.match(/^REPLACE\s+(.*)$/i);
+  if (!replaceMatch) return "invalid_memory_command";
+
+  const rest = replaceMatch[1]?.trim() ?? "";
+  const refMatch = rest.match(/^(\[[^\]]+\]|\S+)(?:\s+(.*))?$/);
+  const ref = refMatch?.[1] ?? "";
+  if (!/^\[M[1-9]\d*\]$/i.test(ref)) return "invalid_memory_ref";
+
+  const afterRef = refMatch?.[2]?.trim() ?? "";
+  const typeMatch = afterRef.match(/^(\[[^\]]+\]|\S+)(?:\s+(.*))?$/);
+  const typeToken = typeMatch?.[1] ?? "";
+  if (!/^\[(feedback|project|decision|reference)\]$/i.test(typeToken)) {
+    return "invalid_memory_type";
+  }
+
+  const replacementText = typeMatch?.[2]?.trim() ?? "";
+  return replacementText ? "invalid_memory_command" : "empty_replacement_text";
+}
+
+function isCommandAttempt(line: string): boolean {
+  const normalized = line.replace(/^\s*-\s*/, "").trim();
+  return /^(REINFORCE|REPLACE)\b/i.test(normalized)
+    || /\b(REINFORCE|REPLACE)\b.*\[?\w+\]?/i.test(normalized);
+}
+
+function parseWorkspaceMemoryCommand(line: string): WorkspaceMemoryCommand | null {
+  const normalized = line.replace(/^\s*-\s*/, "").trim();
+  const reinforce = normalized.match(/^REINFORCE\s+\[(M[1-9]\d*)\]\s*$/i);
+  if (reinforce) {
+    return { kind: "REINFORCE", ref: reinforce[1].toUpperCase() };
+  }
+
+  const replace = normalized.match(/^REPLACE\s+\[(M[1-9]\d*)\]\s+\[(feedback|project|decision|reference)\]\s+(.+)$/i);
+  if (replace) {
+    const text = replace[3].trim();
+    if (!text) return null;
+    return {
+      kind: "REPLACE",
+      ref: replace[1].toUpperCase(),
+      type: replace[2].toLowerCase() as LongTermType,
+      text,
+    };
+  }
+
+  return null;
+}
+
+function parseCandidateLine(line: string): { type: LongTermType; body: string } | null {
+  const bracketed = line.trim().match(/^\s*-?\s*\[(feedback|project|decision|reference)\]\s+(.+)$/i);
+  if (bracketed) {
+    return { type: bracketed[1].toLowerCase() as LongTermType, body: bracketed[2] };
+  }
+
+  const bracketless = line.trim().match(/^-\s*(feedback|project|decision|reference)\b\s+(.+)$/i);
+  if (bracketless) {
+    return { type: bracketless[1].toLowerCase() as LongTermType, body: bracketless[2] };
+  }
+
+  return null;
+}
+
 /**
  * Extract candidate block from summary using multiple formats.
  * Supports: Plain text label, Markdown section, legacy XML.
@@ -431,21 +506,39 @@ export function parseWorkspaceMemoryCandidatesWithEvidence(
   options: WorkspaceMemoryCandidateParseOptions = {},
 ): WorkspaceMemoryParseResult {
   const block = extractCandidateBlock(summary);
-  if (!block) return { entries: [], evidence: [] };
+  if (!block) return { entries: [], commands: [], evidence: [] };
 
   const nowMs = Date.now();
   const now = new Date(nowMs).toISOString();
   const entries: LongTermMemoryEntry[] = [];
+  const commands: WorkspaceMemoryCommand[] = [];
   const evidence: EvidenceEventInput[] = [];
 
   for (const line of block.split("\n")) {
+    if (!line.trim() || /^\s*\(?none\)?\s*$/i.test(line)) continue;
+
+    const command = parseWorkspaceMemoryCommand(line);
+    if (command) {
+      commands.push(command);
+      continue;
+    }
+
     // Accept both "- [type] text" (bracketed) and "- type text" (bracketless)
-    const item = line.trim().match(
-      /^-\s*(?:\[(feedback|project|decision|reference)\]|(feedback|project|decision|reference)\b)\s+(.+)$/i,
-    );
-    if (!item) continue;
-    const type = (item[1] ?? item[2]).toLowerCase() as LongTermType;
-    const normalizedBody = normalizeCandidateBody(item[3]);
+    const item = parseCandidateLine(line);
+    if (!item) {
+      if (isCommandAttempt(line)) {
+        evidence.push(extractionEvidence({
+          type: "extraction_candidate_rejected",
+          phase: "extraction",
+          outcome: "rejected",
+          reasonCodes: [commandAttemptReason(line)],
+          textPreview: evidenceTextPreview(line, 80),
+        }));
+      }
+      continue;
+    }
+    const type = item.type;
+    const normalizedBody = normalizeCandidateBody(item.body);
     if (!normalizedBody) {
       evidence.push(extractionEvidence({
         type: "extraction_candidate_rejected",
@@ -453,7 +546,7 @@ export function parseWorkspaceMemoryCandidatesWithEvidence(
         outcome: "rejected",
         reasonCodes: ["negated_request"],
         memory: { type, source: "compaction" },
-        textPreview: evidenceTextPreview(item[3], 80),
+        textPreview: evidenceTextPreview(item.body, 80),
       }));
       continue;
     }
@@ -515,5 +608,5 @@ export function parseWorkspaceMemoryCandidatesWithEvidence(
     }));
   }
 
-  return { entries, evidence };
+  return { entries, commands, evidence };
 }

@@ -1,9 +1,13 @@
 import { relative } from "path";
 import { sessionStatePath } from "./paths.ts";
 import { atomicWriteJSON, readJSON, updateJSON } from "./storage.ts";
-import type { ActiveFile, LongTermMemoryEntry, OpenError, SessionDecision, SessionState } from "./types.ts";
-import { HOT_STATE_LIMITS } from "./types.ts";
+import type { ActiveFile, CompactionMemoryRef, LongTermMemoryEntry, OpenError, SessionDecision, SessionState } from "./types.ts";
+import { HOT_STATE_LIMITS, LONG_TERM_LIMITS } from "./types.ts";
 import { memoryKey } from "./pending-journal.ts";
+
+type SessionStateInput = Omit<SessionState, "compactionMemoryRefs"> & {
+  compactionMemoryRefs?: unknown;
+};
 
 const ACTION_WEIGHT: Record<ActiveFile["action"], number> = {
   edit: 50,
@@ -22,6 +26,7 @@ export function createEmptySessionState(sessionID: string): SessionState {
     openErrors: [],
     recentDecisions: [],
     pendingMemories: [],
+    compactionMemoryRefs: [],
   };
 }
 
@@ -33,10 +38,11 @@ export async function loadSessionState(root: string, sessionID: string): Promise
   loaded.openErrors = Array.isArray(loaded.openErrors) ? loaded.openErrors : [];
   loaded.recentDecisions = Array.isArray(loaded.recentDecisions) ? loaded.recentDecisions : [];
   loaded.pendingMemories = Array.isArray(loaded.pendingMemories) ? loaded.pendingMemories : [];
+  loaded.compactionMemoryRefs = normalizeCompactionMemoryRefs((loaded as SessionStateInput).compactionMemoryRefs);
   return loaded;
 }
 
-export async function saveSessionState(root: string, state: SessionState): Promise<void> {
+export async function saveSessionState(root: string, state: SessionState | SessionStateInput): Promise<void> {
   await atomicWriteJSON(await sessionStatePath(root, state.sessionID), normalizeSessionState(state));
 }
 
@@ -52,18 +58,53 @@ export async function updateSessionState(
     current.openErrors = Array.isArray(current.openErrors) ? current.openErrors : [];
     current.recentDecisions = Array.isArray(current.recentDecisions) ? current.recentDecisions : [];
     current.pendingMemories = Array.isArray(current.pendingMemories) ? current.pendingMemories : [];
+    current.compactionMemoryRefs = normalizeCompactionMemoryRefs((current as SessionStateInput).compactionMemoryRefs);
     return normalizeSessionState(await updater(current));
   });
 }
 
-function normalizeSessionState(state: SessionState): SessionState {
+function normalizeSessionState(state: SessionState | SessionStateInput): SessionState {
   state.updatedAt = new Date().toISOString();
   state.activeFiles = state.activeFiles.slice(0, HOT_STATE_LIMITS.maxActiveFilesStored);
   state.openErrors = state.openErrors.slice(0, HOT_STATE_LIMITS.maxOpenErrorsStored);
   state.recentDecisions = state.recentDecisions.slice(0, HOT_STATE_LIMITS.maxRecentDecisionsStored);
   state.pendingMemories = dedupePendingMemories(Array.isArray(state.pendingMemories) ? state.pendingMemories : [])
     .slice(-HOT_STATE_LIMITS.maxPendingMemoriesStored);
-  return state;
+  return {
+    ...state,
+    compactionMemoryRefs: normalizeCompactionMemoryRefs(state.compactionMemoryRefs),
+  };
+}
+
+function normalizeCompactionMemoryRefs(value: unknown): CompactionMemoryRef[] {
+  if (!Array.isArray(value)) return [];
+  if (value.some(item => !isCompactionMemoryRef(item))) return [];
+  return value.slice(0, LONG_TERM_LIMITS.maxEntries);
+}
+
+function isCompactionMemoryRef(value: unknown): value is CompactionMemoryRef {
+  if (!isRecord(value)) return false;
+  if (typeof value.ref !== "string" || !/^M[1-9]\d*$/.test(value.ref)) return false;
+  if (typeof value.memoryId !== "string" || value.memoryId.trim() === "") return false;
+  if (value.compactionId !== undefined && typeof value.compactionId !== "string") return false;
+  if (!isLongTermType(value.type)) return false;
+  if (!isLongTermSource(value.source)) return false;
+  if (typeof value.exactKey !== "string" || value.exactKey.trim() === "") return false;
+  if (typeof value.identityKey !== "string" || value.identityKey.trim() === "") return false;
+  if (typeof value.textPreview !== "string") return false;
+  return typeof value.capturedAt === "number" && Number.isFinite(value.capturedAt);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isLongTermType(value: unknown): value is CompactionMemoryRef["type"] {
+  return value === "feedback" || value === "project" || value === "decision" || value === "reference";
+}
+
+function isLongTermSource(value: unknown): value is CompactionMemoryRef["source"] {
+  return value === "explicit" || value === "compaction" || value === "manual";
 }
 
 function dedupePendingMemories(memories: LongTermMemoryEntry[]): LongTermMemoryEntry[] {

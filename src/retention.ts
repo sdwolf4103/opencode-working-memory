@@ -30,7 +30,7 @@ export const USER_IMPORTANCE_FACTOR = {
 
 export const RETENTION_TYPE_MAX = {
   feedback: 10,
-  decision: 10,
+  decision: 12,
   project: 8,
   reference: 6,
 } as const;

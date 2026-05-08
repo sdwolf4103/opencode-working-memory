@@ -7,6 +7,7 @@ export type MemoryQualityInput = Pick<LongTermMemoryEntry, "type" | "text"> & {
 export type MemoryQualityResult = {
   accepted: boolean;
   reasons: string[];
+  diagnostics?: string[];
 };
 
 export const HARD_QUALITY_REASONS: ReadonlySet<string> = new Set([
@@ -18,6 +19,9 @@ export const HARD_QUALITY_REASONS: ReadonlySet<string> = new Set([
   "active_file_snapshot",
   "code_or_api_signature",
   "path_heavy",
+  "unresolved_question",
+  "transient_bug_state",
+  "deployment_snapshot",
 ]);
 
 export function isHardQualityReason(reason: string): boolean {
@@ -36,10 +40,18 @@ export function assessMemoryQuality(entry: MemoryQualityInput): MemoryQualityRes
   if (isTemporaryStatusViolation(text)) reasons.push("temporary_status");
   if (isActiveFileSnapshotViolation(text)) reasons.push("active_file_snapshot");
   if (isCodeOrApiSignatureViolation(text)) reasons.push("code_or_api_signature");
+  if (isUnresolvedQuestionViolation(text)) reasons.push("unresolved_question");
+  if (isTransientBugStateViolation(text)) reasons.push("transient_bug_state");
+  if (isDeploymentSnapshotViolation(text)) reasons.push("deployment_snapshot");
   if (entry.type === "feedback" && isFeedbackQualityViolation(text)) reasons.push("bad_feedback");
   if (entry.type === "decision" && isDecisionQualityViolation(text)) reasons.push("bad_decision");
 
-  return { accepted: reasons.length === 0, reasons };
+  const diagnostics = isTerseLabelDiagnostic(text) ? ["terse_label"] : [];
+  return {
+    accepted: reasons.length === 0,
+    reasons,
+    ...(diagnostics.length > 0 ? { diagnostics } : {}),
+  };
 }
 
 export function isProgressSnapshotViolation(text: string): boolean {
@@ -81,6 +93,34 @@ export function isFeedbackQualityViolation(text: string): boolean {
 export function hasFutureRule(text: string): boolean {
   return /\b(?:use|keep|prefer|avoid|do not|don't|must|should|never|always|require|choose|reject)\b/i.test(text)
     || /(?:使用|保持|避免|不要|必須|必须|應該|应该|選擇|选择)/u.test(text);
+}
+
+function textWithoutUrls(text: string): string {
+  return text.replace(/https?:\/\/[^\s`"'<>]+/gi, "");
+}
+
+function hasDurableRuleMarker(text: string): boolean {
+  return /\b(?:must|always|never|use|do\s+not|don't)\b/i.test(text)
+    || /\bshould\b(?!\s+we\b)/i.test(text)
+    || /(?:必須|必须|應該|应该|不要|使用|保持)/u.test(text);
+}
+
+function isUnresolvedQuestionViolation(text: string): boolean {
+  if (hasDurableRuleMarker(text)) return false;
+
+  const withoutUrls = textWithoutUrls(text).trim();
+  const startsUnresolved = /^(?:question:|open question\b|unresolved\b|pending question\b|todo:\s*decide\b|TBD\b|TODO\b|待確認|未決|待決定)/iu.test(withoutUrls);
+  if (startsUnresolved) return true;
+
+  if (/\b(?:need to decide|needs decision|not decided|whether to|should we|do we need)\b/i.test(withoutUrls)) return true;
+  if (/(?:尚未決定|需要決定|是否要|要不要)/u.test(withoutUrls)) return true;
+
+  if (/[?？]\s*$/.test(withoutUrls)) return true;
+
+  const hasQuestion = /[?？]/.test(withoutUrls);
+  const hasPlanningPhrase = /\b(?:we need|need to|next|later|follow up)\b/i.test(withoutUrls)
+    || /(?:確認|决定|決定)/u.test(withoutUrls);
+  return hasQuestion && hasPlanningPhrase;
 }
 
 export function isArchitectureLikeDecision(text: string): boolean {
@@ -135,6 +175,34 @@ function isTemporaryStatusViolation(text: string): boolean {
   if (/^(currently|now|pending|in progress|todo|wip)\b/i.test(text)) return true;
   if (/\b(?:run npm test|tests? are running|next reply|before continuing)\b/i.test(text)) return true;
   return false;
+}
+
+function isTransientBugStateViolation(text: string): boolean {
+  return /\b(?:currently debugging|still failing|unresolved bug|temporary workaround|next step is to fix|tests are failing)\b/i.test(text)
+    || /(?:待修|暫時|暂时|目前正在)/u.test(text);
+}
+
+function isDeploymentSnapshotViolation(text: string): boolean {
+  const hasDeploymentContext = /\b(?:deployed|current|latest|active|revision|build|release)\b/i.test(text)
+    || /(?:部署|版本|修訂|修订)/u.test(text);
+  if (!hasDeploymentContext) return false;
+
+  const highEntropyId = /\b(?:rev|build|release|revision)[-_]?[A-Za-z0-9]{10,}\b/i.test(text)
+    || /\b[A-Za-z0-9]*[A-Z][A-Za-z0-9]*\d[A-Za-z0-9]*[A-Za-z0-9_-]{8,}\b/.test(text)
+    || /\b[A-Za-z0-9]*\d[A-Za-z0-9]*[A-Z][A-Za-z0-9]*[A-Za-z0-9_-]{8,}\b/.test(text);
+  return highEntropyId;
+}
+
+function isTerseLabelDiagnostic(text: string): boolean {
+  if (/[:：]/u.test(text)) return false;
+
+  const codePoints = [...text].length;
+  const tokens = text.split(/\s+/u).filter(Boolean);
+  if (codePoints >= 18 && tokens.length >= 4) return false;
+
+  const hasMarker = /\b(?:is|are|was|were|has|have|uses?|keeps?|requires?|prefers?|wants?|supports?|must|should|always|never|do\s+not|don't|because|for|with|when|after|before)\b/i.test(text)
+    || /(?:使用|保持|避免|不要|必須|必须|應該|应该|偏好|要求|支援|支持|因為|因为)/u.test(text);
+  return !hasMarker;
 }
 
 function isActiveFileSnapshotViolation(text: string): boolean {

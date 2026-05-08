@@ -29,6 +29,7 @@ Use it when you want your agent to remember things like:
 - **Hot session state** — active files, open errors, and current working context for the current session.
 - **Explicit memory triggers** — users can say “remember this”, “記住”, “覚えて”, or “기억해” to save durable facts.
 - **Compaction-based extraction** — memory extraction piggybacks on OpenCode’s existing compaction flow.
+- **Numbered memory refs** — compaction can `REINFORCE [M#]` useful memories or safely `REPLACE [M#]` obsolete compaction memories.
 - **No manual tools** — memory is injected automatically into the system prompt.
 - **Quality guards** — filters noisy memories, temporary progress snapshots, stack traces, raw errors, and credentials.
 - **Retention decay** — keeps the strongest memories in prompt context while older or weaker memories fade out naturally; important and reinforced memories decay more slowly.
@@ -202,6 +203,22 @@ The goal is to remember durable facts, not every detail.
 
 Historical cleanup is intentionally conservative: extraction-time filtering may reject more aggressively, but one-time migration cleanup only supersedes high-confidence garbage patterns. This protects existing durable memories written in declarative style, such as "API endpoint is X" or "Product branding is Y".
 
+### Numbered Memory Refs
+
+During compaction, existing workspace memories may be shown as numbered refs such as `[M1]` or `[M2]`. The model can use these refs to maintain memory without duplicating it:
+
+```md
+REINFORCE [M1]
+REPLACE [M2] project Updated durable project fact.
+```
+
+- `REINFORCE [M#]` strengthens an existing memory's retention signal without changing its text.
+- `REPLACE [M#] [type] text` supersedes a safe compaction-sourced memory and adds a replacement.
+- Manual, explicit, and already-reinforced memories are protected from automatic replacement.
+- Stale or mismatched numbered refs are rejected instead of mutating the wrong memory.
+
+Use `memory-diag commands` to inspect command outcomes and `memory-diag revert` to dry-run and apply manual recovery for successful numbered replacements.
+
 ### Memory Diagnostics CLI
 
 Use the read-only diagnostics CLI when you want to understand what memory is doing for the current workspace.
@@ -212,6 +229,8 @@ Use the read-only diagnostics CLI when you want to understand what memory is doi
 | Why was something rejected? | `npx --package opencode-working-memory memory-diag rejected` |
 | Where did my memory go? | `npx --package opencode-working-memory memory-diag missing` |
 | Why is this memory shown or hidden? | `npx --package opencode-working-memory memory-diag explain <memory-id>` |
+| How are numbered memory commands behaving? | `npx --package opencode-working-memory memory-diag commands` |
+| Revert a numbered replacement? | `npx --package opencode-working-memory memory-diag revert --memory <replacement-memory-id>` |
 
 Global options:
 
@@ -226,7 +245,11 @@ npx --package opencode-working-memory memory-diag status
 npx --package opencode-working-memory memory-diag rejected --verbose
 npx --package opencode-working-memory memory-diag missing --workspace /path/to/project
 npx --package opencode-working-memory memory-diag status --json
+npx --package opencode-working-memory memory-diag commands --verbose
+npx --package opencode-working-memory memory-diag revert --memory <replacement-memory-id>
 ```
+
+`memory-diag revert` is dry-run by default. Add `--apply` only after reviewing the planned original/replacement status changes.
 
 The npm package is opencode-working-memory; the installed bin is memory-diag, so package-qualified npx avoids resolving a different package named memory-diag.
 
@@ -251,7 +274,7 @@ See [Configuration](docs/configuration.md) for customization options.
 Current focus:
 
 - Add explicit delete tombstones so removed memories do not get re-extracted.
-- Enforce explicit `supersedes` chains for safer replacement of obsolete memories.
+- Monitor numbered refs and protected replacements with `memory-diag commands` before tightening automatic replacement policy further.
 - Explore tiered hot/warm/cold storage after the retention model has more real-world data.
 
 ## Documentation

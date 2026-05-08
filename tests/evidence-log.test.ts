@@ -209,6 +209,39 @@ test("memory_migration_superseded event round-trips through append and query", a
   }
 });
 
+test("memory_reverted_numbered_ref event round-trips through append and query", async () => {
+  const root = await tempRoot();
+  try {
+    await appendEvidenceEvent(root, eventInput({
+      type: "memory_reverted_numbered_ref",
+      phase: "storage",
+      outcome: "recovered",
+      reasonCodes: ["manual_revert_numbered_ref"],
+      memory: { memoryId: "replacement-memory", type: "decision", source: "compaction", status: "superseded" },
+      relations: [
+        { role: "superseded", memory: { memoryId: "replacement-memory", type: "decision", source: "compaction", status: "superseded" } },
+        { role: "recovered", memory: { memoryId: "restored-memory", type: "decision", source: "compaction", status: "active" } },
+      ],
+    }));
+
+    const result = await queryEvidenceEvents(root, {
+      types: ["memory_reverted_numbered_ref"],
+      phases: ["storage"],
+      outcomes: ["recovered"],
+      memoryId: "restored-memory",
+    });
+
+    assert.equal(result.length, 1);
+    assert.equal(result[0].type, "memory_reverted_numbered_ref");
+    assert.equal(result[0].phase, "storage");
+    assert.equal(result[0].outcome, "recovered");
+    assert.ok(result[0].reasonCodes.includes("manual_revert_numbered_ref"));
+    assert.ok(result[0].relations?.some(relation => relation.role === "recovered" && relation.memory?.memoryId === "restored-memory"));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("queryEvidenceEvents supports newestFirst and limit", async () => {
   const root = await tempRoot();
   try {

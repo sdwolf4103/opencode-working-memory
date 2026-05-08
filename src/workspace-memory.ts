@@ -1,6 +1,6 @@
 import { appendFile, mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
-import type { LongTermMemoryEntry, WorkspaceMemoryStore } from "./types.ts";
+import type { CompactionMemoryRef, LongTermMemoryEntry, WorkspaceMemoryStore } from "./types.ts";
 import { LONG_TERM_LIMITS } from "./types.ts";
 import { migrationLogPath, workspaceKey, workspaceMemoryPath } from "./paths.ts";
 import { atomicWriteJSON, readJSON, updateJSON } from "./storage.ts";
@@ -57,6 +57,16 @@ export type WorkspaceMemoryRenderAccounting = {
   }>;
   evidence: EvidenceEventInput[];
   prompt: string;
+};
+
+export type WorkspaceMemoryCompactionRefsAccounting = WorkspaceMemoryRenderAccounting & {
+  refs: CompactionMemoryRef[];
+};
+
+type WorkspaceMemoryRenderSelection = {
+  active: LongTermMemoryEntry[];
+  omitted: WorkspaceMemoryRenderAccounting["omitted"];
+  maxChars: number;
 };
 
 export type QualityCleanupMigrationLogEntry = {
@@ -850,14 +860,13 @@ export function renderWorkspaceMemory(store: WorkspaceMemoryStore): string {
   return accountWorkspaceMemoryRender(store).prompt;
 }
 
-export function accountWorkspaceMemoryRender(store: WorkspaceMemoryStore): WorkspaceMemoryRenderAccounting {
+function selectWorkspaceMemoryForRender(store: WorkspaceMemoryStore): WorkspaceMemoryRenderSelection {
   const now = Date.now();
   const maxChars = Math.min(
     store.limits.maxRenderedChars,
     LONG_TERM_LIMITS.maxRenderedChars
   );
   const omitted: WorkspaceMemoryRenderAccounting["omitted"] = [];
-  const evidence: EvidenceEventInput[] = [];
 
   for (const entry of store.entries) {
     if (entry.status === "superseded") {
@@ -873,6 +882,13 @@ export function accountWorkspaceMemoryRender(store: WorkspaceMemoryStore): Works
   for (const memory of typeCapResult.omitted) omitted.push({ memory, reason: "type_cap" });
   const active = typeCapResult.kept.slice(0, LONG_TERM_LIMITS.maxEntries);
   for (const memory of typeCapResult.kept.slice(LONG_TERM_LIMITS.maxEntries)) omitted.push({ memory, reason: "global_cap" });
+
+  return { active, omitted, maxChars };
+}
+
+export function accountWorkspaceMemoryRender(store: WorkspaceMemoryStore): WorkspaceMemoryRenderAccounting {
+  const { active, omitted, maxChars } = selectWorkspaceMemoryForRender(store);
+  const evidence: EvidenceEventInput[] = [];
 
   if (active.length === 0) {
     for (const item of omitted) evidence.push(renderEvidence(item.memory, "omitted", item.reason));
@@ -916,6 +932,68 @@ export function accountWorkspaceMemoryRender(store: WorkspaceMemoryStore): Works
   for (const item of omitted) evidence.push(renderEvidence(item.memory, "omitted", item.reason));
 
   return { rendered, omitted, evidence, prompt: lines.join("\n") };
+}
+
+export function accountWorkspaceMemoryCompactionRefs(store: WorkspaceMemoryStore): WorkspaceMemoryCompactionRefsAccounting {
+  const { active, omitted, maxChars } = selectWorkspaceMemoryForRender(store);
+  const evidence: EvidenceEventInput[] = [];
+  const originalById = new Map(store.entries.map(entry => [entry.id, entry]));
+
+  if (active.length === 0) {
+    for (const item of omitted) evidence.push(renderEvidence(item.memory, "omitted", item.reason));
+    return { rendered: [], omitted, evidence, prompt: "", refs: [] };
+  }
+
+  const lines: string[] = [
+    "Existing workspace memories available for consolidation:",
+  ];
+  const rendered: LongTermMemoryEntry[] = [];
+  const refs: CompactionMemoryRef[] = [];
+  const capturedAt = Date.now();
+
+  for (const type of ["feedback", "project", "decision", "reference"] as const) {
+    const items = active.filter(entry => entry.type === type);
+    if (items.length === 0) continue;
+
+    const sectionLines: string[] = [`${type}:`];
+
+    for (const item of items) {
+      const ref = `M${refs.length + 1}`;
+      const line = `[${ref}] ${item.text}`;
+      if ([...lines, ...sectionLines, line].join("\n").length <= maxChars) {
+        const original = originalById.get(item.id) ?? item;
+        sectionLines.push(line);
+        rendered.push(item);
+        refs.push({
+          ref,
+          memoryId: item.id,
+          type: original.type,
+          source: original.source,
+          exactKey: workspaceMemoryExactKey(original),
+          identityKey: workspaceMemoryIdentityKey(original),
+          textPreview: item.text,
+          capturedAt,
+        });
+      } else {
+        omitted.push({ memory: item, reason: "char_budget" });
+      }
+    }
+
+    if (sectionLines.length > 1) {
+      lines.push(...sectionLines);
+    }
+  }
+
+  for (const memory of rendered) evidence.push(renderEvidence(memory, "rendered"));
+  for (const item of omitted) evidence.push(renderEvidence(item.memory, "omitted", item.reason));
+
+  return {
+    rendered,
+    omitted,
+    evidence,
+    prompt: rendered.length > 0 ? lines.join("\n") : "",
+    refs,
+  };
 }
 
 function renderEvidence(

@@ -1,9 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { MemoryV2Plugin } from "../src/plugin.ts";
 import * as sessionStateModule from "../src/session-state.ts";
 import type { HotSessionStateRenderAccounting } from "../src/session-state.ts";
-import type { ActiveFile, LongTermMemoryEntry, OpenError, SessionDecision, SessionState } from "../src/types.ts";
-import { HOT_STATE_LIMITS } from "../src/types.ts";
+import { sessionStatePath, workspaceMemoryPath } from "../src/paths.ts";
+import type { ActiveFile, CompactionMemoryRef, LongTermMemoryEntry, OpenError, SessionDecision, SessionState } from "../src/types.ts";
+import { HOT_STATE_LIMITS, LONG_TERM_LIMITS } from "../src/types.ts";
 
 type AccountHotSessionStateRender = (state: SessionState, workspaceRoot: string) => HotSessionStateRenderAccounting;
 
@@ -11,7 +16,7 @@ const accountHotSessionStateRender = (
   sessionStateModule as typeof sessionStateModule & { accountHotSessionStateRender: AccountHotSessionStateRender }
 ).accountHotSessionStateRender;
 
-const { createEmptySessionState, renderHotSessionState } = sessionStateModule;
+const { createEmptySessionState, loadSessionState, renderHotSessionState, saveSessionState } = sessionStateModule;
 
 const root = "/repo";
 
@@ -25,7 +30,36 @@ function state(overrides: Partial<SessionState> = {}): SessionState {
     openErrors: [],
     recentDecisions: [],
     pendingMemories: [],
+    compactionMemoryRefs: [],
     ...overrides,
+  };
+}
+
+function compactionRef(index: number, overrides: Partial<CompactionMemoryRef> = {}): CompactionMemoryRef {
+  return {
+    ref: `M${index}`,
+    memoryId: `memory-${index}`,
+    type: "decision",
+    source: "compaction",
+    exactKey: `decision:durable fact ${index}`,
+    identityKey: `decision:durable fact ${index}`,
+    textPreview: `Durable fact ${index}`,
+    capturedAt: 1_777_000_000_000 + index,
+    ...overrides,
+  };
+}
+
+function mockRootClient(summary = "") {
+  return {
+    session: {
+      get: async () => ({ data: { parentID: null } }),
+      messages: async () => ({
+        data: summary
+          ? [{ info: { role: "assistant", summary: true }, parts: [{ type: "text", text: summary }] }]
+          : [],
+      }),
+      todo: async () => ({ data: [] }),
+    },
   };
 }
 
@@ -207,4 +241,123 @@ test("accountHotSessionStateRender counts newline separators in the 700-char bud
   assert.equal(overAccounting.prompt, "");
   assert.equal(overAccounting.omitted.length, 1);
   assert.equal(overAccounting.omitted[0]?.reason, "char_budget");
+});
+
+test("compaction memory refs round-trip through session state and are capped", async () => {
+  const tmpDir = await mkdtemp(join(tmpdir(), "memory-session-state-"));
+
+  try {
+    const refs = Array.from({ length: LONG_TERM_LIMITS.maxEntries + 2 }, (_, index) => compactionRef(
+      index + 1,
+      index === 0 ? { compactionId: "compaction-snapshot-1" } : {},
+    ));
+    await saveSessionState(tmpDir, state({
+      sessionID: "compaction-ref-roundtrip",
+      compactionMemoryRefs: refs,
+    }));
+
+    const loaded = await loadSessionState(tmpDir, "compaction-ref-roundtrip");
+    assert.equal(loaded.compactionMemoryRefs.length, LONG_TERM_LIMITS.maxEntries);
+    assert.deepEqual(loaded.compactionMemoryRefs, refs.slice(0, LONG_TERM_LIMITS.maxEntries));
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("invalid stored compaction memory refs normalize to empty without crashing", async () => {
+  const tmpDir = await mkdtemp(join(tmpdir(), "memory-session-state-"));
+
+  try {
+    const path = await sessionStatePath(tmpDir, "invalid-compaction-ref-session");
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, JSON.stringify({
+      version: 1,
+      sessionID: "stale-id",
+      turn: 0,
+      updatedAt: "2026-05-05T00:00:00.000Z",
+      activeFiles: [],
+      openErrors: [],
+      recentDecisions: [],
+      pendingMemories: [],
+      compactionMemoryRefs: [
+        compactionRef(1),
+        { ...compactionRef(2), ref: "not-a-numbered-ref" },
+      ],
+    }), "utf8");
+
+    const loaded = await loadSessionState(tmpDir, "invalid-compaction-ref-session");
+    assert.equal(loaded.sessionID, "invalid-compaction-ref-session");
+    assert.deepEqual(loaded.compactionMemoryRefs, []);
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("compaction memory refs never render in hot session state", () => {
+  const rendered = renderHotSessionState(state({
+    activeFiles: [activeFile("/repo/src/a.ts", "read", 1, 1)],
+    compactionMemoryRefs: [compactionRef(1, {
+      memoryId: "secret-memory-id",
+      exactKey: "decision:secret exact key",
+      identityKey: "decision:secret identity key",
+      textPreview: "Secret compaction ref preview must not render",
+    })],
+  }), root);
+
+  assert.match(rendered, /active_files:/);
+  assert.doesNotMatch(rendered, /Secret compaction ref preview/);
+  assert.doesNotMatch(rendered, /secret-memory-id/);
+  assert.doesNotMatch(rendered, /secret exact key/);
+  assert.doesNotMatch(rendered, /secret identity key/);
+  assert.doesNotMatch(rendered, /\bM1\b/);
+});
+
+test("session.compacted clears compaction memory refs after processing", async () => {
+  const tmpDir = await mkdtemp(join(tmpdir(), "memory-session-state-"));
+
+  try {
+    await saveSessionState(tmpDir, state({
+      sessionID: "clear-compaction-refs-session",
+      compactionMemoryRefs: [compactionRef(1)],
+    }));
+
+    const plugin = await MemoryV2Plugin({ directory: tmpDir, client: mockRootClient() });
+    await (plugin as Record<string, Function>)["event"]({
+      event: { type: "session.compacted", properties: { sessionID: "clear-compaction-refs-session" } },
+    });
+
+    const loaded = await loadSessionState(tmpDir, "clear-compaction-refs-session");
+    assert.deepEqual(loaded.compactionMemoryRefs, []);
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("session.compacted clears compaction memory refs even when promotion fails", async () => {
+  const tmpDir = await mkdtemp(join(tmpdir(), "memory-session-state-"));
+
+  try {
+    await saveSessionState(tmpDir, state({
+      sessionID: "clear-compaction-refs-failure-session",
+      pendingMemories: [memory("mem-pending-failure", "Keep pending memory when promotion fails")],
+      compactionMemoryRefs: [compactionRef(1)],
+    }));
+
+    const workspacePath = await workspaceMemoryPath(tmpDir);
+    await rm(workspacePath, { force: true }).catch(() => undefined);
+    await mkdir(workspacePath, { recursive: true });
+
+    const plugin = await MemoryV2Plugin({ directory: tmpDir, client: mockRootClient() });
+    await (plugin as Record<string, Function>)["event"]({
+      event: { type: "session.compacted", properties: { sessionID: "clear-compaction-refs-failure-session" } },
+    });
+
+    const loaded = await loadSessionState(tmpDir, "clear-compaction-refs-failure-session");
+    assert.deepEqual(loaded.compactionMemoryRefs, []);
+    assert.equal(loaded.pendingMemories.length, 1,
+      "unrelated retryable pending memory should remain on promotion failure");
+    assert.equal(loaded.pendingMemories[0].id, "mem-pending-failure");
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
 });
