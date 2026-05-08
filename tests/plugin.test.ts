@@ -6,11 +6,11 @@ import { dirname, join } from "node:path";
 import { MemoryV2Plugin } from "../src/plugin.ts";
 import { loadSessionState, saveSessionState } from "../src/session-state.ts";
 import { parseWorkspaceMemoryCandidates } from "../src/extractors.ts";
-import type { OpenError } from "../src/types.ts";
+import type { CompactionMemoryRef, LongTermMemoryEntry, OpenError } from "../src/types.ts";
 import { PROMOTION_RETRY_LIMITS, WORKSPACE_MEMORY_CACHE_LIMITS } from "../src/types.ts";
 import { sessionStatePath, workspaceMemoryPath, workspacePendingJournalPath } from "../src/paths.ts";
 import { loadPendingJournal, savePendingJournal, memoryKey } from "../src/pending-journal.ts";
-import { loadWorkspaceMemory, updateWorkspaceMemory } from "../src/workspace-memory.ts";
+import { loadWorkspaceMemory, updateWorkspaceMemory, workspaceMemoryExactKey, workspaceMemoryIdentityKey } from "../src/workspace-memory.ts";
 import { queryEvidenceEvents } from "../src/evidence-log.ts";
 
 // Mock client for root session (not a sub-agent)
@@ -55,6 +55,34 @@ function mockClientWithCompactionSummary(summary: string) {
       }),
       todo: async () => ({ data: [] }),
     },
+  };
+}
+
+function mockClientWithMutableCompactionSummary(summary: () => string) {
+  return {
+    session: {
+      get: async () => ({ data: { parentID: null } }),
+      messages: async () => ({
+        data: summary()
+          ? [{ info: { role: "assistant", summary: true }, parts: [{ type: "text", text: summary() }] }]
+          : [],
+      }),
+      todo: async () => ({ data: [] }),
+    },
+  };
+}
+
+function compactionRefFor(memory: LongTermMemoryEntry, ref = "M1", overrides: Partial<CompactionMemoryRef> = {}): CompactionMemoryRef {
+  return {
+    ref,
+    memoryId: memory.id,
+    type: memory.type,
+    source: memory.source,
+    exactKey: workspaceMemoryExactKey(memory),
+    identityKey: workspaceMemoryIdentityKey(memory),
+    textPreview: memory.text,
+    capturedAt: Date.now(),
+    ...overrides,
   };
 }
 
@@ -244,6 +272,21 @@ test("compaction hook sets output.prompt with ---free template", async () => {
     const client = mockRootClient();
     const plugin = await MemoryV2Plugin({ directory: tmpDir, client });
 
+    await updateWorkspaceMemory(tmpDir, store => {
+      const now = new Date().toISOString();
+      store.entries.push({
+        id: "compaction-numbered-memory",
+        type: "decision",
+        text: "Decision dedupe stays exact-only.",
+        source: "compaction",
+        confidence: 0.9,
+        status: "active",
+        createdAt: now,
+        updatedAt: now,
+      });
+      return store;
+    });
+
     // Create a session state with some data
     await saveSessionState(tmpDir, {
       version: 1,
@@ -303,9 +346,25 @@ test("compaction hook sets output.prompt with ---free template", async () => {
     assert.equal(prompt!.includes("Commit a762e86"), true,
       "Prompt should explicitly reject commit-hash snapshots");
 
-    // Should contain our context data (hot session state)
-    assert.equal(prompt!.includes("Hot session state"), true,
-      "Prompt should include hot session state context");
+    // Should contain numbered workspace memory refs but not normal hot state or unnumbered workspace memory.
+    assert.equal(prompt!.includes("Existing workspace memories available for consolidation:"), true,
+      "Prompt should include numbered compaction memory context");
+    assert.equal(prompt!.includes("[M1] Decision dedupe stays exact-only."), true,
+      "Prompt should include numbered workspace memory line");
+    assert.equal(prompt!.includes("Workspace memory (cross-session"), false,
+      "Prompt should not include normal unnumbered workspace memory context");
+    assert.equal(prompt!.includes("- Decision dedupe stays exact-only."), false,
+      "Prompt should not duplicate numbered memory as unnumbered memory");
+    assert.equal(prompt!.includes("Hot session state"), false,
+      "Prompt should not include hot session state context");
+    assert.equal(prompt!.includes("active_files:"), false,
+      "Prompt should not include active_files in compaction context");
+    assert.equal(prompt!.includes("Test decision"), false,
+      "Prompt should not include recent_decisions in compaction context");
+
+    const state = await loadSessionState(tmpDir, "test-session-compaction");
+    assert.deepEqual(state.compactionMemoryRefs.map(ref => ref.ref), ["M1"]);
+    assert.equal(state.compactionMemoryRefs[0]?.memoryId, "compaction-numbered-memory");
 
     // Verify: prompt starts with plain text, not a markup delimiter
     assert.equal(prompt!.startsWith("---"), false,
@@ -332,14 +391,15 @@ test("compaction prompt forbids progress and session-internal memory candidates"
     assert.match(output.prompt, /CRITICAL MEMORY RULES/);
     assert.match(output.prompt, /NO completion or progress statements/i);
     assert.match(output.prompt, /NO session-internal implementation notes/i);
-    assert.match(output.prompt, /feedback ONLY/i);
+    assert.match(output.prompt, /decision = future rule\/architecture choice/i);
+    assert.match(output.prompt, /Do not use decision for service names, IDs, URLs, file paths/i);
     assert.match(output.prompt, /Most compactions should produce ZERO memories/i);
   } finally {
     await rm(tmpDir, { recursive: true, force: true });
   }
 });
 
-test("compaction prompt includes existing-memory wording reuse guidance", async () => {
+test("compaction prompt includes numbered reinforce and replace guidance", async () => {
   const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-prompt-"));
   try {
     const plugin = await MemoryV2Plugin({ directory: tmpDir, client: mockRootClient() });
@@ -350,16 +410,20 @@ test("compaction prompt includes existing-memory wording reuse guidance", async 
       output,
     );
 
-    assert.match(output.prompt, /Existing workspace memory may already contain durable facts/);
-    assert.match(output.prompt, /do not create a rephrased duplicate/);
-    assert.match(output.prompt, /reuse the existing memory wording exactly whenever possible/);
-    assert.match(output.prompt, /new, materially corrected, or materially more specific/);
+    assert.match(output.prompt, /Existing memories are numbered \[M#\]/);
+    assert.match(output.prompt, /emit at most 3 lines like `REINFORCE \[M#\]`/);
+    assert.match(output.prompt, /Use `REPLACE \[M#\] \[type\] text` only for eligible unreinforced compaction-sourced memories/);
+    assert.match(output.prompt, /REINFORCE the existing \[M#\].*also emit a new complete \[type\] candidate/s);
+    assert.doesNotMatch(output.prompt, /reuse the existing memory wording exactly whenever possible/);
+    assert.doesNotMatch(output.prompt, /feedback ONLY means/);
+    assert.doesNotMatch(output.prompt, /decision ONLY means/);
+    assert.doesNotMatch(output.prompt, /project\/reference ONLY when/);
   } finally {
     await rm(tmpDir, { recursive: true, force: true });
   }
 });
 
-test("compaction prompt does not introduce CRUD memory directives", async () => {
+test("compaction prompt includes only supported command directives", async () => {
   const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-prompt-"));
   try {
     const plugin = await MemoryV2Plugin({ directory: tmpDir, client: mockRootClient() });
@@ -370,9 +434,12 @@ test("compaction prompt does not introduce CRUD memory directives", async () => 
       output,
     );
 
-    assert.doesNotMatch(output.prompt, /\bREPLACE\b/);
     assert.doesNotMatch(output.prompt, /\bDROP\b/);
-    assert.doesNotMatch(output.prompt, /\bREINFORCE\s+\[M/);
+    assert.doesNotMatch(output.prompt, /fuzzy merge/i);
+    assert.doesNotMatch(output.prompt, /semantic merge/i);
+    assert.doesNotMatch(output.prompt, /embedding/i);
+    assert.match(output.prompt, /\bREPLACE \[M#\]/);
+    assert.match(output.prompt, /\bREINFORCE\s+\[M#\]/);
   } finally {
     await rm(tmpDir, { recursive: true, force: true });
   }
@@ -391,12 +458,13 @@ test("compaction prompt preserves Memory candidates output format", async () => 
 
     assert.match(
       output.prompt,
-      /Format when there ARE durable memories:\nMemory candidates:\n- \[feedback\|decision\|project\|reference\] future-facing durable fact/,
+      /Format when there ARE REINFORCE\/REPLACE commands or durable new candidates:\nMemory candidates:\nREINFORCE \[M#\]\nREPLACE \[M#\] \[feedback\|decision\|project\|reference\] corrected durable fact\n- \[feedback\|decision\|project\|reference\] new future-facing durable fact/,
     );
     assert.match(
       output.prompt,
-      /Format when there are NO durable memories:\nMemory candidates:\n\(none\)/,
+      /Format when there are NO REINFORCE\/REPLACE commands or durable candidates:\nMemory candidates:\n\(none\)/,
     );
+    assert.match(output.prompt, /Good memory examples:[\s\S]*REINFORCE \[M\d+\]/);
   } finally {
     await rm(tmpDir, { recursive: true, force: true });
   }
@@ -955,6 +1023,916 @@ test("session.compacted reinforces existing exact workspace memory", async () =>
     assert.equal(existing?.lastReinforcedSessionID, "reinforce-existing-session");
     assert.ok((existing?.retentionClock ?? 0) > oldRetentionClock);
     assert.equal((await loadSessionState(tmpDir, "reinforce-existing-session")).pendingMemories.length, 0);
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("session.compacted applies numbered REINFORCE command to referenced memory", async () => {
+  const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-test-"));
+
+  try {
+    const now = new Date().toISOString();
+    const oldRetentionClock = Date.now() - 10 * 24 * 60 * 60 * 1000;
+    const existing: LongTermMemoryEntry = {
+      id: "numbered-reinforce-memory",
+      type: "decision",
+      text: "Use numbered refs for explicit memory reinforcement.",
+      source: "compaction",
+      confidence: 0.9,
+      status: "active",
+      createdAt: now,
+      updatedAt: now,
+      retentionClock: oldRetentionClock,
+    };
+    await updateWorkspaceMemory(tmpDir, store => {
+      store.entries.push(existing);
+      return store;
+    });
+    await saveSessionState(tmpDir, {
+      version: 1,
+      sessionID: "numbered-reinforce-session",
+      turn: 0,
+      updatedAt: now,
+      activeFiles: [],
+      openErrors: [],
+      recentDecisions: [],
+      pendingMemories: [],
+      compactionMemoryRefs: [compactionRefFor(existing)],
+    });
+
+    const plugin = await MemoryV2Plugin({
+      directory: tmpDir,
+      client: mockClientWithCompactionSummary("Memory candidates:\nREINFORCE [M1]"),
+    });
+    await (plugin as Record<string, Function>)["event"]({
+      event: { type: "session.compacted", properties: { sessionID: "numbered-reinforce-session" } },
+    });
+
+    const workspace = await loadWorkspaceMemory(tmpDir);
+    const reinforced = workspace.entries.find(entry => entry.id === existing.id);
+    assert.equal(reinforced?.reinforcementCount, 1);
+    assert.equal(reinforced?.lastReinforcedSessionID, "numbered-reinforce-session");
+    assert.ok((reinforced?.retentionClock ?? 0) > oldRetentionClock);
+
+    const events = await queryEvidenceEvents(tmpDir, { types: ["memory_reinforced"] });
+    assert.ok(events.some(event =>
+      event.outcome === "reinforced" &&
+      event.reasonCodes.includes("numbered_ref_reinforce") &&
+      event.reasonCodes.includes("reinforcement_window_allowed") &&
+      event.memory?.memoryId === existing.id
+    ));
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("session.compacted rejects invalid unavailable and stale REINFORCE refs without mutation", async () => {
+  const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-test-"));
+
+  try {
+    const now = new Date().toISOString();
+    const current: LongTermMemoryEntry = {
+      id: "stale-numbered-target",
+      type: "decision",
+      text: "Current durable memory text should not reinforce from a stale snapshot.",
+      source: "compaction",
+      confidence: 0.9,
+      status: "active",
+      createdAt: now,
+      updatedAt: now,
+      retentionClock: Date.now() - 5 * 24 * 60 * 60 * 1000,
+    };
+    const oldSnapshot = {
+      ...current,
+      text: "Old durable memory text from the compaction snapshot.",
+    };
+    await updateWorkspaceMemory(tmpDir, store => {
+      store.entries.push(current);
+      return store;
+    });
+    await saveSessionState(tmpDir, {
+      version: 1,
+      sessionID: "numbered-reinforce-reject-session",
+      turn: 0,
+      updatedAt: now,
+      activeFiles: [],
+      openErrors: [],
+      recentDecisions: [],
+      pendingMemories: [],
+      compactionMemoryRefs: [
+        compactionRefFor(current, "M1", {
+          exactKey: workspaceMemoryExactKey(oldSnapshot),
+          identityKey: workspaceMemoryIdentityKey(oldSnapshot),
+          textPreview: oldSnapshot.text,
+        }),
+        compactionRefFor({ ...current, id: "missing-numbered-target" }, "M2"),
+      ],
+    });
+
+    const plugin = await MemoryV2Plugin({
+      directory: tmpDir,
+      client: mockClientWithCompactionSummary([
+        "Memory candidates:",
+        "REINFORCE [M1]",
+        "REINFORCE [M2]",
+        "REINFORCE [M9]",
+      ].join("\n")),
+    });
+    await (plugin as Record<string, Function>)["event"]({
+      event: { type: "session.compacted", properties: { sessionID: "numbered-reinforce-reject-session" } },
+    });
+
+    const workspace = await loadWorkspaceMemory(tmpDir);
+    const target = workspace.entries.find(entry => entry.id === current.id);
+    assert.equal(target?.reinforcementCount ?? 0, 0);
+
+    const events = await queryEvidenceEvents(tmpDir, { types: ["memory_reinforced"] });
+    const rejectedReasons = events
+      .filter(event => event.outcome === "rejected")
+      .flatMap(event => event.reasonCodes);
+    assert.ok(rejectedReasons.includes("memory_ref_target_changed"));
+    assert.ok(rejectedReasons.includes("memory_ref_target_unavailable"));
+    assert.ok(rejectedReasons.includes("invalid_memory_ref"));
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("session.compacted emits rejected evidence when numbered REINFORCE is blocked by retention gates", async () => {
+  const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-test-"));
+
+  try {
+    const nowMs = Date.now();
+    const now = new Date(nowMs).toISOString();
+    const existing: LongTermMemoryEntry = {
+      id: "blocked-numbered-reinforce",
+      type: "feedback",
+      text: "User prefers deterministic numbered-ref reinforcement evidence.",
+      source: "compaction",
+      confidence: 0.9,
+      status: "active",
+      createdAt: now,
+      updatedAt: now,
+      retentionClock: nowMs - 10 * 24 * 60 * 60 * 1000,
+      reinforcementCount: 1,
+      lastReinforcedAt: nowMs - 2 * 60 * 60 * 1000,
+      lastReinforcedSessionID: "blocked-reinforce-session",
+    };
+    await updateWorkspaceMemory(tmpDir, store => {
+      store.entries.push(existing);
+      return store;
+    });
+    await saveSessionState(tmpDir, {
+      version: 1,
+      sessionID: "blocked-reinforce-session",
+      turn: 0,
+      updatedAt: now,
+      activeFiles: [],
+      openErrors: [],
+      recentDecisions: [],
+      pendingMemories: [],
+      compactionMemoryRefs: [compactionRefFor(existing)],
+    });
+
+    const plugin = await MemoryV2Plugin({
+      directory: tmpDir,
+      client: mockClientWithCompactionSummary("Memory candidates:\nREINFORCE [M1]"),
+    });
+    await (plugin as Record<string, Function>)["event"]({
+      event: { type: "session.compacted", properties: { sessionID: "blocked-reinforce-session" } },
+    });
+
+    const workspace = await loadWorkspaceMemory(tmpDir);
+    assert.equal(workspace.entries.filter(entry => entry.id === existing.id).length, 1);
+    const blocked = workspace.entries.find(entry => entry.id === existing.id);
+    assert.equal(blocked?.reinforcementCount, 1);
+
+    const events = await queryEvidenceEvents(tmpDir, { types: ["memory_reinforced"] });
+    assert.ok(events.some(event =>
+      event.outcome === "rejected" &&
+      event.reasonCodes.includes("reinforcement_window_blocked") &&
+      event.memory?.memoryId === existing.id &&
+      event.relations?.some(relation => relation.role === "target" && relation.memory?.memoryId === existing.id) &&
+      !event.relations?.some(relation => relation.role === "reinforced")
+    ));
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("session.compacted applies REINFORCE plus new candidate append through normal promotion", async () => {
+  const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-test-"));
+
+  try {
+    const now = new Date().toISOString();
+    const existing: LongTermMemoryEntry = {
+      id: "reinforce-plus-append-existing",
+      type: "decision",
+      text: "Use numbered refs for durable memory consolidation.",
+      source: "compaction",
+      confidence: 0.9,
+      status: "active",
+      createdAt: now,
+      updatedAt: now,
+    };
+    await updateWorkspaceMemory(tmpDir, store => {
+      store.entries.push(existing);
+      return store;
+    });
+    await saveSessionState(tmpDir, {
+      version: 1,
+      sessionID: "reinforce-plus-append-session",
+      turn: 0,
+      updatedAt: now,
+      activeFiles: [],
+      openErrors: [],
+      recentDecisions: [],
+      pendingMemories: [],
+      compactionMemoryRefs: [compactionRefFor(existing)],
+    });
+
+    const newCandidateText = "Use numbered refs plus audit evidence for durable consolidation.";
+    const plugin = await MemoryV2Plugin({
+      directory: tmpDir,
+      client: mockClientWithCompactionSummary([
+        "Memory candidates:",
+        "REINFORCE [M1]",
+        `- [decision] ${newCandidateText}`,
+      ].join("\n")),
+    });
+    await (plugin as Record<string, Function>)["event"]({
+      event: { type: "session.compacted", properties: { sessionID: "reinforce-plus-append-session" } },
+    });
+
+    const workspace = await loadWorkspaceMemory(tmpDir);
+    const reinforced = workspace.entries.find(entry => entry.id === existing.id);
+    assert.equal(reinforced?.reinforcementCount, 1);
+    assert.ok(workspace.entries.some(entry => entry.text === newCandidateText && entry.status === "active"));
+
+    const events = await queryEvidenceEvents(tmpDir, { newestFirst: false });
+    assert.ok(events.some(event => event.type === "memory_reinforced" && event.outcome === "reinforced"));
+    assert.ok(events.some(event => event.type === "promotion_promoted" && event.textPreview === newCandidateText));
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("session.compacted replaces unreinforced compaction memory with same-type numbered command", async () => {
+  const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-test-"));
+
+  try {
+    const now = new Date().toISOString();
+    const existing: LongTermMemoryEntry = {
+      id: "replace-same-type-target",
+      type: "decision",
+      text: "Use old replacement wording for numbered ref consolidation.",
+      source: "compaction",
+      confidence: 0.9,
+      status: "active",
+      createdAt: now,
+      updatedAt: now,
+    };
+    await updateWorkspaceMemory(tmpDir, store => {
+      store.entries.push(existing);
+      return store;
+    });
+    await saveSessionState(tmpDir, {
+      version: 1,
+      sessionID: "replace-same-type-session",
+      turn: 0,
+      updatedAt: now,
+      activeFiles: [],
+      openErrors: [],
+      recentDecisions: [],
+      pendingMemories: [],
+      compactionMemoryRefs: [compactionRefFor(existing)],
+    });
+
+    const replacementText = "Use corrected replacement wording for numbered ref consolidation.";
+    const plugin = await MemoryV2Plugin({
+      directory: tmpDir,
+      client: mockClientWithCompactionSummary(`Memory candidates:\nREPLACE [M1] [decision] ${replacementText}`),
+    });
+    await (plugin as Record<string, Function>)["event"]({
+      event: { type: "session.compacted", properties: { sessionID: "replace-same-type-session" } },
+    });
+
+    const workspace = await loadWorkspaceMemory(tmpDir);
+    const oldTarget = workspace.entries.find(entry => entry.id === existing.id);
+    const replacement = workspace.entries.find(entry => entry.text === replacementText);
+    assert.equal(oldTarget?.status, "superseded");
+    assert.equal(replacement?.status, "active");
+    assert.equal(replacement?.type, "decision");
+    assert.equal(replacement?.source, "compaction");
+    assert.deepEqual(replacement?.supersedes, [existing.id]);
+
+    const events = await queryEvidenceEvents(tmpDir, { types: ["memory_replaced_numbered_ref"] });
+    assert.ok(events.some(event =>
+      event.outcome === "superseded" &&
+      event.reasonCodes.includes("numbered_ref_replace") &&
+      event.reasonCodes.includes("same_type_replace") &&
+      event.relations?.some(relation => relation.role === "superseded" && relation.memory?.memoryId === existing.id) &&
+      event.relations?.some(relation => relation.role === "superseded_by" && relation.memory?.memoryId === replacement?.id)
+    ));
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("session.compacted applies cross-type numbered REPLACE for eligible compaction target", async () => {
+  const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-test-"));
+
+  try {
+    const now = new Date().toISOString();
+    const existing: LongTermMemoryEntry = {
+      id: "replace-cross-type-target",
+      type: "project",
+      text: "This repository uses an old replacement categorization.",
+      source: "compaction",
+      confidence: 0.9,
+      status: "active",
+      createdAt: now,
+      updatedAt: now,
+    };
+    await updateWorkspaceMemory(tmpDir, store => {
+      store.entries.push(existing);
+      return store;
+    });
+    await saveSessionState(tmpDir, {
+      version: 1,
+      sessionID: "replace-cross-type-session",
+      turn: 0,
+      updatedAt: now,
+      activeFiles: [],
+      openErrors: [],
+      recentDecisions: [],
+      pendingMemories: [],
+      compactionMemoryRefs: [compactionRefFor(existing)],
+    });
+
+    const replacementText = "Use numbered REPLACE only for correcting eligible compaction memory records.";
+    const plugin = await MemoryV2Plugin({
+      directory: tmpDir,
+      client: mockClientWithCompactionSummary(`Memory candidates:\nREPLACE [M1] [decision] ${replacementText}`),
+    });
+    await (plugin as Record<string, Function>)["event"]({
+      event: { type: "session.compacted", properties: { sessionID: "replace-cross-type-session" } },
+    });
+
+    const workspace = await loadWorkspaceMemory(tmpDir);
+    const oldTarget = workspace.entries.find(entry => entry.id === existing.id);
+    const replacement = workspace.entries.find(entry => entry.text === replacementText);
+    assert.equal(oldTarget?.status, "superseded");
+    assert.equal(replacement?.type, "decision");
+    assert.deepEqual(replacement?.supersedes, [existing.id]);
+
+    const events = await queryEvidenceEvents(tmpDir, { types: ["memory_replaced_numbered_ref"] });
+    assert.ok(events.some(event =>
+      event.outcome === "superseded" &&
+      event.reasonCodes.includes("numbered_ref_replace") &&
+      event.reasonCodes.includes("cross_type_replace")
+    ));
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("session.compacted rejects numbered REPLACE for reinforced compaction target", async () => {
+  const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-test-"));
+
+  try {
+    const now = new Date().toISOString();
+    const existing: LongTermMemoryEntry = {
+      id: "replace-reinforced-target",
+      type: "decision",
+      text: "Keep protected replacement targets when they have reinforcement history.",
+      source: "compaction",
+      confidence: 0.9,
+      status: "active",
+      createdAt: now,
+      updatedAt: now,
+      reinforcementCount: 1,
+    };
+    await updateWorkspaceMemory(tmpDir, store => {
+      store.entries.push(existing);
+      return store;
+    });
+    await saveSessionState(tmpDir, {
+      version: 1,
+      sessionID: "replace-reinforced-session",
+      turn: 0,
+      updatedAt: now,
+      activeFiles: [],
+      openErrors: [],
+      recentDecisions: [],
+      pendingMemories: [],
+      compactionMemoryRefs: [compactionRefFor(existing)],
+    });
+
+    const replacementText = "Use replacement text that should not be applied to reinforced memory.";
+    const plugin = await MemoryV2Plugin({
+      directory: tmpDir,
+      client: mockClientWithCompactionSummary(`Memory candidates:\nREPLACE [M1] [decision] ${replacementText}`),
+    });
+    await (plugin as Record<string, Function>)["event"]({
+      event: { type: "session.compacted", properties: { sessionID: "replace-reinforced-session" } },
+    });
+
+    const workspace = await loadWorkspaceMemory(tmpDir);
+    assert.equal(workspace.entries.find(entry => entry.id === existing.id)?.status, "active");
+    assert.equal(workspace.entries.some(entry => entry.text === replacementText), false);
+
+    const events = await queryEvidenceEvents(tmpDir, { types: ["memory_replaced_numbered_ref"] });
+    assert.ok(events.some(event =>
+      event.outcome === "rejected" &&
+      event.reasonCodes.includes("protected_reinforced_target") &&
+      event.memory?.memoryId === existing.id &&
+      event.relations?.some(relation => relation.role === "target" && relation.memory?.memoryId === existing.id) &&
+      !event.relations?.some(relation => relation.role === "superseded" || relation.role === "superseded_by")
+    ));
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("session.compacted rejects numbered REPLACE for explicit or manual targets", async () => {
+  const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-test-"));
+
+  try {
+    const now = new Date().toISOString();
+    const explicitTarget: LongTermMemoryEntry = {
+      id: "replace-explicit-target",
+      type: "feedback",
+      text: "User prefers protected explicit memory records.",
+      source: "explicit",
+      confidence: 1,
+      status: "active",
+      createdAt: now,
+      updatedAt: now,
+    };
+    const manualTarget: LongTermMemoryEntry = {
+      id: "replace-manual-target",
+      type: "project",
+      text: "This workspace has protected manual memory records.",
+      source: "manual",
+      confidence: 1,
+      status: "active",
+      createdAt: now,
+      updatedAt: now,
+    };
+    await updateWorkspaceMemory(tmpDir, store => {
+      store.entries.push(explicitTarget, manualTarget);
+      return store;
+    });
+    await saveSessionState(tmpDir, {
+      version: 1,
+      sessionID: "replace-protected-source-session",
+      turn: 0,
+      updatedAt: now,
+      activeFiles: [],
+      openErrors: [],
+      recentDecisions: [],
+      pendingMemories: [],
+      compactionMemoryRefs: [compactionRefFor(explicitTarget), compactionRefFor(manualTarget, "M2")],
+    });
+
+    const plugin = await MemoryV2Plugin({
+      directory: tmpDir,
+      client: mockClientWithCompactionSummary([
+        "Memory candidates:",
+        "REPLACE [M1] [feedback] User prefers unprotected explicit replacement records.",
+        "REPLACE [M2] [project] This workspace has unprotected manual replacement records.",
+      ].join("\n")),
+    });
+    await (plugin as Record<string, Function>)["event"]({
+      event: { type: "session.compacted", properties: { sessionID: "replace-protected-source-session" } },
+    });
+
+    const workspace = await loadWorkspaceMemory(tmpDir);
+    assert.equal(workspace.entries.find(entry => entry.id === explicitTarget.id)?.status, "active");
+    assert.equal(workspace.entries.find(entry => entry.id === manualTarget.id)?.status, "active");
+    assert.equal(workspace.entries.length, 2);
+
+    const events = await queryEvidenceEvents(tmpDir, { types: ["memory_replaced_numbered_ref"] });
+    const protectedEvents = events.filter(event => event.reasonCodes.includes("protected_memory_source"));
+    assert.equal(protectedEvents.length, 2);
+    assert.ok(protectedEvents.some(event => event.memory?.memoryId === explicitTarget.id));
+    assert.ok(protectedEvents.some(event => event.memory?.memoryId === manualTarget.id));
+    assert.ok(protectedEvents.every(event => event.relations?.some(relation => relation.role === "target")));
+    assert.ok(protectedEvents.every(event => !event.relations?.some(relation => relation.role === "superseded" || relation.role === "superseded_by")));
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("session.compacted rejects low-quality numbered REPLACE and leaves target active", async () => {
+  const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-test-"));
+
+  try {
+    const now = new Date().toISOString();
+    const existing: LongTermMemoryEntry = {
+      id: "replace-quality-target",
+      type: "decision",
+      text: "Use quality gates before applying numbered replacement commands.",
+      source: "compaction",
+      confidence: 0.9,
+      status: "active",
+      createdAt: now,
+      updatedAt: now,
+    };
+    await updateWorkspaceMemory(tmpDir, store => {
+      store.entries.push(existing);
+      return store;
+    });
+    await saveSessionState(tmpDir, {
+      version: 1,
+      sessionID: "replace-quality-session",
+      turn: 0,
+      updatedAt: now,
+      activeFiles: [],
+      openErrors: [],
+      recentDecisions: [],
+      pendingMemories: [],
+      compactionMemoryRefs: [compactionRefFor(existing)],
+    });
+
+    const badReplacement = "Task A.5 completed successfully.";
+    const plugin = await MemoryV2Plugin({
+      directory: tmpDir,
+      client: mockClientWithCompactionSummary(`Memory candidates:\nREPLACE [M1] [decision] ${badReplacement}`),
+    });
+    await (plugin as Record<string, Function>)["event"]({
+      event: { type: "session.compacted", properties: { sessionID: "replace-quality-session" } },
+    });
+
+    const workspace = await loadWorkspaceMemory(tmpDir);
+    assert.equal(workspace.entries.find(entry => entry.id === existing.id)?.status, "active");
+    assert.equal(workspace.entries.some(entry => entry.text === badReplacement), false);
+
+    const events = await queryEvidenceEvents(tmpDir, { types: ["memory_replaced_numbered_ref"] });
+    assert.ok(events.some(event =>
+      event.outcome === "rejected" &&
+      event.reasonCodes.includes("progress_snapshot") &&
+      event.memory?.memoryId === existing.id &&
+      event.relations?.some(relation => relation.role === "target" && relation.memory?.memoryId === existing.id) &&
+      !event.relations?.some(relation => relation.role === "superseded" || relation.role === "superseded_by")
+    ));
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("e2e compaction numbered refs reinforce and promote appended candidate then clear refs", async () => {
+  const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-e2e-"));
+
+  try {
+    const now = new Date().toISOString();
+    const oldRetentionClock = Date.now() - 9 * 24 * 60 * 60 * 1000;
+    const existing: LongTermMemoryEntry = {
+      id: "e2e-reinforce-existing",
+      type: "decision",
+      text: "Use numbered refs for compaction consolidation decisions.",
+      source: "compaction",
+      confidence: 0.9,
+      status: "active",
+      createdAt: now,
+      updatedAt: now,
+      retentionClock: oldRetentionClock,
+    };
+    await updateWorkspaceMemory(tmpDir, store => {
+      store.entries.push(existing);
+      return store;
+    });
+
+    const additionText = "Use audit-safe addition memory when numbered refs reinforce existing consolidation facts.";
+    let summary = "";
+    const plugin = await MemoryV2Plugin({
+      directory: tmpDir,
+      client: mockClientWithMutableCompactionSummary(() => summary),
+    });
+
+    const compactingOutput = { context: [], prompt: "" };
+    await (plugin as Record<string, Function>)["experimental.session.compacting"](
+      { sessionID: "e2e-reinforce-append-session" },
+      compactingOutput,
+    );
+
+    assert.match(compactingOutput.prompt, /Existing workspace memories available for consolidation:/);
+    assert.match(compactingOutput.prompt, /\[M1\] Use numbered refs for compaction consolidation decisions\./);
+    assert.deepEqual(
+      (await loadSessionState(tmpDir, "e2e-reinforce-append-session")).compactionMemoryRefs.map(ref => ref.memoryId),
+      [existing.id],
+    );
+    const compactionId = (await loadSessionState(tmpDir, "e2e-reinforce-append-session")).compactionMemoryRefs[0]?.compactionId;
+    assert.ok(compactionId);
+    summary = [
+      "## Goal",
+      "Continue the task.",
+      "",
+      "Memory candidates:",
+      `Memory ref snapshot id: ${compactionId}`,
+      "REINFORCE [M1]",
+      `- [decision] ${additionText}`,
+    ].join("\n");
+
+    await (plugin as Record<string, Function>)["event"]({
+      event: { type: "session.compacted", properties: { sessionID: "e2e-reinforce-append-session" } },
+    });
+
+    const workspace = await loadWorkspaceMemory(tmpDir);
+    const reinforced = workspace.entries.find(entry => entry.id === existing.id);
+    const addition = workspace.entries.find(entry => entry.text === additionText);
+    assert.equal(reinforced?.reinforcementCount, 1);
+    assert.equal(reinforced?.lastReinforcedSessionID, "e2e-reinforce-append-session");
+    assert.ok((reinforced?.retentionClock ?? 0) > oldRetentionClock);
+    assert.equal(addition?.status, "active");
+    assert.equal(addition?.source, "compaction");
+
+    const stateAfter = await loadSessionState(tmpDir, "e2e-reinforce-append-session");
+    assert.deepEqual(stateAfter.compactionMemoryRefs, []);
+    assert.equal(stateAfter.pendingMemories.length, 0);
+    assert.equal((await loadPendingJournal(tmpDir)).entries.length, 0);
+
+    const events = await queryEvidenceEvents(tmpDir, { newestFirst: false });
+    assert.ok(events.some(event => event.type === "render_selected" && event.memory?.memoryId === existing.id));
+    assert.ok(events.some(event => event.type === "memory_reinforced" && event.outcome === "reinforced" && event.memory?.memoryId === existing.id));
+    assert.ok(events.some(event => event.type === "promotion_promoted" && event.textPreview === additionText));
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("e2e compaction numbered refs apply cross-type REPLACE and clear refs", async () => {
+  const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-e2e-"));
+
+  try {
+    const now = new Date().toISOString();
+    const existing: LongTermMemoryEntry = {
+      id: "e2e-replace-existing",
+      type: "project",
+      text: "This repository stores replacement policy as a project fact.",
+      source: "compaction",
+      confidence: 0.9,
+      status: "active",
+      createdAt: now,
+      updatedAt: now,
+    };
+    await updateWorkspaceMemory(tmpDir, store => {
+      store.entries.push(existing);
+      return store;
+    });
+
+    const replacementText = "Use numbered REPLACE only for eligible unreinforced compaction memory corrections.";
+    let summary = "";
+    const plugin = await MemoryV2Plugin({
+      directory: tmpDir,
+      client: mockClientWithMutableCompactionSummary(() => summary),
+    });
+
+    const compactingOutput = { context: [], prompt: "" };
+    await (plugin as Record<string, Function>)["experimental.session.compacting"](
+      { sessionID: "e2e-replace-session" },
+      compactingOutput,
+    );
+    assert.match(compactingOutput.prompt, /\[M1\] This repository stores replacement policy as a project fact\./);
+    const persistedRef = (await loadSessionState(tmpDir, "e2e-replace-session")).compactionMemoryRefs[0];
+    assert.equal(persistedRef?.memoryId, existing.id);
+    assert.ok(persistedRef?.compactionId);
+    summary = [
+      "Memory candidates:",
+      `Memory ref snapshot id: ${persistedRef.compactionId}`,
+      `REPLACE [M1] [decision] ${replacementText}`,
+    ].join("\n");
+
+    await (plugin as Record<string, Function>)["event"]({
+      event: { type: "session.compacted", properties: { sessionID: "e2e-replace-session" } },
+    });
+
+    const workspace = await loadWorkspaceMemory(tmpDir);
+    const oldTarget = workspace.entries.find(entry => entry.id === existing.id);
+    const replacement = workspace.entries.find(entry => entry.text === replacementText);
+    assert.equal(oldTarget?.status, "superseded");
+    assert.equal(replacement?.status, "active");
+    assert.equal(replacement?.type, "decision");
+    assert.deepEqual(replacement?.supersedes, [existing.id]);
+    assert.deepEqual((await loadSessionState(tmpDir, "e2e-replace-session")).compactionMemoryRefs, []);
+
+    const events = await queryEvidenceEvents(tmpDir, { types: ["memory_replaced_numbered_ref"] });
+    assert.ok(events.some(event =>
+      event.outcome === "superseded" &&
+      event.reasonCodes.includes("numbered_ref_replace") &&
+      event.reasonCodes.includes("cross_type_replace") &&
+      event.relations?.some(relation => relation.role === "superseded" && relation.memory?.memoryId === existing.id) &&
+      event.relations?.some(relation => relation.role === "superseded_by" && relation.memory?.memoryId === replacement?.id)
+    ));
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("e2e compaction stale numbered ref rejects after concurrent workspace mutation and clears refs", async () => {
+  const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-e2e-"));
+
+  try {
+    const now = new Date().toISOString();
+    const existing: LongTermMemoryEntry = {
+      id: "e2e-stale-existing",
+      type: "decision",
+      text: "Use original stale ref text before concurrent mutation.",
+      source: "compaction",
+      confidence: 0.9,
+      status: "active",
+      createdAt: now,
+      updatedAt: now,
+    };
+    await updateWorkspaceMemory(tmpDir, store => {
+      store.entries.push(existing);
+      return store;
+    });
+
+    const replacementText = "Use replacement text that must not apply to stale refs.";
+    let summary = "";
+    const plugin = await MemoryV2Plugin({
+      directory: tmpDir,
+      client: mockClientWithMutableCompactionSummary(() => summary),
+    });
+
+    const compactingOutput = { context: [], prompt: "" };
+    await (plugin as Record<string, Function>)["experimental.session.compacting"](
+      { sessionID: "e2e-stale-session" },
+      compactingOutput,
+    );
+    assert.match(compactingOutput.prompt, /\[M1\] Use original stale ref text before concurrent mutation\./);
+    const persistedRef = (await loadSessionState(tmpDir, "e2e-stale-session")).compactionMemoryRefs[0];
+    assert.equal(persistedRef?.exactKey, workspaceMemoryExactKey(existing));
+    assert.ok(persistedRef?.compactionId);
+    summary = [
+      "Memory candidates:",
+      `Memory ref snapshot id: ${persistedRef.compactionId}`,
+      `REPLACE [M1] [decision] ${replacementText}`,
+    ].join("\n");
+
+    await updateWorkspaceMemory(tmpDir, store => {
+      const target = store.entries.find(entry => entry.id === existing.id);
+      assert.ok(target);
+      target.text = "Use concurrently changed stale ref text before compacted handling.";
+      target.updatedAt = new Date().toISOString();
+      return store;
+    });
+
+    await (plugin as Record<string, Function>)["event"]({
+      event: { type: "session.compacted", properties: { sessionID: "e2e-stale-session" } },
+    });
+
+    const workspace = await loadWorkspaceMemory(tmpDir);
+    const targetAfter = workspace.entries.find(entry => entry.id === existing.id);
+    assert.equal(targetAfter?.status, "active");
+    assert.equal(targetAfter?.text, "Use concurrently changed stale ref text before compacted handling.");
+    assert.equal(workspace.entries.some(entry => entry.text === replacementText), false);
+    assert.deepEqual((await loadSessionState(tmpDir, "e2e-stale-session")).compactionMemoryRefs, []);
+
+    const events = await queryEvidenceEvents(tmpDir, { types: ["memory_replaced_numbered_ref"] });
+    assert.ok(events.some(event =>
+      event.outcome === "rejected" &&
+      event.reasonCodes.includes("memory_ref_target_changed") &&
+      event.memory?.memoryId === existing.id
+    ));
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("overlapping compactions reject numbered commands from stale ref snapshot", async () => {
+  const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-e2e-overlap-"));
+
+  try {
+    const now = new Date().toISOString();
+    const existing: LongTermMemoryEntry = {
+      id: "overlap-numbered-target",
+      type: "decision",
+      text: "Use compaction snapshot ids to guard numbered memory refs.",
+      source: "compaction",
+      confidence: 0.9,
+      status: "active",
+      createdAt: now,
+      updatedAt: now,
+      retentionClock: Date.now() - 9 * 24 * 60 * 60 * 1000,
+    };
+    await updateWorkspaceMemory(tmpDir, store => {
+      store.entries.push(existing);
+      return store;
+    });
+
+    let summary = "";
+    const client = {
+      session: {
+        get: async () => ({ data: { parentID: null } }),
+        messages: async () => ({
+          data: summary
+            ? [{ info: { role: "assistant", summary: true }, parts: [{ type: "text", text: summary }] }]
+            : [],
+        }),
+        todo: async () => ({ data: [] }),
+      },
+    };
+    const plugin = await MemoryV2Plugin({ directory: tmpDir, client });
+
+    const firstOutput = { prompt: "", context: [] as string[] };
+    await (plugin as Record<string, Function>)["experimental.session.compacting"](
+      { sessionID: "overlap-compaction-session" },
+      firstOutput,
+    );
+    const firstId = (await loadSessionState(tmpDir, "overlap-compaction-session")).compactionMemoryRefs[0]?.compactionId;
+    assert.ok(firstId);
+    assert.match(firstOutput.prompt, new RegExp(`Memory ref snapshot id: ${firstId}`));
+
+    await (plugin as Record<string, Function>)["experimental.session.compacting"](
+      { sessionID: "overlap-compaction-session" },
+      { prompt: "", context: [] as string[] },
+    );
+    const secondId = (await loadSessionState(tmpDir, "overlap-compaction-session")).compactionMemoryRefs[0]?.compactionId;
+    assert.ok(secondId);
+    assert.notEqual(secondId, firstId);
+
+    summary = [
+      "Memory candidates:",
+      `Memory ref snapshot id: ${firstId}`,
+      "REINFORCE [M1]",
+    ].join("\n");
+    await (plugin as Record<string, Function>)["event"]({
+      event: { type: "session.compacted", properties: { sessionID: "overlap-compaction-session" } },
+    });
+
+    const workspace = await loadWorkspaceMemory(tmpDir);
+    const target = workspace.entries.find(entry => entry.id === existing.id);
+    assert.equal(target?.reinforcementCount ?? 0, 0);
+    assert.deepEqual((await loadSessionState(tmpDir, "overlap-compaction-session")).compactionMemoryRefs, []);
+
+    const events = await queryEvidenceEvents(tmpDir, { types: ["memory_reinforced"] });
+    assert.ok(events.some(event =>
+      event.outcome === "rejected" &&
+      event.reasonCodes.includes("missing_memory_ref_snapshot") &&
+      event.details?.compactionId === firstId &&
+      event.details?.storedCompactionId === secondId
+    ));
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("compaction id omission falls back to exact ref validation", async () => {
+  const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-e2e-compaction-id-fallback-"));
+
+  try {
+    const now = new Date().toISOString();
+    const existing: LongTermMemoryEntry = {
+      id: "fallback-numbered-target",
+      type: "decision",
+      text: "Use exact ref validation when compaction summaries omit snapshot ids.",
+      source: "compaction",
+      confidence: 0.9,
+      status: "active",
+      createdAt: now,
+      updatedAt: now,
+      retentionClock: Date.now() - 9 * 24 * 60 * 60 * 1000,
+    };
+    await updateWorkspaceMemory(tmpDir, store => {
+      store.entries.push(existing);
+      return store;
+    });
+
+    const plugin = await MemoryV2Plugin({
+      directory: tmpDir,
+      client: mockClientWithCompactionSummary([
+        "Memory candidates:",
+        "REINFORCE [M1]",
+      ].join("\n")),
+    });
+
+    await (plugin as Record<string, Function>)["experimental.session.compacting"](
+      { sessionID: "compaction-id-fallback-session" },
+      { prompt: "", context: [] as string[] },
+    );
+    const persistedRef = (await loadSessionState(tmpDir, "compaction-id-fallback-session")).compactionMemoryRefs[0];
+    assert.equal(persistedRef?.memoryId, existing.id);
+    assert.ok(persistedRef?.compactionId);
+
+    await (plugin as Record<string, Function>)["event"]({
+      event: { type: "session.compacted", properties: { sessionID: "compaction-id-fallback-session" } },
+    });
+
+    const workspace = await loadWorkspaceMemory(tmpDir);
+    const target = workspace.entries.find(entry => entry.id === existing.id);
+    assert.equal(target?.reinforcementCount, 1);
+    assert.equal(target?.lastReinforcedSessionID, "compaction-id-fallback-session");
+
+    const events = await queryEvidenceEvents(tmpDir, { types: ["memory_reinforced"] });
+    assert.ok(events.some(event =>
+      event.outcome === "reinforced" &&
+      event.memory?.memoryId === existing.id
+    ));
+    assert.equal(events.some(event => event.reasonCodes.includes("missing_memory_ref_snapshot")), false);
   } finally {
     await rm(tmpDir, { recursive: true, force: true });
   }

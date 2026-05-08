@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] - 2026-05-08
+
+### Added
+
+- Numbered compaction memory references (`[M1]`, `[M2]`, ...) for existing rendered workspace memories.
+- Compaction memory commands: `REINFORCE [M#]` for retention reinforcement and `REPLACE [M#] [type] text` for protected replacement.
+- `CompactionMemoryRef` session-state snapshots with optional compaction IDs for overlap detection.
+- Evidence events for numbered memory command outcomes: `memory_reinforced`, `memory_replaced_numbered_ref`, and `memory_reverted_numbered_ref`.
+- Public `memory-diag commands` report for command counts, outcomes, rejection reasons, protected replacement blocks, malformed commands, and latest command events.
+- Public dry-run-first `memory-diag revert` command for manually reverting successful numbered replacements by replacement memory ID or evidence event ID.
+- Hard quality rejection reasons for unresolved questions, transient bug/debug state, and deployment snapshots.
+- Soft `terse_label` diagnostic for very short label-like candidates.
+- Regression tests for command parsing, REINFORCE, protected REPLACE, revert behavior, compaction ref validation, overlap protection, and fallback behavior when the model omits the compaction snapshot ID.
+
+### Changed
+
+- Compaction prompts now include numbered memory refs and concise memory-operation rules instead of asking the model to reuse existing wording exactly.
+- Compaction no longer duplicates hot session state inside the compaction prompt; hot state remains available in normal prompt context.
+- Duplicate maintenance now prefers explicit REINFORCE or protected REPLACE evidence over silent duplicate restatement.
+- Rendered decision memory cap increased from 10 to 12 while keeping the global rendered cap at 28.
+- Rejected memory command evidence now uses neutral `target` relations instead of lifecycle-mutating `reinforced` or `superseded` relation roles.
+- `memory-diag` public command metadata now includes `commands` and `revert` alongside `status`, `rejected`, `missing`, and `explain`.
+
+### Fixed
+
+- Overlapping same-session compactions can no longer silently apply numbered commands against the wrong snapshot when the snapshot ID is present.
+- Numbered command resolution now rejects stale refs whose memory ID, status, or exact key no longer match the current workspace memory entry.
+- Protected replacements are surfaced as first-class diagnostics instead of being buried in generic rejection counts.
+
+### Recovery note
+
+Successful numbered replacements supersede the original memory and add a replacement. To inspect or recover one, run `memory-diag commands --verbose`, then dry-run `memory-diag revert --memory <replacement-memory-id>` or `memory-diag revert --event <event-id>` before adding `--apply`.
+
 ## [1.5.5] - 2026-05-05
 
 ### Added

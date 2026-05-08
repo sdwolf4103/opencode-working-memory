@@ -1,4 +1,4 @@
-export const VISIBLE_COMMANDS = ["status", "rejected", "missing", "explain"] as const;
+export const VISIBLE_COMMANDS = ["status", "rejected", "missing", "explain", "commands", "revert"] as const;
 export const HIDDEN_COMMANDS = ["coverage", "audit"] as const;
 
 export type VisibleCommand = typeof VISIBLE_COMMANDS[number];

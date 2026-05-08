@@ -35,6 +35,18 @@ const acceptedCases = [
     expectedType: "reference",
     expectedText: /bracketless/,
   },
+  {
+    name: "stable URL query reference",
+    line: "- [reference] Memory diagnostics dashboard URL is https://example.test/search?q=memory&view=summary",
+    expectedType: "reference",
+    expectedText: /search\?q=memory/,
+  },
+  {
+    name: "bilingual stable rule",
+    line: "- [decision] 使用 durable evidence records 保持 memory command auditability",
+    expectedType: "decision",
+    expectedText: /保持 memory command auditability/,
+  },
 ] as const;
 
 const rejectedCases = [
@@ -77,6 +89,34 @@ const rejectedCases = [
   {
     name: "session internal review note",
     line: "- [feedback] The assistant reviewed the code reviewer feedback and updated the plan",
+  },
+  {
+    name: "unresolved question suffix",
+    line: "- [project] Should we add semantic merge to workspace memory?",
+  },
+  {
+    name: "unresolved question prefix",
+    line: "- [reference] TODO: decide whether to keep this migration path",
+  },
+  {
+    name: "unresolved Chinese question",
+    line: "- [decision] 需要決定是否要增加新的記憶壓縮策略",
+  },
+  {
+    name: "transient bug state",
+    line: "- [project] Tests are failing and the next step is to fix the retry path",
+  },
+  {
+    name: "Chinese transient bug state",
+    line: "- [reference] 目前正在 debug storage lock failure，暫時 workaround 待修",
+  },
+  {
+    name: "deployment snapshot",
+    line: "- [reference] Latest deployed revision is rev-a8F3kL9pQ2xZ7bN4",
+  },
+  {
+    name: "Chinese deployment snapshot",
+    line: "- [project] 目前部署版本 build-9f8A7c6D5e4F3g2H 是 active release",
   },
 ] as const;
 
@@ -123,6 +163,57 @@ test("progress snapshot rejection is type independent", () => {
     assert.equal(result.accepted, false, `${type} progress snapshots must reject`);
     assert.ok(result.reasons.includes("progress_snapshot"));
   }
+});
+
+test("new v1.6 hard quality reasons are emitted by concrete heuristics", () => {
+  const cases = [
+    {
+      reason: "unresolved_question",
+      entry: { type: "reference" as const, text: "Open question: whether to keep legacy prompt rendering", source: "compaction" as const },
+    },
+    {
+      reason: "unresolved_question",
+      entry: { type: "project" as const, text: "We need to decide storage migration order?", source: "compaction" as const },
+    },
+    {
+      reason: "transient_bug_state",
+      entry: { type: "project" as const, text: "Currently debugging memory replacement and tests are failing", source: "compaction" as const },
+    },
+    {
+      reason: "deployment_snapshot",
+      entry: { type: "reference" as const, text: "Current active release build is build-X9kLmN42pQ7rT6z", source: "compaction" as const },
+    },
+  ];
+
+  for (const { reason, entry } of cases) {
+    const result = assessMemoryQuality(entry);
+    assert.equal(result.accepted, false, `${entry.text} should reject`);
+    assert.ok(result.reasons.includes(reason), `${entry.text} -> ${result.reasons.join(",")}`);
+  }
+});
+
+test("unresolved question guardrails preserve stable URL queries and durable rules", () => {
+  const urlResult = assessMemoryQuality({
+    type: "reference",
+    text: "Memory dashboard URL is https://example.test/search?q=memory&view=summary",
+    source: "compaction",
+  });
+  assert.equal(urlResult.reasons.includes("unresolved_question"), false, urlResult.reasons.join(","));
+  assert.equal(urlResult.accepted, true);
+
+  const durableRule = assessMemoryQuality({
+    type: "decision",
+    text: "Use verifier questions only when acceptance evidence is missing?",
+    source: "compaction",
+  });
+  assert.equal(durableRule.reasons.includes("unresolved_question"), false, durableRule.reasons.join(","));
+});
+
+test("terse_label is diagnostic only and does not block quality acceptance", () => {
+  const result = assessMemoryQuality({ type: "reference", text: "Cache key", source: "compaction" });
+  assert.equal(result.accepted, true);
+  assert.deepEqual(result.reasons, []);
+  assert.ok(result.diagnostics?.includes("terse_label"));
 });
 
 test("feedback must be stable user preference or instruction", () => {
@@ -196,7 +287,11 @@ test("hard quality reasons exclude soft whitelist failures", () => {
   assert.equal(isHardQualityReason("code_or_api_signature"), true);
   assert.equal(isHardQualityReason("path_heavy"), true);
   assert.equal(isHardQualityReason("empty"), true);
+  assert.equal(isHardQualityReason("unresolved_question"), true);
+  assert.equal(isHardQualityReason("transient_bug_state"), true);
+  assert.equal(isHardQualityReason("deployment_snapshot"), true);
 
   assert.equal(isHardQualityReason("bad_feedback"), false);
   assert.equal(isHardQualityReason("bad_decision"), false);
+  assert.equal(isHardQualityReason("terse_label"), false);
 });

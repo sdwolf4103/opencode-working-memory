@@ -1,5 +1,117 @@
 # Release Notes
 
+## 1.6.0 (2026-05-08)
+
+### Numbered Memory Refs
+
+This release turns compaction from a one-way memory extractor into a memory maintenance loop. The model now sees numbered references for existing workspace memories and can explicitly reinforce a still-useful memory or propose a protected replacement when compaction reveals that old memory is obsolete.
+
+The goal is not to make memory more aggressive. It is to make memory more accountable: old facts should be strengthened when they keep proving useful, replaced only when the target is safe, and diagnosable when the model tries something risky.
+
+> **Good memory is selective memory.**
+> v1.6 lets memory say “this still matters” without copying it again — and lets obsolete compaction memories fade behind a safer replacement trail.
+
+```text
+  compaction summary
+        │
+        ▼
+  Memory candidates:
+    Memory ref snapshot id: <uuid>
+    [M1] decision · reinforced=2 · source=explicit
+    [M2] project  · reinforced=0 · source=compaction
+        │
+        ├─ REINFORCE [M1]
+        │     ↑ slows decay, no text mutation
+        │
+        └─ REPLACE [M2] project Updated durable fact
+              ↑ only allowed for safe compaction targets
+```
+
+### What Changed
+
+- **Numbered memory refs**: compaction prompts now render existing workspace memories as `[M1]`, `[M2]`, ... references so the model can target a known memory instead of restating it as a duplicate candidate.
+- **REINFORCE commands**: `REINFORCE [M#]` increments the target memory's reinforcement count and updates its retention clock without changing its text.
+- **Protected REPLACE commands**: `REPLACE [M#] [type] text` supersedes the old memory and appends a replacement only when the target is safe: active, compaction-sourced, and not already reinforced.
+- **Reinforce + append workflow**: when a memory is mostly right but needs more context, compaction can reinforce the old memory and emit a new candidate for the new durable fact instead of mutating history.
+- **Compaction prompt restructure**: verbose type definitions and the old “reuse existing wording exactly” instruction were replaced with shorter command rules, categorization guidance, and concrete memory-operation examples.
+- **Hot state removed from compaction context**: active files, current errors, and pending session state remain in normal prompt context but are no longer duplicated inside the compaction prompt, saving budget and reducing accidental promotion of transient state.
+- **New hard quality gates**: unresolved questions, transient bug/debug state, and deployment snapshots are rejected as durable memory candidates.
+- **Soft terse-label diagnostic**: very short label-like candidates are reported for tuning without being hard-rejected in v1.6.
+- **Decision cap raised**: rendered decision memories now have a per-type cap of 12 instead of 10, while the global rendered cap remains 28.
+- **Overlap guard for compaction refs**: memory ref snapshots are tagged with a compaction ID when available, so overlapping same-session compactions cannot silently apply commands against the wrong numbered snapshot.
+- **Safer evidence semantics**: rejected memory command events use a neutral `target` relation role instead of lifecycle roles such as `reinforced` or `superseded`.
+
+### Why This Helps
+
+- Useful memories can become stronger through real reuse instead of duplicate extraction.
+- Obsolete compaction-sourced memories can be replaced with an explicit evidence trail rather than left to drift.
+- Manual, explicit, and already-reinforced memories are protected from automatic replacement.
+- Compaction prompt budget is spent on durable memory maintenance, not on duplicated hot session state.
+- Command outcomes are visible enough to tune the feature after release instead of guessing from reinforcement counts alone.
+
+### Diagnostics
+
+Inspect command behavior with:
+
+```bash
+npx --package opencode-working-memory memory-diag commands
+npx --package opencode-working-memory memory-diag commands --verbose
+npx --package opencode-working-memory memory-diag commands --json
+```
+
+The command report includes:
+
+- compactions with command evidence
+- REINFORCE and REPLACE counts
+- reinforced, superseded, rejected, and blocked outcomes
+- invalid or malformed command counts
+- same-type vs cross-type replacements
+- protected REPLACE blocks, split by reinforced target and protected source
+- latest command events in verbose mode
+
+If a numbered replacement needs manual recovery, use the dry-run-first revert command:
+
+```bash
+npx --package opencode-working-memory memory-diag revert --memory <replacement-memory-id>
+npx --package opencode-working-memory memory-diag revert --memory <replacement-memory-id> --apply
+```
+
+You can also target a replacement evidence event directly:
+
+```bash
+npx --package opencode-working-memory memory-diag revert --event <event-id>
+```
+
+### Safety Model
+
+- REINFORCE never edits memory text.
+- REPLACE is rejected for manual or explicit memories.
+- REPLACE is rejected for already reinforced targets.
+- REPLACE is rejected if the numbered ref no longer matches the current memory ID, status, and exact key.
+- If a compaction snapshot ID is present and mismatched, all numbered commands from that summary are rejected with `missing_memory_ref_snapshot`.
+- If the model omits the snapshot ID, v1.6 falls back to exact memory ref validation for compatibility and command effectiveness.
+
+### Not Included Yet
+
+- Semantic duplicate detection is still out of scope; numbered refs solve explicit compaction-targeted maintenance, not fuzzy topic matching.
+- Hot state evidence emission remains deferred to v2 until there is a `memory-diag` consumer for omitted hot-state items.
+- Automatic cleanup of old low-quality memories is not expanded in this release; new quality gates apply to new candidates.
+
+### Upgrade Notes
+
+- No configuration changes required.
+- Existing workspace memory files remain compatible.
+- Existing session state remains compatible; old sessions without compaction ref snapshots fall back safely.
+- Existing evidence logs remain compatible; new command events are appended only after v1.6 runs.
+- `memory-diag` now exposes two additional public commands: `commands` and `revert`.
+
+### Validation
+
+- `npm run typecheck` — `TYPECHECK_PASS`
+- `npm test` — 405 tests passing, `TEST_PASS`
+
+---
+
 ## 1.5.5 (2026-05-05)
 
 ### Hot State Rendering Health

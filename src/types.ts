@@ -28,6 +28,18 @@ export type LongTermMemoryEntry = {
   safetyCritical?: boolean;
 };
 
+export type CompactionMemoryRef = {
+  ref: string;
+  compactionId?: string;
+  memoryId: string;
+  type: LongTermType;
+  source: LongTermSource;
+  exactKey: string;
+  identityKey: string;
+  textPreview: string;
+  capturedAt: number;
+};
+
 export type WorkspaceMemoryStore = {
   version: 1;
   workspace: {
@@ -92,6 +104,7 @@ export type SessionState = {
   openErrors: OpenError[];
   recentDecisions: SessionDecision[];
   pendingMemories: LongTermMemoryEntry[];
+  compactionMemoryRefs: CompactionMemoryRef[];
 };
 
 export const LONG_TERM_LIMITS = {

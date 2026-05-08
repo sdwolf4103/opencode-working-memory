@@ -9,6 +9,8 @@ export function usage(): string {
   memory-diag rejected [--workspace <path>] [--verbose] [--json]
   memory-diag missing [--workspace <path>] [--verbose] [--json]
   memory-diag explain [memory-id] [--workspace <path>] [--raw]
+  memory-diag commands [--workspace <path>] [--verbose] [--json]
+  memory-diag revert (--memory <replacement-id> | --event <event-id>) [--workspace <path>] [--apply]
 
 Global options:
   --workspace <path>  Workspace path (default: current directory)
@@ -58,6 +60,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
     else if (arg === "--trigger-only") options.triggerOnly = true;
     else if (arg === "--include-historical") options.includeHistorical = true;
     else if (arg === "--explain") options.explain = true;
+    else if (arg === "--apply") options.apply = true;
     else if (arg === "--workspace") {
       const value = rest[++i];
       if (!value) return error("--workspace requires a path");
@@ -78,6 +81,10 @@ export function parseArgs(argv: string[]): ParsedArgs {
       const value = rest[++i];
       if (!value) return error("--memory requires an id");
       options.memory = value;
+    } else if (arg === "--event") {
+      const value = rest[++i];
+      if (!value) return error("--event requires an id");
+      options.event = value;
     } else if (!arg.startsWith("--") && command === "explain") {
       options.positional?.push(arg);
     } else {
@@ -96,12 +103,12 @@ export function parseArgs(argv: string[]): ParsedArgs {
 
   if (command === "status") {
     if (options.all) return error(`${command} does not accept --all`);
-  } else if (command === "rejected" || command === "missing" || command === "coverage" || command === "explain") {
+  } else if (command === "rejected" || command === "missing" || command === "coverage" || command === "explain" || command === "commands" || command === "revert") {
     if (options.all) return error(`${command} does not accept --all`);
   } else {
     if (options.all || options.workspace) return error(`${command} does not accept --all or --workspace`);
   }
-  if (options.json && command !== "status" && command !== "rejected" && command !== "missing" && command !== "coverage") {
+  if (options.json && command !== "status" && command !== "rejected" && command !== "missing" && command !== "coverage" && command !== "commands") {
     return error(`${command} does not accept --json`);
   }
   if (command !== "rejected" && (options.softOnly || options.triggerOnly || options.since)) {
@@ -113,8 +120,14 @@ export function parseArgs(argv: string[]): ParsedArgs {
   if (command !== "audit" && options.migration) {
     return error(`${command} does not accept --migration`);
   }
-  if (command !== "explain" && options.memory) {
+  if (command !== "explain" && command !== "revert" && options.memory) {
     return error(`${command} does not accept --memory`);
+  }
+  if (command !== "revert" && options.event) return error(`${command} does not accept --event`);
+  if (command !== "revert" && options.apply) return error(`${command} does not accept --apply`);
+  if (command === "revert") {
+    if (!options.memory && !options.event) return error("revert requires --memory or --event");
+    if (options.memory && options.event) return error("Use either --memory or --event, not both");
   }
   if (command === "rejected" && options.since && !isValidSince(options.since)) {
     return error(`Invalid --since value: ${options.since}`);

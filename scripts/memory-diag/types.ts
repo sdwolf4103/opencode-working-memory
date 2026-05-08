@@ -67,6 +67,8 @@ export type CliOptions = {
   since?: string;
   migration?: string;
   memory?: string;
+  event?: string;
+  apply?: boolean;
   positional?: string[];
   auditMode?: "coverage" | "migrations";
 };

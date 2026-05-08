@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { appendEvidenceEvents, type EvidenceEventInput } from "../src/evidence-log.ts";
+import { appendEvidenceEvents, queryEvidenceEvents, type EvidenceEventInput } from "../src/evidence-log.ts";
 import type { LongTermMemoryEntry, WorkspaceMemoryStore } from "../src/types.ts";
 import { LONG_TERM_LIMITS, PROMOTION_RETRY_LIMITS, type PendingMemoryJournalStore } from "../src/types.ts";
 import { extractionRejectionLogPath, workspaceEvidenceLogPath, workspaceKey, workspaceMemoryPath, workspacePendingJournalPath } from "../src/paths.ts";
@@ -94,6 +94,33 @@ function evidence(overrides: Partial<EvidenceEventInput>): EvidenceEventInput {
     reasonCodes: ["new_workspace_entry"],
     ...overrides,
   };
+}
+
+function replacementFixture(): { original: LongTermMemoryEntry; replacement: LongTermMemoryEntry } {
+  const original = {
+    ...entry("mem-original", "Original compaction memory to restore", "decision"),
+    status: "superseded" as const,
+  };
+  const replacement = {
+    ...entry("mem-replacement", "Replacement compaction memory to revert", "decision"),
+    supersedes: [original.id],
+  };
+  return { original, replacement };
+}
+
+function replacementEvidence(original: LongTermMemoryEntry, replacement: LongTermMemoryEntry): EvidenceEventInput {
+  return evidence({
+    type: "memory_replaced_numbered_ref",
+    phase: "storage",
+    outcome: "superseded",
+    memory: { memoryId: original.id, type: original.type, source: original.source, status: "superseded" },
+    relations: [
+      { role: "superseded", memory: { memoryId: original.id, type: original.type, source: original.source, status: "superseded" } },
+      { role: "superseded_by", memory: { memoryId: replacement.id, type: replacement.type, source: replacement.source, status: "active" } },
+    ],
+    reasonCodes: ["numbered_ref_replace", "same_type_replace"],
+    details: { ref: "M1", oldMemoryId: original.id, newMemoryId: replacement.id },
+  });
 }
 
 test("status handles missing workspace store as empty", async () => {
@@ -217,11 +244,274 @@ test("memory health reports stored vs rendered retention counts", async () => {
 
     assert.match(stdout, /Memory status inspection/);
     assert.match(stdout, /active: 28 \/ 28/);
-    assert.match(stdout, /rendered: 20/);
+    assert.match(stdout, /rendered: 21/);
     assert.match(stdout, /feedback: 17 \/ 10 FULL/);
     assert.match(stdout, /Top rendered candidates:\n\s+- strength=/);
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("memory-diag commands reports zero counts for empty evidence log", async () => {
+  const root = await mkdtemp(join(tmpdir(), "opencode-memory-diag-commands-empty-"));
+  try {
+    const stdout = await runMemoryDiag(["commands", "--workspace", root]);
+
+    assert.match(stdout, /Memory command diagnostics/);
+    assert.match(stdout, /compactions with command evidence: 0/);
+    assert.match(stdout, /reinforce: 0/);
+    assert.match(stdout, /replace: 0/);
+    assert.match(stdout, /invalid\/malformed commands: 0/);
+    assert.match(stdout, /Protected REPLACE blocked: 0 \(reinforced: 0, source: 0\)/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("memory-diag commands summarizes seeded command evidence", async () => {
+  const root = await mkdtemp(join(tmpdir(), "opencode-memory-diag-commands-"));
+  try {
+    await appendEvidenceEvents(root, [
+      evidence({
+        type: "memory_reinforced",
+        phase: "reinforcement",
+        outcome: "reinforced",
+        memory: { memoryId: "reinforced-1", type: "decision", source: "compaction", status: "active" },
+        reasonCodes: ["numbered_ref_reinforce", "reinforcement_window_allowed"],
+        sessionHash: "command-session-a",
+      }),
+      evidence({
+        type: "memory_reinforced",
+        phase: "reinforcement",
+        outcome: "rejected",
+        memory: { memoryId: "reinforced-blocked", type: "feedback", source: "compaction", status: "active" },
+        reasonCodes: ["numbered_ref_reinforce", "reinforcement_window_blocked"],
+        sessionHash: "command-session-a",
+      }),
+      evidence({
+        type: "memory_replaced_numbered_ref",
+        phase: "storage",
+        outcome: "superseded",
+        memory: { memoryId: "replace-old-same", type: "decision", source: "compaction", status: "superseded" },
+        relations: [
+          { role: "superseded", memory: { memoryId: "replace-old-same", type: "decision", source: "compaction", status: "superseded" } },
+          { role: "superseded_by", memory: { memoryId: "replace-new-same", type: "decision", source: "compaction", status: "active" } },
+        ],
+        reasonCodes: ["numbered_ref_replace", "same_type_replace"],
+        sessionHash: "command-session-b",
+      }),
+      evidence({
+        type: "memory_replaced_numbered_ref",
+        phase: "storage",
+        outcome: "superseded",
+        memory: { memoryId: "replace-old-cross", type: "project", source: "compaction", status: "superseded" },
+        relations: [
+          { role: "superseded", memory: { memoryId: "replace-old-cross", type: "project", source: "compaction", status: "superseded" } },
+          { role: "superseded_by", memory: { memoryId: "replace-new-cross", type: "decision", source: "compaction", status: "active" } },
+        ],
+        reasonCodes: ["numbered_ref_replace", "cross_type_replace"],
+        sessionHash: "command-session-b",
+      }),
+      evidence({
+        type: "memory_replaced_numbered_ref",
+        phase: "storage",
+        outcome: "rejected",
+        memory: { memoryId: "replace-protected-reinforced", type: "decision", source: "compaction", status: "active" },
+        reasonCodes: ["protected_reinforced_target"],
+        sessionHash: "command-session-c",
+      }),
+      evidence({
+        type: "memory_replaced_numbered_ref",
+        phase: "storage",
+        outcome: "rejected",
+        memory: { memoryId: "replace-protected-source", type: "feedback", source: "explicit", status: "active" },
+        reasonCodes: ["protected_memory_source"],
+        sessionHash: "command-session-c",
+      }),
+      evidence({
+        type: "extraction_candidate_rejected",
+        phase: "extraction",
+        outcome: "rejected",
+        memory: { type: "decision", source: "compaction" },
+        reasonCodes: ["invalid_memory_ref"],
+        textPreview: "REINFORCE [X3]",
+        sessionHash: "command-session-c",
+      }),
+    ]);
+
+    const stdout = await runMemoryDiag(["commands", "--workspace", root, "--verbose"]);
+
+    assert.match(stdout, /compactions with command evidence: 3/);
+    assert.match(stdout, /reinforce: 2/);
+    assert.match(stdout, /replace: 4/);
+    assert.match(stdout, /reinforced: 1/);
+    assert.match(stdout, /superseded: 2/);
+    assert.match(stdout, /rejected: 3/);
+    assert.match(stdout, /blocked: 3/);
+    assert.match(stdout, /invalid\/malformed commands: 1/);
+    assert.match(stdout, /same-type replacements: 1/);
+    assert.match(stdout, /cross-type replacements: 1/);
+    assert.match(stdout, /Protected REPLACE blocked: 2 \(reinforced: 1, source: 1\)/);
+    assert.match(stdout, /protected_reinforced_target: 1/);
+    assert.match(stdout, /protected_memory_source: 1/);
+    assert.match(stdout, /Latest command events/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("memory-diag commands json exposes protected replacement counts", async () => {
+  const root = await mkdtemp(join(tmpdir(), "opencode-memory-diag-commands-json-"));
+  try {
+    await appendEvidenceEvents(root, [
+      evidence({
+        type: "memory_replaced_numbered_ref",
+        phase: "storage",
+        outcome: "rejected",
+        memory: { memoryId: "replace-protected-reinforced-json", type: "decision", source: "compaction", status: "active" },
+        reasonCodes: ["protected_reinforced_target"],
+        sessionHash: "json-command-session",
+      }),
+      evidence({
+        type: "memory_replaced_numbered_ref",
+        phase: "storage",
+        outcome: "rejected",
+        memory: { memoryId: "replace-protected-source-json", type: "feedback", source: "manual", status: "active" },
+        reasonCodes: ["protected_memory_source"],
+        sessionHash: "json-command-session",
+      }),
+    ]);
+
+    const stdout = await runMemoryDiag(["commands", "--workspace", root, "--json"]);
+    const parsed = JSON.parse(stdout) as {
+      protectedReplacements: { total: number; protectedReinforcedTarget: number; protectedMemorySource: number };
+      commands: { reinforce: number; replace: number };
+      outcomes: { rejected: number };
+    };
+
+    assert.deepEqual(parsed.protectedReplacements, {
+      total: 2,
+      protectedReinforcedTarget: 1,
+      protectedMemorySource: 1,
+    });
+    assert.equal(parsed.commands.replace, 2);
+    assert.equal(parsed.commands.reinforce, 0);
+    assert.equal(parsed.outcomes.rejected, 2);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("memory-diag revert dry-run plans changes without mutating", async () => {
+  const root = await mkdtemp(join(tmpdir(), "opencode-memory-diag-revert-dry-run-"));
+  try {
+    const { original, replacement } = replacementFixture();
+    await writeWorkspaceStore(root, [original, replacement]);
+    await appendEvidenceEvents(root, [replacementEvidence(original, replacement)]);
+    const path = await workspaceMemoryPath(root);
+    const before = await readFile(path, "utf8");
+
+    const stdout = await runMemoryDiag(["revert", "--workspace", root, "--memory", replacement.id]);
+    const after = await readFile(path, "utf8");
+    const reverts = await queryEvidenceEvents(root, { types: ["memory_reverted_numbered_ref"] });
+
+    assert.match(stdout, /Memory revert dry run/);
+    assert.match(stdout, /replacement: mem-replacement/);
+    assert.match(stdout, /original: mem-original/);
+    assert.match(stdout, /No changes applied/);
+    assert.equal(after, before);
+    assert.equal(reverts.length, 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("memory-diag revert apply restores original and emits evidence", async () => {
+  const root = await mkdtemp(join(tmpdir(), "opencode-memory-diag-revert-apply-"));
+  try {
+    const { original, replacement } = replacementFixture();
+    await writeWorkspaceStore(root, [original, replacement]);
+    const [replaceEvent] = await appendEvidenceEvents(root, [replacementEvidence(original, replacement)]);
+
+    const stdout = await runMemoryDiag(["revert", "--workspace", root, "--event", replaceEvent.eventId, "--apply"]);
+    const stored = JSON.parse(await readFile(await workspaceMemoryPath(root), "utf8")) as WorkspaceMemoryStore;
+    const restored = stored.entries.find(item => item.id === original.id);
+    const supersededReplacement = stored.entries.find(item => item.id === replacement.id);
+    const reverts = await queryEvidenceEvents(root, { types: ["memory_reverted_numbered_ref"], outcomes: ["recovered"] });
+    const commandsStdout = await runMemoryDiag(["commands", "--workspace", root, "--verbose"]);
+
+    assert.match(stdout, /Memory revert applied/);
+    assert.equal(restored?.status, "active");
+    assert.equal(supersededReplacement?.status, "superseded");
+    assert.ok(restored?.updatedAt && restored.updatedAt !== original.updatedAt);
+    assert.ok(supersededReplacement?.updatedAt && supersededReplacement.updatedAt !== replacement.updatedAt);
+    assert.equal(reverts.length, 1);
+    assert.equal(reverts[0].type, "memory_reverted_numbered_ref");
+    assert.equal(reverts[0].outcome, "recovered");
+    assert.ok(reverts[0].reasonCodes.includes("manual_revert_numbered_ref"));
+    assert.ok(reverts[0].relations?.some(relation => relation.role === "recovered" && relation.memory?.memoryId === original.id));
+    assert.match(commandsStdout, /memory_reverted_numbered_ref/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("memory-diag revert rejects unsafe requests", async () => {
+  const missingOriginalRoot = await mkdtemp(join(tmpdir(), "opencode-memory-diag-revert-missing-original-"));
+  const replacementSupersededRoot = await mkdtemp(join(tmpdir(), "opencode-memory-diag-revert-replacement-superseded-"));
+  const laterSupersessionRoot = await mkdtemp(join(tmpdir(), "opencode-memory-diag-revert-later-supersession-"));
+  const wrongEventRoot = await mkdtemp(join(tmpdir(), "opencode-memory-diag-revert-wrong-event-"));
+  try {
+    const { original, replacement } = replacementFixture();
+
+    await writeWorkspaceStore(missingOriginalRoot, [replacement]);
+    await appendEvidenceEvents(missingOriginalRoot, [replacementEvidence(original, replacement)]);
+    await assert.rejects(
+      runMemoryDiagResult(["revert", "--workspace", missingOriginalRoot, "--memory", replacement.id]),
+      (error: unknown) => {
+        const err = error as { stderr?: string };
+        assert.match(err.stderr ?? "", /revert rejected: original memory mem-original is missing/);
+        return true;
+      },
+    );
+
+    await writeWorkspaceStore(replacementSupersededRoot, [original, { ...replacement, status: "superseded" }]);
+    await appendEvidenceEvents(replacementSupersededRoot, [replacementEvidence(original, replacement)]);
+    await assert.rejects(
+      runMemoryDiagResult(["revert", "--workspace", replacementSupersededRoot, "--memory", replacement.id]),
+      (error: unknown) => {
+        const err = error as { stderr?: string };
+        assert.match(err.stderr ?? "", /revert rejected: replacement memory mem-replacement is not active/);
+        return true;
+      },
+    );
+
+    const later = { ...entry("mem-later", "Later active supersession", "decision"), supersedes: [replacement.id] };
+    await writeWorkspaceStore(laterSupersessionRoot, [original, replacement, later]);
+    await appendEvidenceEvents(laterSupersessionRoot, [replacementEvidence(original, replacement)]);
+    await assert.rejects(
+      runMemoryDiagResult(["revert", "--workspace", laterSupersessionRoot, "--memory", replacement.id]),
+      (error: unknown) => {
+        const err = error as { stderr?: string };
+        assert.match(err.stderr ?? "", /revert rejected: replacement memory mem-replacement is superseded by active memory mem-later/);
+        return true;
+      },
+    );
+
+    const [wrongEvent] = await appendEvidenceEvents(wrongEventRoot, [evidence({ type: "promotion_promoted", phase: "promotion", outcome: "promoted" })]);
+    await assert.rejects(
+      runMemoryDiagResult(["revert", "--workspace", wrongEventRoot, "--event", wrongEvent.eventId]),
+      (error: unknown) => {
+        const err = error as { stderr?: string };
+        assert.match(err.stderr ?? "", /revert rejected: event .* is not a memory_replaced_numbered_ref event/);
+        return true;
+      },
+    );
+  } finally {
+    await rm(missingOriginalRoot, { recursive: true, force: true });
+    await rm(replacementSupersededRoot, { recursive: true, force: true });
+    await rm(laterSupersessionRoot, { recursive: true, force: true });
+    await rm(wrongEventRoot, { recursive: true, force: true });
   }
 });
 
@@ -471,7 +761,7 @@ test("status verbose output includes summary and aggregate inspection counts", a
     assert.match(stdout, /Memory status inspection/);
     assert.match(stdout, /Summary: Workspace memory quality is degraded:/);
     assert.match(stdout, /Caps:\n\s+active: 28 \/ 28/);
-    assert.match(stdout, /decision: 14 \/ 10 FULL/);
+    assert.match(stdout, /decision: 14 \/ 12 FULL/);
     assert.match(stdout, /feedback: 14 \/ 10 FULL/);
     assert.match(stdout, /Retention clocks:\n\s+present: 27\n\s+missing: 0\n\s+invalid: 1/);
     assert.match(stdout, /Evidence:\n\s+current with evidence: 1\n\s+current without evidence: 27/);
