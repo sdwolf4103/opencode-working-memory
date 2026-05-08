@@ -9,13 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Native OpenCode TUI `/memory-status`, `/memory-list`, and `/memory-help` display commands for local memory statistics, current workspace memory refs, and help.
+- Native OpenCode TUI `/memory` submenu for local memory statistics, searchable current workspace memory refs, and help.
 - Package `./tui` export for OpenCode TUI plugin loading.
 
 ### Changed
 
 - README documents separate server and TUI plugin configuration.
 - Recent activity/last TUI commands were removed before release because duplicate-looking slash menu entries were not useful.
+- Pre-release hyphenated TUI commands were consolidated into `/memory` because native submenu/list dialogs provide better bounded navigation with less slash-menu clutter.
 
 ### Fixed
 
@@ -23,7 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Notes / Known UX
 
-- TUI memory command output is injected as no-reply user-style conversation text and does not call the LLM.
+- TUI memory command output opens in transcript-free native TUI dialogs and does not call the LLM.
 
 ## [1.6.0] - 2026-05-08
 

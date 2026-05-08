@@ -204,7 +204,7 @@ export function formatMemoryStatus(model: MemoryStatusModel): string {
     `- Open errors: ${model.openErrors}`,
     `- Recent decisions: ${model.recentDecisions}`,
     "",
-    `Use /memory-list to view current [M1]-[M${LONG_TERM_LIMITS.maxEntries}] memory refs.`,
+    `Use /memory → Current memories to browse current [M1]-[M${LONG_TERM_LIMITS.maxEntries}] memory refs.`,
     "",
     "Local only: no LLM request was made.",
   ].join("\n");
@@ -275,10 +275,13 @@ export function formatMemoryHelp(): string {
   return [
     "## Memory help",
     "",
-    "Commands:",
-    "- /memory-status — show local memory statistics.",
-    `- /memory-list — show current workspace memories as display-local [M1]-[M${LONG_TERM_LIMITS.maxEntries}] refs.`,
-    "- /memory-help — show this help.",
+    "Command:",
+    "- /memory — open the local memory menu.",
+    "",
+    "Menu entries:",
+    "- Status — show local memory statistics.",
+    `- Current memories — browse active workspace memories as display-local [M1]-[M${LONG_TERM_LIMITS.maxEntries}] refs.`,
+    "- Help — show this help.",
     "",
     "These commands are read-only, local-only, and do not call the LLM.",
   ].join("\n");

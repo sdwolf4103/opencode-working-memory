@@ -30,7 +30,7 @@ Use it when you want your agent to remember things like:
 - **Explicit memory triggers** — users can say “remember this”, “記住”, “覚えて”, or “기억해” to save durable facts.
 - **Compaction-based extraction** — memory extraction piggybacks on OpenCode’s existing compaction flow.
 - **Numbered memory refs** — compaction can `REINFORCE [M#]` useful memories or safely `REPLACE [M#]` obsolete compaction memories.
-- **Native TUI memory commands** — show local memory status, current memory list, and help from the OpenCode TUI without an LLM/API call.
+- **Native TUI memory menu** — browse local memory status, current memories, and help from the OpenCode TUI without an LLM/API call.
 - **No manual tools** — memory is injected automatically into the system prompt.
 - **Quality guards** — filters noisy memories, temporary progress snapshots, stack traces, raw errors, and credentials.
 - **Retention decay** — keeps the strongest memories in prompt context while older or weaker memories fade out naturally; important and reinforced memories decay more slowly.
@@ -48,7 +48,7 @@ Add OpenCode Working Memory to your server plugin config:
 }
 ```
 
-To enable the native TUI memory display commands, also add the TUI plugin config:
+To enable the native TUI memory menu, also add the TUI plugin config:
 
 `.opencode/tui.json`:
 
@@ -59,19 +59,21 @@ To enable the native TUI memory display commands, also add the TUI plugin config
 }
 ```
 
-Then restart OpenCode. Server memory activates automatically; TUI memory commands appear in slash command autocomplete when the TUI plugin is loaded.
+Then restart OpenCode. Server memory activates automatically; the TUI `/memory` command appears in slash command autocomplete when the TUI plugin is loaded.
 
 ## Native TUI Memory Command
 
-The TUI plugin adds display-only local memory commands:
+The TUI plugin adds one display-only local memory command:
 
-- `/memory-status` — show status counts for workspace memory, rendered memories, pending memory, open errors, and recent decisions.
-- `/memory-list` — show current active workspace memories with display-local `[M1]` refs.
-- `/memory-help` — show command help.
+- `/memory` — open a native memory submenu.
 
-These commands are read-only and local-only. They read local memory files and inject output with OpenCode's no-reply session prompt path, so they do not make an LLM/API call.
+Submenu entries:
 
-Current OpenCode plugins do not expose an assistant-style command-output surface, so TUI memory command output appears as a user-style conversation message. The output becomes part of the session transcript and may be included in future compaction summaries; this is expected command output.
+- Status — show status counts for workspace memory, rendered memories, pending memory, open errors, and recent decisions.
+- Current memories — browse a searchable grouped list of current active workspace memories with display-local `[M1]` refs.
+- Help — show command help.
+
+This menu is read-only and local-only. It reads local memory files and opens native TUI dialogs, so it does not create conversation history entries and does not make an LLM/API call.
 
 Compaction output already appears through OpenCode's built-in conversation flow. This plugin does not add duplicate compaction notices.
 

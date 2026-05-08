@@ -89,7 +89,7 @@ test("formats status counts from workspace, session, and pending journal stores"
     assert.match(output, /Session:/);
     assert.match(output, /- Open errors: 1/);
     assert.match(output, /- Recent decisions: 1/);
-    assert.match(output, /Use \/memory-list to view current \[M1\]-\[M28\] memory refs\./);
+    assert.match(output, /Use \/memory → Current memories to browse current \[M1\]-\[M28\] memory refs\./);
     assert.match(output, /Local only: no LLM request was made\./);
     assert.equal(output.includes("Recent active memory previews"), false);
     assert.equal(output.includes("sushi"), false, "status output should not include memory previews");
@@ -181,9 +181,13 @@ test("formats empty memory list state", () => {
 test("formats help text for available display commands", () => {
   const output = formatMemoryHelp();
   assert.match(output, /^## Memory help/);
-  assert.match(output, /\/memory-status/);
-  assert.match(output, /\/memory-list/);
-  assert.match(output, /\/memory-help/);
+  assert.match(output, /\/memory — open the local memory menu\./);
+  assert.match(output, /Status — show local memory statistics\./);
+  assert.match(output, /Current memories — browse active workspace memories as display-local \[M1\]-\[M28\] refs\./);
+  assert.match(output, /Help — show this help\./);
+  for (const removedCommand of ["/memory-" + "status", "/memory-" + "list", "/memory-" + "help"]) {
+    assert.equal(output.includes(removedCommand), false);
+  }
   assert.equal(output.includes("/memory activity"), false);
   assert.equal(output.includes("/memory last"), false);
   assert.equal(output.includes("/memory status"), false);
