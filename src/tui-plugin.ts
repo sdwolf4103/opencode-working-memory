@@ -117,7 +117,6 @@ function memoryCommands(api: TuiPluginApi): TuiCommand[] {
       value: "memory.status",
       description: "Show working memory statistics in the current session.",
       category: "Memory",
-      suggested: true,
       slash: { name: "memory-status" },
       onSelect: (dialog?: DialogContext) => injectMemoryOutput(api, "memory.status", dialog),
     },

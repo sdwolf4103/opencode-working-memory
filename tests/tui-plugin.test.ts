@@ -7,7 +7,7 @@ import type { TuiCommand } from "@opencode-ai/plugin/tui";
 // ---------------------------------------------------------------------------
 
 type MockDialogContext = { clear: () => void; replace: (...args: unknown[]) => void; stack: unknown[] };
-type RuntimeCommand = { value: string; slash?: { name: string; aliases?: string[] }; onSelect?: (dialog: MockDialogContext) => void | Promise<void> };
+type RuntimeCommand = { value: string; suggested?: boolean; slash?: { name: string; aliases?: string[] }; onSelect?: (dialog: MockDialogContext) => void | Promise<void> };
 
 interface MockPromptCall {
   sessionID: string;
@@ -53,6 +53,7 @@ function makeMockTuiApi(options: {
         for (const item of items) {
           const runtimeItem: RuntimeCommand = {
             value: item.value,
+            suggested: item.suggested,
             slash: item.slash,
             onSelect: item.onSelect
               ? (dialogContext: MockDialogContext = dialog) => (item.onSelect as (dialog: MockDialogContext) => void | Promise<void>)(dialogContext)
@@ -102,6 +103,7 @@ test("registers three unique hyphenated memory slash commands", async () => {
   const slashNames = api.commands.map(command => command.slash?.name).filter(Boolean);
   assert.deepEqual(slashNames, ["memory-status", "memory-list", "memory-help"]);
   assert.deepEqual(api.commands.map(command => command.slash), [{ name: "memory-status" }, { name: "memory-list" }, { name: "memory-help" }]);
+  assert.deepEqual(api.commands.map(command => command.suggested), [undefined, undefined, undefined]);
   assert.equal(new Set(slashNames).size, slashNames.length);
   assert.deepEqual(api.commands.map(command => command.value), ["memory.status", "memory.list", "memory.help"]);
   assert.equal(api.commands.some(command => command.value === "memory.activity"), false);
