@@ -95,10 +95,17 @@ const { MemoryTuiPlugin } = await import("../src/tui-plugin.ts");
 // Tests
 // ---------------------------------------------------------------------------
 
-test("registers /memory slash command", async () => {
+test("registers three unique hyphenated memory slash commands", async () => {
   const api = makeMockTuiApi({ route: { name: "session", params: { sessionID: "ses_1" } } });
   await MemoryTuiPlugin(api as any, undefined, { id: "test", source: "file", spec: "test", target: "./tui", first_time: Date.now(), last_time: Date.now(), time_changed: Date.now(), load_count: 1, fingerprint: "test", state: "first" });
-  assert.ok(api.commands.some(command => command.slash?.name === "memory"));
+
+  const slashNames = api.commands.map(command => command.slash?.name).filter(Boolean);
+  assert.deepEqual(slashNames, ["memory-status", "memory-list", "memory-help"]);
+  assert.deepEqual(api.commands.map(command => command.slash), [{ name: "memory-status" }, { name: "memory-list" }, { name: "memory-help" }]);
+  assert.equal(new Set(slashNames).size, slashNames.length);
+  assert.deepEqual(api.commands.map(command => command.value), ["memory.status", "memory.list", "memory.help"]);
+  assert.equal(api.commands.some(command => command.value === "memory.activity"), false);
+  assert.equal(api.commands.some(command => command.value === "memory.last"), false);
 });
 
 test("injects no-reply text into the active session", async () => {
@@ -114,15 +121,15 @@ test("injects no-reply text into the active session", async () => {
   assert.equal(api.prompts[0].parts![0].synthetic, undefined);
 });
 
-test("routes memory subcommands to status, activity, and help output", async () => {
+test("routes memory commands to status, list, and help output", async () => {
   const api = makeMockTuiApi({ route: { name: "session", params: { sessionID: "ses_1" } } });
   await MemoryTuiPlugin(api as any, undefined, { id: "test", source: "file", spec: "test", target: "./tui", first_time: Date.now(), last_time: Date.now(), time_changed: Date.now(), load_count: 1, fingerprint: "test", state: "first" });
 
   await selectCommand(api, "memory.status");
   assert.match(api.prompts.at(-1)?.parts?.[0]?.text ?? "", /^## Memory status/);
 
-  await selectCommand(api, "memory.activity");
-  assert.match(api.prompts.at(-1)?.parts?.[0]?.text ?? "", /^## Recent memory activity/);
+  await selectCommand(api, "memory.list");
+  assert.match(api.prompts.at(-1)?.parts?.[0]?.text ?? "", /^## Current workspace memories/);
 
   await selectCommand(api, "memory.help");
   assert.match(api.prompts.at(-1)?.parts?.[0]?.text ?? "", /^## Memory help/);

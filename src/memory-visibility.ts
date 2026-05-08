@@ -1,20 +1,16 @@
-// No OpenCode SDK or TUI imports. Uses only local file-system reads from workspace memory, session state, pending journal, and evidence log.
+// No OpenCode SDK or TUI imports. Uses only local file-system reads from workspace memory, session state, and pending journal.
 
 import { readFile } from "node:fs/promises";
-import type { EvidenceEventV1 } from "./evidence-log.ts";
-import { queryEvidenceEvents } from "./evidence-log.ts";
 import { sessionStatePath, workspaceKey, workspaceMemoryPath, workspacePendingJournalPath } from "./paths.ts";
 import { redactCredentials } from "./redaction.ts";
 import type { LongTermMemoryEntry, PendingMemoryJournalStore, SessionState, WorkspaceMemoryStore } from "./types.ts";
 import { LONG_TERM_LIMITS } from "./types.ts";
-import { accountWorkspaceMemoryRender } from "./workspace-memory.ts";
+import { accountWorkspaceMemoryCompactionRefs, accountWorkspaceMemoryRender } from "./workspace-memory.ts";
 
-export type MemoryVisibilityCommand = "status" | "activity" | "help";
+export type MemoryVisibilityCommand = "status" | "list" | "help";
 
-export type MemoryPreview = {
-  id: string;
-  type: LongTermMemoryEntry["type"];
-  source: LongTermMemoryEntry["source"];
+type MemoryListItem = {
+  ref: string;
   text: string;
 };
 
@@ -27,41 +23,22 @@ export type MemoryStatusModel = {
   pendingJournalMemories: number;
   openErrors: number;
   recentDecisions: number;
-  previews: MemoryPreview[];
 };
 
-export type MemoryActivityModel = {
-  events: EvidenceEventV1[];
-  limit: number;
+export type MemoryListModel = {
+  activeMemories: number;
+  renderedMemories: number;
+  omittedActiveMemories: number;
+  groups: Record<LongTermMemoryEntry["type"], MemoryListItem[]>;
 };
 
-const DEFAULT_ACTIVITY_LIMIT = 10;
-const MAX_ACTIVITY_LIMIT = 50;
-const MAX_PREVIEWS = 3;
 const MAX_PREVIEW_CHARS = 120;
-
-function clampLimit(limit: number | undefined): number {
-  if (!Number.isFinite(limit)) return DEFAULT_ACTIVITY_LIMIT;
-  return Math.max(0, Math.min(MAX_ACTIVITY_LIMIT, Math.trunc(limit ?? DEFAULT_ACTIVITY_LIMIT)));
-}
+const MEMORY_TYPE_ORDER = ["feedback", "project", "decision", "reference"] as const satisfies readonly LongTermMemoryEntry["type"][];
 
 function safePreview(text: string | undefined, maxChars = MAX_PREVIEW_CHARS): string {
   const clean = redactCredentials(text ?? "").replace(/\s+/g, " ").trim();
   if (clean.length <= maxChars) return clean;
   return `${clean.slice(0, Math.max(0, maxChars - 1)).trimEnd()}…`;
-}
-
-function summarizeReasons(reasons: string[] | undefined): string {
-  return reasons && reasons.length > 0 ? reasons.join(", ") : "no_reason_recorded";
-}
-
-function memoryPreview(memory: LongTermMemoryEntry): MemoryPreview {
-  return {
-    id: memory.id,
-    type: memory.type,
-    source: memory.source,
-    text: safePreview(memory.text),
-  };
 }
 
 async function readJSONSnapshot(path: string): Promise<unknown | undefined> {
@@ -206,67 +183,91 @@ export async function getMemoryStatus(root: string, sessionID: string): Promise<
     pendingJournalMemories: pendingJournal.entries.length,
     openErrors: sessionState.openErrors.filter(error => error.status === "open").length,
     recentDecisions: sessionState.recentDecisions.length,
-    previews: activeEntries.slice(0, MAX_PREVIEWS).map(memoryPreview),
   };
 }
 
 export function formatMemoryStatus(model: MemoryStatusModel): string {
-  const lines = [
+  return [
     "## Memory status",
     "",
-    `Active memories: ${model.activeMemories}`,
-    `Rendered in prompt: ${model.renderedInPrompt}`,
-    `Omitted active memories: ${model.omittedActiveMemories}`,
-    `Superseded memories: ${model.supersededMemories}`,
-    `Pending in this session: ${model.pendingInSession}`,
-    `Pending journal memories: ${model.pendingJournalMemories}`,
-    `Open errors: ${model.openErrors}`,
-    `Recent decisions: ${model.recentDecisions}`,
-  ];
-
-  if (model.previews.length > 0) {
-    lines.push("", "Recent active memory previews:");
-    for (const preview of model.previews) {
-      lines.push(`- ${preview.type}/${preview.source}: ${preview.text}`);
-    }
-  } else {
-    lines.push("", "No active workspace memories are stored yet.");
-  }
-
-  lines.push("", "Local only: no LLM request was made.");
-  return lines.join("\n");
+    "Workspace:",
+    `- Active memories: ${model.activeMemories}`,
+    `- Rendered in prompt: ${model.renderedInPrompt}`,
+    `- Omitted active memories: ${model.omittedActiveMemories}`,
+    `- Superseded memories: ${model.supersededMemories}`,
+    "",
+    "Pending:",
+    `- Pending in this session: ${model.pendingInSession}`,
+    `- Pending journal memories: ${model.pendingJournalMemories}`,
+    "",
+    "Session:",
+    `- Open errors: ${model.openErrors}`,
+    `- Recent decisions: ${model.recentDecisions}`,
+    "",
+    `Use /memory-list to view current [M1]-[M${LONG_TERM_LIMITS.maxEntries}] memory refs.`,
+    "",
+    "Local only: no LLM request was made.",
+  ].join("\n");
 }
 
-export async function getMemoryActivity(root: string, options: { limit?: number } = {}): Promise<MemoryActivityModel> {
-  const limit = clampLimit(options.limit);
+function emptyMemoryListGroups(): MemoryListModel["groups"] {
+  return { feedback: [], project: [], decision: [], reference: [] };
+}
+
+export async function getMemoryList(root: string): Promise<MemoryListModel> {
+  const store = await readWorkspaceMemorySnapshot(root);
+  const accounting = accountWorkspaceMemoryCompactionRefs(store);
+  const groups = emptyMemoryListGroups();
+  const renderedMemoryIds = new Set(accounting.rendered.map(memory => memory.id));
+
+  for (const ref of accounting.refs) {
+    if (!renderedMemoryIds.has(ref.memoryId)) continue;
+    groups[ref.type].push({
+      ref: ref.ref,
+      text: safePreview(ref.textPreview),
+    });
+  }
+
+  const renderedMemories = MEMORY_TYPE_ORDER.reduce((total, type) => total + groups[type].length, 0);
+
   return {
-    events: await queryEvidenceEvents(root, { newestFirst: true, limit }),
-    limit,
+    activeMemories: store.entries.filter(entry => entry.status !== "superseded").length,
+    renderedMemories,
+    omittedActiveMemories: accounting.omitted.filter(item => item.memory.status !== "superseded").length,
+    groups,
   };
 }
 
-function formatActivityEvent(event: EvidenceEventV1): string {
-  const time = event.createdAt || "unknown_time";
-  const memoryType = event.memory?.type ? ` ${event.memory.type}` : "";
-  const memoryId = event.memory?.memoryId ? ` ${event.memory.memoryId}` : "";
-  const preview = safePreview(event.textPreview);
-  const previewText = preview ? ` — ${preview}` : "";
-  return `- ${time} — ${event.outcome}/${event.phase}${memoryType}${memoryId} — ${summarizeReasons(event.reasonCodes)}${previewText}`;
-}
-
-export function formatMemoryActivity(model: MemoryActivityModel): string {
+export function formatMemoryList(model: MemoryListModel): string {
   const lines = [
-    "## Recent memory activity",
+    "## Current workspace memories",
     "",
   ];
 
-  if (model.events.length === 0) {
-    lines.push(`No retained memory activity exists in the local evidence log for the last ${model.limit} events.`);
-  } else {
-    lines.push(...model.events.map(formatActivityEvent));
+  if (model.renderedMemories === 0) {
+    lines.push("No active workspace memories are stored yet.", "", "Local only: no LLM request was made.");
+    return lines.join("\n");
   }
 
-  lines.push("", "Local only: no LLM request was made.");
+  lines.push("Display refs are local to this output and may change after memory updates.", "");
+
+  for (const type of MEMORY_TYPE_ORDER) {
+    const group = model.groups[type];
+    if (group.length === 0) continue;
+    lines.push(`${type}:`);
+    for (const item of group) {
+      lines.push(`- [${item.ref}] ${item.text}`);
+    }
+    lines.push("");
+  }
+
+  lines.push(
+    `Shown: ${model.renderedMemories} of ${model.activeMemories} active memories.`,
+    `Omitted active memories: ${model.omittedActiveMemories}.`,
+    "",
+    "Local only: no LLM request was made.",
+  );
+
   return lines.join("\n");
 }
 
@@ -274,17 +275,12 @@ export function formatMemoryHelp(): string {
   return [
     "## Memory help",
     "",
-    "Available display commands:",
-    "- /memory status — show local workspace/session memory counts.",
-    "- /memory activity — show recent local memory evidence activity.",
-    "- /memory last — alias for /memory activity.",
-    "- /memory help — show this help text.",
+    "Commands:",
+    "- /memory-status — show local memory statistics.",
+    `- /memory-list — show current workspace memories as display-local [M1]-[M${LONG_TERM_LIMITS.maxEntries}] refs.`,
+    "- /memory-help — show this help.",
     "",
-    "Compaction output already appears in the conversation through OpenCode's built-in flow.",
-    "This command reads local memory files and does not call the LLM.",
-    "Future commands such as /memory delete and /memory edit are not available in v1.6.1.",
-    "",
-    "Local only: no LLM request was made.",
+    "These commands are read-only, local-only, and do not call the LLM.",
   ].join("\n");
 }
 
@@ -292,8 +288,8 @@ export async function renderMemoryCommand(root: string, sessionID: string, comma
   switch (command) {
     case "status":
       return formatMemoryStatus(await getMemoryStatus(root, sessionID));
-    case "activity":
-      return formatMemoryActivity(await getMemoryActivity(root));
+    case "list":
+      return formatMemoryList(await getMemoryList(root));
     case "help":
       return formatMemoryHelp();
     default:

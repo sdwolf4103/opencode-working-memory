@@ -57,7 +57,7 @@ function currentRoute(api: TuiPluginApi): TuiRouteCurrent {
 
 function commandFromValue(value: string): MemoryVisibilityCommand {
   if (value === "memory.status") return "status";
-  if (value === "memory.activity" || value === "memory.last") return "activity";
+  if (value === "memory.list") return "list";
   if (value === "memory.help") return "help";
   return "help";
 }
@@ -115,34 +115,26 @@ function memoryCommands(api: TuiPluginApi): TuiCommand[] {
     {
       title: "Memory status",
       value: "memory.status",
-      description: "Show working memory status in the current session.",
+      description: "Show working memory statistics in the current session.",
       category: "Memory",
       suggested: true,
-      slash: { name: "memory", aliases: ["mem"] },
+      slash: { name: "memory-status" },
       onSelect: (dialog?: DialogContext) => injectMemoryOutput(api, "memory.status", dialog),
     },
     {
-      title: "Memory activity",
-      value: "memory.activity",
-      description: "Show recent working memory activity.",
+      title: "Memory list",
+      value: "memory.list",
+      description: "Show current workspace memories with display-local refs.",
       category: "Memory",
-      slash: { name: "memory", aliases: ["mem"] },
-      onSelect: (dialog?: DialogContext) => injectMemoryOutput(api, "memory.activity", dialog),
-    },
-    {
-      title: "Memory last",
-      value: "memory.last",
-      description: "Show recent working memory activity.",
-      category: "Memory",
-      slash: { name: "memory", aliases: ["mem"] },
-      onSelect: (dialog?: DialogContext) => injectMemoryOutput(api, "memory.last", dialog),
+      slash: { name: "memory-list" },
+      onSelect: (dialog?: DialogContext) => injectMemoryOutput(api, "memory.list", dialog),
     },
     {
       title: "Memory help",
       value: "memory.help",
       description: "Show working memory help.",
       category: "Memory",
-      slash: { name: "memory", aliases: ["mem"] },
+      slash: { name: "memory-help" },
       onSelect: (dialog?: DialogContext) => injectMemoryOutput(api, "memory.help", dialog),
     },
   ];

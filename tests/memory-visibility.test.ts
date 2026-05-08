@@ -3,18 +3,16 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
-import type { EvidenceEventInput } from "../src/evidence-log.ts";
-import { appendEvidenceEvents } from "../src/evidence-log.ts";
 import { appendPendingMemories } from "../src/pending-journal.ts";
 import { saveSessionState } from "../src/session-state.ts";
 import type { LongTermMemoryEntry, WorkspaceMemoryStore } from "../src/types.ts";
 import { workspaceMemoryPath } from "../src/paths.ts";
 import { saveWorkspaceMemory } from "../src/workspace-memory.ts";
 import {
-  formatMemoryActivity,
   formatMemoryHelp,
+  formatMemoryList,
   formatMemoryStatus,
-  getMemoryActivity,
+  getMemoryList,
   getMemoryStatus,
   renderMemoryCommand,
 } from "../src/memory-visibility.ts";
@@ -34,18 +32,6 @@ function memory(id: string, text: string, overrides: Partial<LongTermMemoryEntry
     status: "active",
     createdAt: now,
     updatedAt: now,
-    ...overrides,
-  };
-}
-
-function evidence(overrides: Partial<EvidenceEventInput> = {}): EvidenceEventInput {
-  return {
-    type: "promotion_promoted",
-    phase: "promotion",
-    outcome: "promoted",
-    reasonCodes: ["new_workspace_entry"],
-    memory: { memoryId: "mem-a", type: "decision", source: "compaction", status: "active" },
-    textPreview: "Use npm test before release",
     ...overrides,
   };
 }
@@ -92,14 +78,21 @@ test("formats status counts from workspace, session, and pending journal stores"
     const output = formatMemoryStatus(await getMemoryStatus(root, "ses_status"));
 
     assert.match(output, /^## Memory status/);
-    assert.match(output, /Active memories: 2/);
-    assert.match(output, /Rendered in prompt: 1/);
-    assert.match(output, /Pending in this session: 1/);
-    assert.match(output, /Pending journal memories: 1/);
-    assert.match(output, /Open errors: 1/);
-    assert.match(output, /Recent decisions: 1/);
+    assert.match(output, /Workspace:/);
+    assert.match(output, /- Active memories: 2/);
+    assert.match(output, /- Rendered in prompt: 1/);
+    assert.match(output, /- Omitted active memories: 1/);
+    assert.match(output, /- Superseded memories: 1/);
+    assert.match(output, /Pending:/);
+    assert.match(output, /- Pending in this session: 1/);
+    assert.match(output, /- Pending journal memories: 1/);
+    assert.match(output, /Session:/);
+    assert.match(output, /- Open errors: 1/);
+    assert.match(output, /- Recent decisions: 1/);
+    assert.match(output, /Use \/memory-list to view current \[M1\]-\[M28\] memory refs\./);
     assert.match(output, /Local only: no LLM request was made\./);
-    assert.equal(output.includes("sushi"), false, "credential-like previews should be redacted");
+    assert.equal(output.includes("Recent active memory previews"), false);
+    assert.equal(output.includes("sushi"), false, "status output should not include memory previews");
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -125,63 +118,87 @@ test("getMemoryStatus redacts previews without rewriting workspace memory", asyn
     const output = formatMemoryStatus(await getMemoryStatus(root, "ses_readonly"));
     const after = await readFile(path, "utf8");
 
-    assert.match(output, /Active memories: 1/);
-    assert.equal(output.includes("sushi"), false, "status output should redact credential-like previews");
+    assert.match(output, /- Active memories: 1/);
+    assert.equal(output.includes("Recent active memory previews"), false);
+    assert.equal(output.includes("sushi"), false, "status output should not include memory previews");
     assert.equal(after, before, "status display must not persist normalization, migration, or redaction changes");
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
 
-test("formats recent memory activity newest first with reason summaries", async () => {
+test("formats current workspace memories grouped by type with display-local refs", async () => {
   const root = await tempRoot();
   try {
-    await appendEvidenceEvents(root, [
-      evidence({
-        type: "render_omitted",
-        phase: "render",
-        outcome: "omitted",
-        reasonCodes: ["char_budget"],
-        memory: { memoryId: "old-render", type: "reference", source: "compaction", status: "active" },
-        textPreview: "Older preview",
-      }),
-      evidence({
-        type: "promotion_promoted",
-        phase: "promotion",
-        outcome: "promoted",
-        reasonCodes: ["new_workspace_entry"],
-        memory: { memoryId: "new-memory", type: "decision", source: "explicit", status: "active" },
-        textPreview: "Newest password: sushi preview",
-      }),
-    ]);
+    const now = new Date().toISOString();
+    await saveWorkspaceMemory(root, {
+      version: 1,
+      workspace: { root, key: "test" },
+      limits: { maxRenderedChars: 3600, maxEntries: 28 },
+      entries: [
+        memory("mem-feedback", "Remember password: sushi for the fake test.", { type: "feedback" }),
+        memory("mem-project", "Project memory should render in its own group.", { type: "project" }),
+        memory("mem-decision", "Decision memory should render in its own group.", { type: "decision" }),
+        memory("mem-reference", "Reference memory should render in its own group.", { type: "reference" }),
+        memory("mem-superseded", "Superseded memory should not be active", { type: "reference", status: "superseded" }),
+      ],
+      migrations: [],
+      updatedAt: now,
+    });
 
-    const output = formatMemoryActivity(await getMemoryActivity(root, { limit: 2 }));
+    const output = formatMemoryList(await getMemoryList(root));
 
-    assert.match(output, /^## Recent memory activity/);
-    assert.ok(output.indexOf("promoted") < output.indexOf("omitted"), "newest event should be formatted first");
-    assert.match(output, /new_workspace_entry/);
-    assert.match(output, /char_budget/);
-    assert.equal(output.includes("sushi"), false, "activity previews should be redacted");
+    assert.match(output, /^## Current workspace memories/);
+    assert.match(output, /Display refs are local to this output/);
+    assert.match(output, /feedback:\n- \[M\d+\]/);
+    assert.match(output, /project:\n- \[M\d+\]/);
+    assert.match(output, /decision:\n- \[M\d+\]/);
+    assert.match(output, /reference:\n- \[M\d+\]/);
+    assert.match(output, /Shown: \d+ of \d+ active memories\./);
+    assert.match(output, /Shown: 4 of 4 active memories\./);
+    assert.match(output, /Omitted active memories: 0\./);
+    assert.equal(output.includes("[M1]"), true, "at least one display-local ref should render");
+    assert.equal(output.includes("sushi"), false, "list previews should redact credential-like text");
+    assert.equal(output.includes("Superseded memory should not be active"), false);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
 
-test("formats empty activity state", () => {
-  const output = formatMemoryActivity({ events: [], limit: 10 });
-  assert.match(output, /^## Recent memory activity/);
-  assert.match(output, /No retained memory activity exists/);
+test("formats empty memory list state", () => {
+  const output = formatMemoryList({
+    activeMemories: 0,
+    renderedMemories: 0,
+    omittedActiveMemories: 0,
+    groups: { feedback: [], project: [], decision: [], reference: [] },
+  });
+  assert.match(output, /^## Current workspace memories/);
+  assert.match(output, /No active workspace memories are stored yet\./);
+  assert.match(output, /Local only: no LLM request was made\./);
+  assert.equal(output.includes("feedback:"), false);
 });
 
 test("formats help text for available display commands", () => {
   const output = formatMemoryHelp();
   assert.match(output, /^## Memory help/);
-  assert.match(output, /\/memory status/);
-  assert.match(output, /\/memory activity/);
-  assert.match(output, /\/memory last/);
-  assert.match(output, /\/memory help/);
-  assert.match(output, /Future commands such as \/memory delete and \/memory edit are not available in v1\.6\.1\./);
-  assert.match(output, /does not call the LLM/);
+  assert.match(output, /\/memory-status/);
+  assert.match(output, /\/memory-list/);
+  assert.match(output, /\/memory-help/);
+  assert.equal(output.includes("/memory activity"), false);
+  assert.equal(output.includes("/memory last"), false);
+  assert.equal(output.includes("/memory status"), false);
+  assert.equal(output.includes("/memory help"), false);
+  assert.match(output, /do not call the LLM/);
+});
+
+test("renderMemoryCommand routes list output", async () => {
+  const root = await tempRoot();
+  try {
+    const output = await renderMemoryCommand(root, "ses_list", "list");
+    assert.match(output, /^## Current workspace memories/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("renderMemoryCommand falls back to help for unknown command values", async () => {
