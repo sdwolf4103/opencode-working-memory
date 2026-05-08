@@ -1,5 +1,52 @@
 # Release Notes
 
+## 1.6.1 (2026-05-08)
+
+### Native TUI Memory Menu
+
+This release adds a native OpenCode TUI memory menu so users can inspect local working memory without asking the model and without adding command output to the conversation transcript.
+
+Open `/memory` in the TUI to browse memory status, current workspace memories, and help from native dialogs.
+
+> Memory should stay visible when you need it — and stay out of the transcript when you are only inspecting it.
+
+```text
+  /memory
+     │
+     ├─ Status
+     │    local counts and memory health
+     │
+     ├─ Current memories
+     │    searchable grouped [M#] refs
+     │
+     └─ Help
+          local usage notes
+```
+
+### What Changed
+
+- **Single TUI entry point**: `/memory` opens a native submenu instead of exposing multiple memory slash commands.
+- **Searchable current memory list**: `Current memories` uses OpenCode's native select dialog for bounded scrolling, filtering, and grouping.
+- **Transcript-free inspection**: memory status, list, help, empty states, and errors render in native dialogs instead of user-style session messages.
+- **Server and TUI plugin exports**: the package exposes `./server` and `./tui` entry points for OpenCode plugin loading.
+- **User docs refreshed**: README highlights the `/memory` workflow and moves the full diagnostics CLI reference to `docs/diagnostics.md`.
+
+### Upgrade Notes
+
+- Add `.opencode/tui.json` if you want the native `/memory` TUI menu. Existing server-only configuration continues to work.
+- Restart OpenCode after adding the TUI plugin config.
+- The TUI menu is read-only and local-only. It does not call the LLM.
+- Individual memory row selection is intentionally a no-op in this release; use the list for inspection and search.
+
+### Validation
+
+- `npm run typecheck` — `TYPECHECK_PASS`
+- `npm test` — 421 tests passing, `TEST_PASS`
+- `npm pack --dry-run`
+- Real OpenCode TUI smoke test for `/memory` menu, searchable current memories, and transcript-free output.
+
+---
+
 ## 1.6.0 (2026-05-08)
 
 ### Numbered Memory Refs

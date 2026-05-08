@@ -23,21 +23,26 @@ Use it when you want your agent to remember things like:
 - Important file paths or references
 - Current active files and unresolved errors
 
-## Features
+## What You Get
 
-- **Workspace memory** — durable project facts, preferences, decisions, and references across sessions.
-- **Hot session state** — active files, open errors, and current working context for the current session.
-- **Explicit memory triggers** — users can say “remember this”, “記住”, “覚えて”, or “기억해” to save durable facts.
-- **Compaction-based extraction** — memory extraction piggybacks on OpenCode’s existing compaction flow.
-- **Numbered memory refs** — compaction can `REINFORCE [M#]` useful memories or safely `REPLACE [M#]` obsolete compaction memories.
-- **Native TUI memory menu** — browse local memory status, current memories, and help from the OpenCode TUI without an LLM/API call.
-- **No manual tools** — memory is injected automatically into the system prompt.
-- **Quality guards** — filters noisy memories, temporary progress snapshots, stack traces, raw errors, and credentials.
-- **Retention decay** — keeps the strongest memories in prompt context while older or weaker memories fade out naturally; important and reinforced memories decay more slowly.
+| Need | Feature |
+|---|---|
+| Remember durable context | Workspace memory keeps project facts, preferences, decisions, and references across sessions. |
+| Capture what matters | Say `remember this` or `記住` to explicitly save important rules and preferences. |
+| Inspect memory locally | Use `/memory` in the OpenCode TUI to browse status, help, and searchable current `[M#]` memories. |
+| Stay out of the way | Memory is injected automatically and piggybacks on OpenCode compaction — no manual tools, no extra LLM/API calls. |
+| Keep memory clean | Quality guards filter noise, redact credentials, dedupe repeats, and let weak memories fade. |
+
+```text
+remember this ──► workspace memory ──► /memory
+     ▲                    │              searchable [M#] refs
+     │                    ▼
+compaction ─────► reinforce / replace ──► selective prompt context
+```
 
 ## Installation
 
-Add OpenCode Working Memory to your server plugin config:
+New users: add OpenCode Working Memory to both OpenCode plugin configs.
 
 `.opencode/opencode.json`:
 
@@ -48,8 +53,6 @@ Add OpenCode Working Memory to your server plugin config:
 }
 ```
 
-To enable the native TUI memory menu, also add the TUI plugin config:
-
 `.opencode/tui.json`:
 
 ```json
@@ -59,9 +62,11 @@ To enable the native TUI memory menu, also add the TUI plugin config:
 }
 ```
 
-Then restart OpenCode. Server memory activates automatically; the TUI `/memory` command appears in slash command autocomplete when the TUI plugin is loaded.
+Existing users: keep your current `.opencode/opencode.json` config and add only the `.opencode/tui.json` block above to enable the native `/memory` TUI menu.
 
-## Native TUI Memory Command
+Then restart OpenCode. Memory activates automatically, and `/memory` appears in the TUI slash command menu.
+
+## Native TUI Memory Menu
 
 The TUI plugin adds one display-only local memory command:
 
@@ -74,6 +79,15 @@ Submenu entries:
 - Help — show command help.
 
 This menu is read-only and local-only. It reads local memory files and opens native TUI dialogs, so it does not create conversation history entries and does not make an LLM/API call.
+
+```text
+  /memory
+     ├─ Status
+     ├─ Current memories  ← searchable, grouped [M#] refs
+     └─ Help
+```
+
+Use `/memory` when you want to inspect what the agent currently remembers without asking the model or polluting the transcript.
 
 Compaction output already appears through OpenCode's built-in conversation flow. This plugin does not add duplicate compaction notices.
 
@@ -179,112 +193,64 @@ Memories decay over time. The strongest stay visible in the prompt; weaker ones 
 
 ## Explicit Memory Triggers
 
-You can explicitly ask the agent to remember durable facts.
-
-Examples:
+Most memory is extracted automatically during compaction. When something is especially important, tell the agent directly:
 
 ```md
 Remember this: we prefer Vitest for new frontend tests.
 記住：這個 repo 發 release 前要先跑 npm test。
-覚えておいて: API clients should use the shared retry helper.
-기억해줘: this project uses pnpm, not npm.
 ```
 
-Supported trigger languages include:
+Use explicit triggers for stable preferences, project rules, architecture decisions, or important references. Then inspect active workspace memory with:
 
-| Language | Examples |
-|---|---|
-| English | `remember this`, `save to memory`, `from now on`, `my preference` |
-| Chinese | `記住`, `记住`, `記得`, `请帮我记住` |
-| Japanese | `覚えて`, `覚えておいて`, `メモして` |
-| Korean | `기억해`, `기억해줘`, `메모해줘` |
-
-Negative requests are respected too:
-
-```md
-Don't remember this.
-不要記住這個。
-覚えないで。
-기억하지 마.
+```text
+/memory → Current memories
 ```
 
-Avoid saving:
+Trigger phrases include `remember this`, `save to memory`, `from now on`, `my preference`, `記住`, `記得`, `覚えて`, and `기억해`.
 
-- Secrets, passwords, tokens, or credentials
-- Temporary progress updates
-- Raw command output
-- Short-lived session details
+Negative requests are respected too: `Don't remember this`, `不要記住這個`, `覚えないで`, `기억하지 마`.
+
+Avoid asking memory to save secrets, temporary progress, raw command output, or short-lived session details.
 
 ## Quality Guards
 
-OpenCode Working Memory tries to keep memory useful and low-noise.
+**Good memory is selective memory.**
 
-It includes guards for:
+OpenCode Working Memory is designed to be selective. Its strength is not storing more; it is keeping the prompt focused on durable facts that still help.
 
-- Credential redaction
-- Duplicate memory cleanup
-- Accounting for promoted, absorbed, superseded, and rejected memories
-- Strength-based retention so useful memories stay visible without hard age pruning
-- Filtering stack traces, git hashes, raw errors, and noisy path-heavy facts
-- Rejecting temporary project progress snapshots
+It protects memory quality in three ways:
+
+- **Selective** — filters temporary progress, raw errors, stack traces, git hashes, noisy debug fragments, and duplicate restatements.
+- **Safe** — redacts credentials and protects manual or explicit memories from unsafe automatic replacement.
+- **Diagnosable** — tracks promoted, absorbed, superseded, rejected, reinforced, and replaced memory outcomes.
 
 The goal is to remember durable facts, not every detail.
-
-**Good memory is selective memory.**
 
 Historical cleanup is intentionally conservative: extraction-time filtering may reject more aggressively, but one-time migration cleanup only supersedes high-confidence garbage patterns. This protects existing durable memories written in declarative style, such as "API endpoint is X" or "Product branding is Y".
 
 ### Numbered Memory Refs
 
-During compaction, existing workspace memories may be shown as numbered refs such as `[M1]` or `[M2]`. The model can use these refs to maintain memory without duplicating it:
+During compaction, existing workspace memories may be shown as numbered refs such as `[M1]` or `[M2]`. The model can reinforce a still-useful memory or propose a protected replacement instead of copying the same fact again.
 
 ```md
 REINFORCE [M1]
 REPLACE [M2] project Updated durable project fact.
 ```
 
-- `REINFORCE [M#]` strengthens an existing memory's retention signal without changing its text.
-- `REPLACE [M#] [type] text` supersedes a safe compaction-sourced memory and adds a replacement.
-- Manual, explicit, and already-reinforced memories are protected from automatic replacement.
-- Stale or mismatched numbered refs are rejected instead of mutating the wrong memory.
-
-Use `memory-diag commands` to inspect command outcomes and `memory-diag revert` to dry-run and apply manual recovery for successful numbered replacements.
+Protected memories and stale refs are rejected rather than mutated. Use `memory-diag commands` for detailed command outcomes and recovery guidance.
 
 ### Memory Diagnostics CLI
 
-Use the read-only diagnostics CLI when you want to understand what memory is doing for the current workspace.
-
-| Question | Command |
-|---|---|
-| Is memory healthy? | `npx --package opencode-working-memory memory-diag` or `npx --package opencode-working-memory memory-diag status` |
-| Why was something rejected? | `npx --package opencode-working-memory memory-diag rejected` |
-| Where did my memory go? | `npx --package opencode-working-memory memory-diag missing` |
-| Why is this memory shown or hidden? | `npx --package opencode-working-memory memory-diag explain <memory-id>` |
-| How are numbered memory commands behaving? | `npx --package opencode-working-memory memory-diag commands` |
-| Revert a numbered replacement? | `npx --package opencode-working-memory memory-diag revert --memory <replacement-memory-id>` |
-
-Global options:
-
-- `--workspace <path>` — inspect another workspace; defaults to the current directory.
-- `--verbose` — show detailed diagnostics.
-- `--json` — print machine-readable output where supported.
-
-Examples:
+For deeper troubleshooting, use the read-only `memory-diag` CLI:
 
 ```bash
 npx --package opencode-working-memory memory-diag status
-npx --package opencode-working-memory memory-diag rejected --verbose
-npx --package opencode-working-memory memory-diag missing --workspace /path/to/project
-npx --package opencode-working-memory memory-diag status --json
-npx --package opencode-working-memory memory-diag commands --verbose
-npx --package opencode-working-memory memory-diag revert --memory <replacement-memory-id>
+npx --package opencode-working-memory memory-diag rejected
+npx --package opencode-working-memory memory-diag missing
+npx --package opencode-working-memory memory-diag explain <memory-id>
 ```
 
-`memory-diag revert` is dry-run by default. Add `--apply` only after reviewing the planned original/replacement status changes.
-
-The npm package is opencode-working-memory; the installed bin is memory-diag, so package-qualified npx avoids resolving a different package named memory-diag.
-
-Maintainer-only diagnostics and cleanup commands are intentionally not documented here. Future work: move those internal commands to `docs/development.md`.
+See [Diagnostics](docs/diagnostics.md) for the full command reference, numbered memory command reports, and dry-run recovery workflow.
 
 ## Configuration
 
@@ -312,17 +278,8 @@ Current focus:
 
 - [Architecture Overview](docs/architecture.md)
 - [Configuration](docs/configuration.md)
+- [Diagnostics](docs/diagnostics.md)
 - [Installation Guide](docs/installation.md)
-
-## Development
-
-```bash
-git clone https://github.com/sdwolf4103/opencode-working-memory.git
-cd opencode-working-memory
-npm install
-npm test
-npm run typecheck
-```
 
 ## Requirements
 
