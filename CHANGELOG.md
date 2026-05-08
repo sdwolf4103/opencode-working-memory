@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.1] - 2026-05-08
+
+### Added
+
+- Native OpenCode TUI `/memory` display commands for local memory status, recent activity, and help.
+- Package `./tui` export for OpenCode TUI plugin loading.
+
+### Changed
+
+- README documents separate server and TUI plugin configuration.
+
+### Fixed
+
+- Replaced a literal NUL byte in `workspace-memory.ts` regex source with a `\0` escape so source search tools treat the file as text.
+
+### Notes / Known UX
+
+- `/memory` output is injected as no-reply user-style conversation text and does not call the LLM.
+
 ## [1.6.0] - 2026-05-08
 
 ### Added

@@ -1,11 +1,13 @@
 {
   "name": "opencode-working-memory",
-  "version": "1.6.0",
+  "version": "1.6.1",
   "description": "Three-layer memory architecture for OpenCode with workspace memory and hot session state",
   "type": "module",
   "main": "index.ts",
   "exports": {
-    ".": "./index.ts"
+    ".": "./index.ts",
+    "./server": "./index.ts",
+    "./tui": "./src/tui-plugin.ts"
   },
   "bin": {
     "memory-diag": "./scripts/memory-diag-bin.cjs"

@@ -528,7 +528,7 @@ function extractConcreteIdentityKey(text: string): string | null {
     if (pathIdentity) return pathIdentity;
   }
 
-  const pathMatch = text.match(/(?:\/[^ \s`"'<>]+|(?:\.{1,2}[\\/]|[A-Za-z0-9_.-]+[\\/])[^\s`"'<>]+|[A-Za-z0-9_.-]+\.(?:json|jsonc|ts|tsx|js|jsx|mjs|cjs|md|yaml|yml|toml|lock|config))(?:\b|$)/);
+  const pathMatch = text.match(/(?:\/[^\0\s`"'<>]+|(?:\.{1,2}[\\/]|[A-Za-z0-9_.-]+[\\/])[^\s`"'<>]+|[A-Za-z0-9_.-]+\.(?:json|jsonc|ts|tsx|js|jsx|mjs|cjs|md|yaml|yml|toml|lock|config))(?:\b|$)/);
   if (!pathMatch) return null;
 
   return normalizeConcretePathIdentity(pathMatch[0]);

@@ -30,21 +30,50 @@ Use it when you want your agent to remember things like:
 - **Explicit memory triggers** — users can say “remember this”, “記住”, “覚えて”, or “기억해” to save durable facts.
 - **Compaction-based extraction** — memory extraction piggybacks on OpenCode’s existing compaction flow.
 - **Numbered memory refs** — compaction can `REINFORCE [M#]` useful memories or safely `REPLACE [M#]` obsolete compaction memories.
+- **Native TUI `/memory` display** — show local memory status, recent activity, and help from the OpenCode TUI without an LLM/API call.
 - **No manual tools** — memory is injected automatically into the system prompt.
 - **Quality guards** — filters noisy memories, temporary progress snapshots, stack traces, raw errors, and credentials.
 - **Retention decay** — keeps the strongest memories in prompt context while older or weaker memories fade out naturally; important and reinforced memories decay more slowly.
 
 ## Installation
 
-Add OpenCode Working Memory to your OpenCode config:
+Add OpenCode Working Memory to your server plugin config:
+
+`.opencode/opencode.json`:
 
 ```json
 {
+  "$schema": "https://opencode.ai/config.json",
   "plugin": ["opencode-working-memory"]
 }
 ```
 
-Then restart OpenCode. It activates automatically.
+To enable the native TUI `/memory` display command, also add the TUI plugin config:
+
+`.opencode/tui.json`:
+
+```json
+{
+  "$schema": "https://opencode.ai/tui.json",
+  "plugin": ["opencode-working-memory"]
+}
+```
+
+Then restart OpenCode. Server memory activates automatically; TUI memory commands appear in slash command autocomplete when the TUI plugin is loaded.
+
+## Native TUI Memory Command
+
+The TUI plugin adds display-only local memory commands:
+
+- `/memory` or `/memory status` — show status counts for workspace memory, rendered memories, pending memory, open errors, and recent decisions.
+- `/memory activity` or `/memory last` — show recent local evidence activity. Due to the current OpenCode command model, some versions may show separate autocomplete entries instead of typed subargs.
+- `/memory help` — show command help.
+
+These commands are read-only and local-only. They read local memory files and inject output with OpenCode's no-reply session prompt path, so they do not make an LLM/API call.
+
+Current OpenCode plugins do not expose an assistant-style command-output surface, so `/memory` output appears as a user-style conversation message. The output becomes part of the session transcript and may be included in future compaction summaries; this is expected command output.
+
+Compaction output already appears through OpenCode's built-in conversation flow. This plugin does not add duplicate compaction notices.
 
 ## How It Works
 
