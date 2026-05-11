@@ -1,5 +1,40 @@
 # Release Notes
 
+## 1.6.2 (2026-05-11)
+
+### Published `memory-diag` Bin Fix
+
+This patch release fixes the published npm package path for `memory-diag`. In v1.6.1 the source-tree CLI tests passed, but the installed package could fail under `npx --package opencode-working-memory memory-diag` because Node refuses TypeScript type stripping for files inside `node_modules`.
+
+v1.6.2 compiles the diagnostics CLI during packing and makes the npm bin launch the compiled JavaScript runtime.
+
+### What Changed
+
+- **Compiled diagnostics runtime**: `prepack` now builds `dist/scripts/memory-diag.js` before the package is packed or published.
+- **Safer npm bin wrapper**: `memory-diag` no longer runs published `.ts` files through `--experimental-strip-types`; it launches the compiled JS artifact and reports a clear reinstall/build message if the artifact is missing.
+- **Packaged-bin smoke test**: release verification now includes a pack/npx smoke test from a temp consumer project outside the repository.
+
+### Upgrade Notes
+
+- No config changes are required.
+- Existing OpenCode server and TUI plugin entry points are unchanged.
+- If you hit the v1.6.1 bin failure, upgrade and rerun:
+
+```bash
+npx --package opencode-working-memory@1.6.2 memory-diag --help
+```
+
+### Validation
+
+- `npm run build` — `BUILD_PASS`
+- `node ./scripts/memory-diag-bin.cjs --help`
+- `npm run test:pack:memory-diag` — packed tarball smoke test passed
+- `npm run typecheck` — `TYPECHECK_PASS`
+- `npm test` — 421 tests passing, `TEST_PASS`
+- `npm pack --dry-run` — includes compiled `dist/` diagnostics artifacts
+
+---
+
 ## 1.6.1 (2026-05-08)
 
 ### Native TUI Memory Menu

@@ -1,0 +1,27 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "allowImportingTsExtensions": true,
+    "noEmit": false,
+    "outDir": "dist",
+    "rootDir": ".",
+    "declaration": false,
+    "sourceMap": false,
+    "rewriteRelativeImportExtensions": true,
+    "tsBuildInfoFile": "dist/.tsbuildinfo"
+  },
+  "include": ["scripts/memory-diag.ts", "scripts/memory-diag/**/*.ts", "src/**/*.ts"],
+  "exclude": [
+    "node_modules",
+    "dist",
+    "tests",
+    "src/plugin.ts",
+    "src/tui-plugin.ts",
+    "src/opencode.ts",
+    "src/session-state.ts",
+    "src/extractors.ts",
+    "src/pending-journal.ts",
+    "src/promotion-accounting.ts",
+    "src/memory-visibility.ts"
+  ]
+}
