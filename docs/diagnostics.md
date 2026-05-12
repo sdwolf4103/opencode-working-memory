@@ -13,6 +13,7 @@ The npm package is `opencode-working-memory`; the installed bin is `memory-diag`
 | Where did my memory go? | `npx --package opencode-working-memory memory-diag missing` |
 | Why is this memory shown or hidden? | `npx --package opencode-working-memory memory-diag explain <memory-id>` |
 | How are numbered memory commands behaving? | `npx --package opencode-working-memory memory-diag commands` |
+| How do I review memory quality without automatic cleanup? | `npx --package opencode-working-memory memory-diag quality` |
 | Revert a numbered replacement? | `npx --package opencode-working-memory memory-diag revert --memory <replacement-memory-id>` |
 
 ## Global Options
@@ -29,8 +30,21 @@ npx --package opencode-working-memory memory-diag rejected --verbose
 npx --package opencode-working-memory memory-diag missing --workspace /path/to/project
 npx --package opencode-working-memory memory-diag status --json
 npx --package opencode-working-memory memory-diag commands --verbose
+npx --package opencode-working-memory memory-diag quality
 npx --package opencode-working-memory memory-diag revert --memory <replacement-memory-id>
 ```
+
+## Quality Review Board
+
+Use `memory-diag quality` for a read-only, evidence-first review of memory quality without automatic cleanup.
+
+- Primarily provides memory-system mechanism observations for human/agent interpretation.
+- Secondarily helps review active memory content quality.
+- Separates system-mechanism facts, memory-content facts, heuristic flags, and review questions.
+- Includes inferred evidence provenance because historical records do not record producer package version.
+- Labels uncertain provenance as `unversioned_ambiguous` so old artifacts are not treated as current mechanism failures.
+- Does not decide what to delete or mutate.
+- Use `--json` for agent/objective review.
 
 ## Numbered Memory Command Reports
 

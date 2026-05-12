@@ -10,6 +10,7 @@ export function usage(): string {
   memory-diag missing [--workspace <path>] [--verbose] [--json]
   memory-diag explain [memory-id] [--workspace <path>] [--raw]
   memory-diag commands [--workspace <path>] [--verbose] [--json]
+  memory-diag quality [--workspace <path>] [--verbose] [--json] [--raw] [--no-emoji]
   memory-diag revert (--memory <replacement-id> | --event <event-id>) [--workspace <path>] [--apply]
 
 Global options:
@@ -103,12 +104,12 @@ export function parseArgs(argv: string[]): ParsedArgs {
 
   if (command === "status") {
     if (options.all) return error(`${command} does not accept --all`);
-  } else if (command === "rejected" || command === "missing" || command === "coverage" || command === "explain" || command === "commands" || command === "revert") {
+  } else if (command === "rejected" || command === "missing" || command === "coverage" || command === "explain" || command === "commands" || command === "quality" || command === "revert") {
     if (options.all) return error(`${command} does not accept --all`);
   } else {
     if (options.all || options.workspace) return error(`${command} does not accept --all or --workspace`);
   }
-  if (options.json && command !== "status" && command !== "rejected" && command !== "missing" && command !== "coverage" && command !== "commands") {
+  if (options.json && command !== "status" && command !== "rejected" && command !== "missing" && command !== "coverage" && command !== "commands" && command !== "quality") {
     return error(`${command} does not accept --json`);
   }
   if (command !== "rejected" && (options.softOnly || options.triggerOnly || options.since)) {

@@ -248,6 +248,7 @@ npx --package opencode-working-memory memory-diag status
 npx --package opencode-working-memory memory-diag rejected
 npx --package opencode-working-memory memory-diag missing
 npx --package opencode-working-memory memory-diag explain <memory-id>
+npx --package opencode-working-memory memory-diag quality
 ```
 
 See [Diagnostics](docs/diagnostics.md) for the full command reference, numbered memory command reports, and dry-run recovery workflow.
@@ -276,7 +277,7 @@ See [Configuration](docs/configuration.md) for customization options.
 ## Requirements
 
 - OpenCode plugin API `>=1.2.0 <2.0.0`
-- Node.js >= 22.6.0 (for `memory-diag` CLI, which runs TypeScript with `--experimental-strip-types`)
+- Node.js >= 22.6.0 (the published `memory-diag` CLI runs compiled JavaScript)
 
 ## Limitations
 

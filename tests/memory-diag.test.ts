@@ -214,7 +214,7 @@ test("memory-diag defaults to status when no subcommand is supplied", async () =
 test("removed legacy aliases return unknown subcommand", async () => {
   const root = mkdtempSync(join(tmpdir(), "opencode-memory-diag-legacy-health-"));
   try {
-    for (const command of ["health", "quality", "rejections", "disappearances", "trace"]) {
+    for (const command of ["health", "rejections", "disappearances", "trace"]) {
       await assert.rejects(
         runMemoryDiagResult([command, "--workspace", root]),
         (error: unknown) => {

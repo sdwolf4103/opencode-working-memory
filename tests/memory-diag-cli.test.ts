@@ -9,9 +9,10 @@ test("help returns usage without exposing hidden or removed commands", () => {
   assert.equal("help" in parsed && parsed.help, true);
   assert.match(parsed.usage, /Usage:/);
   assert.match(parsed.usage, /memory-diag \[status\]/);
+  assert.match(parsed.usage, /memory-diag quality/);
   assert.match(parsed.usage, /memory-diag commands/);
   assert.match(parsed.usage, /memory-diag revert/);
-  for (const command of ["health", "quality", "rejections", "disappearances", "trace", "coverage", "audit"]) {
+  for (const command of ["health", "rejections", "disappearances", "trace", "coverage", "audit"]) {
     assert.doesNotMatch(parsed.usage, new RegExp(command));
   }
 });
@@ -35,12 +36,47 @@ test("unknown command returns usage error", () => {
 });
 
 test("removed legacy aliases are ordinary unknown subcommands", () => {
-  for (const command of ["health", "quality", "rejections", "disappearances", "trace"]) {
+  for (const command of ["health", "rejections", "disappearances", "trace"]) {
     const parsed = parseArgs([command]);
 
     assert.equal(parsed.ok, false, command);
     if (parsed.ok) continue;
     assert.equal(parsed.message, `Unknown subcommand: ${command}`);
+    assert.match(parsed.usage, /Usage:/);
+  }
+});
+
+test("quality accepts read-only workspace json and display flags", () => {
+  const parsed = parseArgs(["quality", "--workspace", "/tmp/workspace", "--json", "--verbose", "--raw", "--no-emoji"]);
+
+  assert.equal(parsed.ok, true);
+  assert.equal("command" in parsed && parsed.command, "quality");
+  assert.equal("options" in parsed && parsed.options.workspace, "/tmp/workspace");
+  assert.equal("options" in parsed && parsed.options.json, true);
+  assert.equal("options" in parsed && parsed.options.verbose, true);
+  assert.equal("options" in parsed && parsed.options.raw, true);
+  assert.equal("options" in parsed && parsed.options.noEmoji, true);
+});
+
+test("quality rejects mutation filter and drill-down flags", () => {
+  const cases: Array<{ args: string[]; message: string }> = [
+    { args: ["quality", "--all"], message: "quality does not accept --all" },
+    { args: ["quality", "--apply"], message: "quality does not accept --apply" },
+    { args: ["quality", "--memory", "mem-1"], message: "quality does not accept --memory" },
+    { args: ["quality", "--event", "evt-1"], message: "quality does not accept --event" },
+    { args: ["quality", "--reason", "bad_decision"], message: "quality does not accept rejection filters" },
+    { args: ["quality", "--since", "7d"], message: "quality does not accept rejection filters" },
+    { args: ["quality", "--soft-only"], message: "quality does not accept rejection filters" },
+    { args: ["quality", "--trigger-only"], message: "quality does not accept rejection filters" },
+    { args: ["quality", "--include-historical"], message: "quality does not accept --include-historical" },
+    { args: ["quality", "--explain"], message: "quality does not accept --explain" },
+  ];
+
+  for (const item of cases) {
+    const parsed = parseArgs(item.args);
+    assert.equal(parsed.ok, false, item.args.join(" "));
+    if (parsed.ok) continue;
+    assert.equal(parsed.message, item.message);
     assert.match(parsed.usage, /Usage:/);
   }
 });

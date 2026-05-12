@@ -3,6 +3,7 @@ import { runCommands } from "./commands/commands.ts";
 import { runCoverage } from "./commands/coverage.ts";
 import { runExplain } from "./commands/explain.ts";
 import { runMissing } from "./commands/missing.ts";
+import { runQuality } from "./commands/quality.ts";
 import { runRejected } from "./commands/rejected.ts";
 import { runRevert } from "./commands/revert.ts";
 import { runStatus } from "./commands/status.ts";
@@ -17,6 +18,7 @@ export async function dispatch(command: Command, options: CliOptions): Promise<C
     case "audit": return runAudit(options);
     case "explain": return runExplain(options);
     case "commands": return runCommands(options);
+    case "quality": return runQuality(options);
     case "revert": return runRevert(options);
   }
 }
