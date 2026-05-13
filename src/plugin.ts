@@ -44,7 +44,7 @@ import {
   workspaceMemoryExactKey,
   workspaceMemoryIdentityKey,
 } from "./workspace-memory.ts";
-import { reinforceMemory } from "./retention.ts";
+import { tryReinforceMemory } from "./retention.ts";
 import {
   appendPendingMemories,
   clearPendingMemories,
@@ -429,17 +429,31 @@ export const MemoryV2Plugin: Plugin = async (input) => {
 
         const { refSnapshot, target, targetIndex } = resolution;
         if (command.kind === "REINFORCE") {
-          const reinforced = reinforceMemory(target, sessionID, now);
-          if (reinforced === target) {
-            evidence.push(memoryReinforcedEvidence(target, command.ref, "rejected", ["numbered_ref_reinforce", "reinforcement_window_blocked"], {
+          const decision = tryReinforceMemory(target, sessionID, now);
+          if (decision.outcome === "blocked") {
+            evidence.push(memoryReinforcedEvidence(target, command.ref, "rejected", ["numbered_ref_reinforce", "reinforcement_window_blocked", `reinforcement_block_${decision.blockReason}`], {
               memoryId: refSnapshot.memoryId,
+              blockReason: decision.blockReason,
+              attemptedAtMs: now,
+              attemptedAtIso: new Date(now).toISOString(),
+              ...(decision.lastReinforcedAt ? {
+                lastReinforcedAtMs: decision.lastReinforcedAt,
+                lastReinforcedAtIso: new Date(decision.lastReinforcedAt).toISOString(),
+              } : {}),
+              reinforcementCount: decision.reinforcementCount,
+              maxReinforcementCount: decision.maxReinforcementCount,
+              minIntervalMs: decision.minIntervalMs,
             }));
             continue;
           }
 
+          const reinforced = decision.memory;
           workspaceMemory.entries[targetIndex] = reinforced;
           evidence.push(memoryReinforcedEvidence(reinforced, command.ref, "reinforced", ["numbered_ref_reinforce", "reinforcement_window_allowed"], {
             memoryId: refSnapshot.memoryId,
+            reinforcementOutcome: "reinforced",
+            previousReinforcementCount: decision.previousReinforcementCount,
+            newReinforcementCount: decision.newReinforcementCount,
           }));
           continue;
         }
@@ -662,11 +676,12 @@ export const MemoryV2Plugin: Plugin = async (input) => {
         const key = memoryKey(memory);
         const existing = existingByKey.get(key);
         if (existing) {
-          const reinforced = reinforceMemory(
+          const decision = tryReinforceMemory(
             existing.memory,
             sessionID ?? memory.pendingOwnerSessionID ?? "workspace-promotion",
             promotedAt,
           );
+          const reinforced = decision.memory;
           if (reinforced !== existing.memory) {
             workspaceMemory.entries[existing.index] = reinforced;
             existingByKey.set(key, { memory: reinforced, index: existing.index });

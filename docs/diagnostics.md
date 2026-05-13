@@ -22,6 +22,25 @@ The npm package is `opencode-working-memory`; the installed bin is `memory-diag`
 - `--verbose` — show detailed diagnostics.
 - `--json` — print machine-readable output where supported.
 
+## Diagnostic Answerability Contract
+
+Every diagnostic section must document:
+
+1. **Question:** What does the reviewer want to know?
+2. **Decision:** What action could the answer inform?
+3. **Competing explanations:** At least two interpretations of the same metric.
+4. **Required signals:** What fields/events distinguish those explanations?
+5. **Current signals:** What currently exists?
+6. **Answerability level:** `supported` | `partial` | `inventory_only` | `not_instrumented`
+7. **Output permission:** What the tool may say without overclaiming.
+
+For `memory-diag quality`:
+- `reinforcementRules`: `inventory_only` (cannot distinguish spam from legitimate blocks)
+- `evictionAndCaps`: `inventory_only` (cannot distinguish healthy turnover from premature eviction)
+- Old evidence remains ambiguous. Answerability improves only for events produced after instrumentation version 2. Mixed old/new logs will show a mix of `inventory_only` and `partial` sections.
+- Producer-instrumented reinforcement blocks can upgrade `reinforcementRules` to `partial` by showing exact block reasons and UTC-day grouping; they still require human content judgment.
+- Producer-instrumented capacity removals with rank/strength snapshots can upgrade `evictionAndCaps` to `partial`; fullness alone remains occupancy inventory, not proof of a capacity problem.
+
 ## Examples
 
 ```bash
@@ -36,10 +55,11 @@ npx --package opencode-working-memory memory-diag revert --memory <replacement-m
 
 ## Quality Review Board
 
-Use `memory-diag quality` for a read-only, evidence-first review of memory quality without automatic cleanup.
+Use `memory-diag quality` for a read-only, answerability-scoped evidence inventory without automatic cleanup.
 
 - Primarily provides memory-system mechanism observations for human/agent interpretation.
 - Secondarily helps review active memory content quality.
+- Prints answerability labels and output permissions so inventory facts are not presented as conclusions.
 - Separates system-mechanism facts, memory-content facts, heuristic flags, and review questions.
 - Includes inferred evidence provenance because historical records do not record producer package version.
 - Labels uncertain provenance as `unversioned_ambiguous` so old artifacts are not treated as current mechanism failures.

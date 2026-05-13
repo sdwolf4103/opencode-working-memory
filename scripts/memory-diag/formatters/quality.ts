@@ -3,9 +3,15 @@ import type {
   CandidateProvenance,
   HeuristicFlag,
   ProvenanceClassification,
+  RejectionVersionFacts,
+  ReinforcementVersionFacts,
   ReviewBoardActiveMemory,
   ReviewBoardCandidate,
   ReviewBoardReport,
+  EvictionVersionFacts,
+  VersionAvailability,
+  VersionCoverage,
+  VersionedMechanismFacts,
 } from "../quality-review-model.ts";
 
 const PROVENANCE_ORDER: ProvenanceClassification[] = [
@@ -26,7 +32,7 @@ export function buildQualityJSON(report: ReviewBoardReport, raw = false): unknow
 
 export function formatQualityReviewBoard(
   report: ReviewBoardReport,
-  options: { verbose?: boolean; noEmoji?: boolean },
+  options: { verbose?: boolean },
 ): string {
   const bullet = "-";
   const lines: string[] = [];
@@ -57,9 +63,13 @@ export function formatQualityReviewBoard(
 
 function pushEvidenceProvenance(lines: string[], report: ReviewBoardReport, bullet: string): void {
   const context = report.provenanceContext;
+  const instrumentation = report.facts.systemMechanisms.instrumentation;
   lines.push("Evidence provenance");
   lines.push(`  ${bullet} method: migration/timestamp/format inference`);
   lines.push(`  ${bullet} confidence: ${context.confidenceDisclaimer}`);
+  lines.push(`  ${bullet} Producer coverage: ${instrumentation.evidenceEventsWithProducer} of ${instrumentation.evidenceEventsTotal} evidence events instrumented`);
+  lines.push(`  ${bullet} Rejection producer coverage: ${instrumentation.rejectionRecordsWithProducer} of ${instrumentation.rejectionRecordsTotal} rejection records instrumented`);
+  lines.push(`  ${bullet} instrumentation versions: ${formatCounts(instrumentation.instrumentationVersions)}`);
   lines.push(`  ${bullet} migration timeline: ${formatMigrationTimeline(context.migrationTimeline)}`);
   if (context.lastActivityAt) lines.push(`  ${bullet} last activity: ${context.lastActivityAt}`);
 }
@@ -70,26 +80,41 @@ function pushSystemMechanismFacts(lines: string[], report: ReviewBoardReport, bu
   lines.push("  Provenance counts for mechanism evidence");
   lines.push(`    ${bullet} ${formatProvenanceCounts(report.provenanceContext.countsByClassification)}`);
   lines.push("  Rejection filters");
+  pushAnswerability(lines, report.answerability?.rejectionFilters, "    ");
   lines.push(`    ${bullet} rejected records: ${facts.rejectionFilters.totalRecords} (unique: ${facts.rejectionFilters.uniqueTexts})`);
   lines.push(`    ${bullet} raw reason-code distribution: ${formatCounts(facts.rejectionFilters.byRawReasonCode)}`);
   lines.push(`    ${bullet} type distribution: ${formatCounts(facts.rejectionFilters.byType)}`);
   lines.push(`    ${bullet} ambiguous/architecture-like rejected candidates: ${facts.rejectionFilters.ambiguousOrArchitectureLike}`);
   lines.push(`    ${bullet} status-or-hard-reason evidence: ${facts.rejectionFilters.hardReasonOrNoiseHeuristic}`);
   lines.push(`    ${bullet} re-absorbed rejected texts: ${facts.rejectionFilters.reabsorbedRejectedTexts}`);
+  if (facts.versionedFacts) pushVersionAnalysis(lines, facts.versionedFacts.rejectionFilters, facts.versionedFacts.versionCoverage, formatRejectionVersionFacts, bullet);
   lines.push("  Reinforcement rules");
+  pushAnswerability(lines, report.answerability?.reinforcementRules, "    ");
   lines.push(`    ${bullet} reinforce attempts: ${facts.reinforcementRules.reinforceEvents}, reinforced: ${facts.reinforcementRules.reinforcedEvents}, rejected/blocked: ${facts.reinforcementRules.rejectedOrBlockedEvents}`);
   lines.push(`    ${bullet} reinforcement-window blocked: ${facts.reinforcementRules.windowBlockedEvents} (rate: ${formatPercent(facts.reinforcementRules.windowBlockRate)})`);
+  lines.push(`    ${bullet} Exact block reasons: ${formatCounts(facts.reinforcementRules.blocksByExactReason)}`);
+  lines.push(`    ${bullet} window blocks by UTC day: ${formatCounts(facts.reinforcementRules.windowBlocksByUtcDay)}`);
+  lines.push(`    ${bullet} block details missing: ${facts.reinforcementRules.blockDetailsMissing}`);
   lines.push(`    ${bullet} repeated blocks by memory: ${formatRepeatedBlocks(facts.reinforcementRules.repeatedBlocksByMemory)}`);
   lines.push(`    ${bullet} malformed command events: ${facts.reinforcementRules.malformedCommandEvents}`);
+  if (facts.versionedFacts) pushVersionAnalysis(lines, facts.versionedFacts.reinforcementRules, facts.versionedFacts.versionCoverage, formatReinforcementVersionFacts, bullet);
   lines.push("  Eviction and caps");
+  pushAnswerability(lines, report.answerability?.evictionAndCaps, "    ");
   lines.push(`    ${bullet} active memories: ${facts.evictionAndCaps.activeMemories} / ${facts.evictionAndCaps.maxEntries}`);
   lines.push(`    ${bullet} rendered memories: ${facts.evictionAndCaps.renderedMemories}`);
-  lines.push(`    ${bullet} full caps: ${formatFullCaps(facts.evictionAndCaps.fullCaps, facts.evictionAndCaps.typeCounts, facts.evictionAndCaps.typeCaps, facts.evictionAndCaps.activeMemories, facts.evictionAndCaps.maxEntries)}`);
+  lines.push(`    ${bullet} cap occupancy: ${formatFullCaps(facts.evictionAndCaps.fullCaps, facts.evictionAndCaps.typeCounts, facts.evictionAndCaps.typeCaps, facts.evictionAndCaps.activeMemories, facts.evictionAndCaps.maxEntries)}`);
   lines.push(`    ${bullet} capacity removals: total=${facts.evictionAndCaps.removedByCapacity}, global=${facts.evictionAndCaps.removedByGlobalCap}, type=${facts.evictionAndCaps.removedByTypeCap}`);
+  lines.push(`    ${bullet} Removals with snapshot: ${facts.evictionAndCaps.recentCapacityRemovalsWithSnapshot}`);
+  lines.push(`    ${bullet} Removals without snapshot: ${facts.evictionAndCaps.capacitySnapshotsMissing} (historical)`);
+  if (facts.evictionAndCaps.highestRankRemoved) lines.push(`    ${bullet} highest-rank removed snapshot: ${formatHighestRankRemoved(facts.evictionAndCaps.highestRankRemoved)}`);
   lines.push(`    ${bullet} recent evictions by type: ${formatCounts(facts.evictionAndCaps.recentEvictionsByType)}`);
   lines.push(`    ${bullet} recent evicted content shown: ${facts.evictionAndCaps.recentEvictedContentShown}`);
-  lines.push(`    ${bullet} evidence-only disappearances: ${facts.evictionAndCaps.missingEvidenceOnly} (unknown: ${facts.evictionAndCaps.unknownDisappearances})`);
+  if (facts.versionedFacts) pushVersionAnalysis(lines, facts.versionedFacts.evictionAndCaps, facts.versionedFacts.versionCoverage, formatEvictionVersionFacts, bullet);
+  lines.push("  Unknown disappearances");
+  pushAnswerability(lines, report.answerability?.unknownDisappearances, "    ");
+  lines.push(`    ${bullet} unversioned disappearance inventory: evidence-only=${facts.evictionAndCaps.missingEvidenceOnly}, unknown=${facts.evictionAndCaps.unknownDisappearances}`);
   lines.push("  Identity and dedup");
+  pushAnswerability(lines, report.answerability?.identityAndDedup, "    ");
   lines.push(`    ${bullet} replacements: total=${facts.identityAndDedup.replacementEvents}, same-type=${facts.identityAndDedup.sameTypeReplacementEvents}, cross-type=${facts.identityAndDedup.crossTypeReplacementEvents}`);
   lines.push(`    ${bullet} superseded entries: ${facts.identityAndDedup.supersededEntries}`);
   lines.push(`    ${bullet} exact duplicate/identity groups identified: ${facts.identityAndDedup.duplicateTextOrIdentityGroups}`);
@@ -98,10 +123,118 @@ function pushSystemMechanismFacts(lines: string[], report: ReviewBoardReport, bu
 function pushMemoryContentFacts(lines: string[], report: ReviewBoardReport, bullet: string): void {
   const facts = report.facts.memoryContent;
   lines.push("Facts - memory content");
+  pushAnswerability(lines, report.answerability?.memoryContent, "  ");
   lines.push(`  ${bullet} rendered memories: ${facts.renderedMemories}`);
   lines.push(`  ${bullet} evidence coverage: ${facts.evidenceCoverage.covered} / ${facts.evidenceCoverage.total}`);
   lines.push(`  ${bullet} type counts: ${formatTypeCountsWithCaps(facts.typeCounts, facts.typeCaps)}`);
   lines.push(`  ${bullet} weakest/strongest active memory previews: weakest=${formatMemoryPreviews(facts.weakestActiveMemories)}; strongest=${formatMemoryPreviews(facts.strongestActiveMemories)}`);
+}
+
+function pushAnswerability(
+  lines: string[],
+  assessment: NonNullable<ReviewBoardReport["answerability"]>[keyof NonNullable<ReviewBoardReport["answerability"]>] | undefined,
+  indent: string,
+): void {
+  if (!assessment) return;
+  const suffix = assessment.level === "partial" ? " — causal fields exist, but human content judgment is still required" : "";
+  lines.push(`${indent}(Answerability: ${assessment.level}${suffix})`);
+  lines.push(`${indent}Output permission: ${assessment.outputPermission}`);
+}
+
+function pushVersionAnalysis<TFacts>(
+  lines: string[],
+  mechanism: VersionedMechanismFacts<TFacts>,
+  coverage: VersionCoverage,
+  formatFacts: (facts: TFacts) => string,
+  bullet: string,
+): void {
+  lines.push("    Version analysis by producer version");
+  lines.push(`      Version-stamp coverage (all evidence/rejection records, not mechanism problem counts): Coverage: ${formatCoveragePercent(coverage.coveragePercent)} of ${formatInteger(coverage.totalEvents)} records carry a version stamp (${formatInteger(coverage.currentVersionEvents)} current, ${formatInteger(coverage.previousVersionEvents)} previous, ${formatInteger(coverage.unknownVersionEvents)} unknown/unversioned). Comparison will become meaningful as new events accumulate.`);
+  if (coverage.isTransitional) {
+    lines.push("      NOTE: Version coverage is below 50%. Current-version comparisons may not be representative.");
+  }
+  lines.push(`      ${mechanismOpportunityDescription(mechanism)}`);
+  for (const group of ["current", "previous", "unknown_unversioned"] as const) {
+    const bucket = mechanism.buckets[group];
+    lines.push(`      ${bullet} ${bucket.label}: opportunities=${bucket.opportunityCount}, observed=${bucket.observedPatternCount}, sample=${bucket.sampleAssessment}, answerability=${bucket.answerabilityLevel}`);
+    if (Object.keys(bucket.producerVersions).length > 0) lines.push(`        producer versions: ${formatCounts(bucket.producerVersions)}`);
+    lines.push(`        composition: ${formatVersionAvailability(bucket.versionAvailability)}`);
+    lines.push(`        facts: ${formatFacts(bucket.facts)}`);
+  }
+  lines.push(`      ${bullet} inference: ${mechanism.inference.message}`);
+  lines.push(`        diagnostic strength: ${diagnosticStrengthLabel(mechanism)}`);
+  const diagnosticLine = currentMechanismDiagnosticLine(mechanism);
+  if (diagnosticLine) lines.push(`        ${diagnosticLine}`);
+  if (mechanism.diagnosticQuestions) {
+    for (const question of mechanism.diagnosticQuestions) {
+      lines.push(`        diagnostic question: ${question.question} Evidence: ${question.evidence.join(", ")}`);
+    }
+  }
+  lines.push(`        caveat: ${mechanism.inference.caveat}`);
+}
+
+function diagnosticStrengthLabel<TFacts>(mechanism: VersionedMechanismFacts<TFacts>): string {
+  const current = mechanism.buckets.current;
+  const strength = mechanism.inference.status === "no_current_version_opportunities" || current.opportunityCount === 0
+    ? "unavailable"
+    : current.opportunityCount < mechanism.sampleThreshold
+      ? "weak"
+      : "moderate";
+  return hasCurrentCausalDetail(mechanism) ? `${strength}; causal detail available` : strength;
+}
+
+function hasCurrentCausalDetail<TFacts>(mechanism: VersionedMechanismFacts<TFacts>): boolean {
+  const currentFacts = mechanism.buckets.current.facts;
+  return isReinforcementVersionFacts(currentFacts) && Object.keys(currentFacts.blocksByExactReason).length > 0;
+}
+
+function currentMechanismDiagnosticLine<TFacts>(mechanism: VersionedMechanismFacts<TFacts>): string | undefined {
+  const current = mechanism.buckets.current;
+  if (!isReinforcementVersionFacts(current.facts)) return undefined;
+  const facts = current.facts;
+  const parts: string[] = [];
+  if (Object.keys(facts.blocksByExactReason).length > 0) parts.push(`current block reasons=${formatCounts(facts.blocksByExactReason)}`);
+  if (facts.blockDetailsMissing > 0) parts.push(`current block details missing=${facts.blockDetailsMissing}`);
+  if (parts.length === 0) return undefined;
+  parts.push(`sample=${current.opportunityCount} attempts`);
+  return `diagnostic: ${parts.join("; ")}`;
+}
+
+function isReinforcementVersionFacts(facts: unknown): facts is ReinforcementVersionFacts {
+  return typeof facts === "object"
+    && facts !== null
+    && "blocksByExactReason" in facts
+    && "blockDetailsMissing" in facts
+    && "windowBlockedEvents" in facts;
+}
+
+function mechanismOpportunityDescription<TFacts>(mechanism: VersionedMechanismFacts<TFacts>): string {
+  if (mechanism.opportunityName === "rejection candidates") return "Mechanism opportunities below are reviewable rejection candidates only; render/accounting events are excluded.";
+  if (mechanism.opportunityName === "attempts") return "Mechanism opportunities below are reinforcement attempts only; render/accounting events are excluded.";
+  if (mechanism.opportunityName === "capacity removals") return "Mechanism opportunities below are capacity removals only; render/accounting events are excluded.";
+  return `Mechanism opportunities below are ${mechanism.opportunityName} only; render/accounting events are excluded.`;
+}
+
+function formatVersionAvailability(availability: VersionAvailability): string {
+  const parts = [
+    availability.noProducerFields > 0 ? `no producer fields=${availability.noProducerFields}` : undefined,
+    availability.unknownProducerVersion > 0 ? `unknown version=${availability.unknownProducerVersion}` : undefined,
+    availability.emptyProducerVersion > 0 ? `empty version=${availability.emptyProducerVersion}` : undefined,
+    availability.knownProducerVersion > 0 ? `known version=${availability.knownProducerVersion}` : undefined,
+  ].filter((part): part is string => Boolean(part));
+  return parts.length === 0 ? "(empty bucket)" : parts.join(", ");
+}
+
+function formatRejectionVersionFacts(facts: RejectionVersionFacts): string {
+  return `records=${facts.totalRecords}, candidates=${facts.candidateRecords}, raw reason codes=${formatCounts(facts.byRawReasonCode)}, types=${formatCounts(facts.byType)}`;
+}
+
+function formatReinforcementVersionFacts(facts: ReinforcementVersionFacts): string {
+  return `reinforce attempts=${facts.reinforceEvents}, window blocked=${facts.windowBlockedEvents}, exact reasons=${formatCounts(facts.blocksByExactReason)}, block details missing=${facts.blockDetailsMissing}`;
+}
+
+function formatEvictionVersionFacts(facts: EvictionVersionFacts): string {
+  return `capacity removals=${facts.removedByCapacity}, with snapshot=${facts.recentCapacityRemovalsWithSnapshot}, missing snapshot=${facts.capacitySnapshotsMissing}`;
 }
 
 function pushSystemMechanismCandidates(lines: string[], report: ReviewBoardReport, bullet: string): void {
@@ -257,6 +390,17 @@ function formatRepeatedBlocks(blocks: ReviewBoardReport["facts"]["systemMechanis
   return blocks.map(block => `${block.memoryId} count=${block.count} refs=${block.refs.join("|") || "none"} raw reason codes=${block.rawReasonCodes.join("|") || "none"}`).join(", ");
 }
 
+function formatHighestRankRemoved(snapshot: NonNullable<ReviewBoardReport["facts"]["systemMechanisms"]["evictionAndCaps"]["highestRankRemoved"]>): string {
+  const parts = [
+    `eventId=${snapshot.eventId}`,
+    snapshot.memoryId ? `memoryId=${snapshot.memoryId}` : undefined,
+    snapshot.type ? `type=${snapshot.type}` : undefined,
+    `rankAtRemoval=${snapshot.rankAtRemoval}`,
+    typeof snapshot.strengthAtRemoval === "number" ? `strengthAtRemoval=${snapshot.strengthAtRemoval}` : undefined,
+  ].filter((part): part is string => Boolean(part));
+  return parts.join(" ");
+}
+
 function formatMemoryPreviews(items: ReviewBoardReport["facts"]["memoryContent"]["weakestActiveMemories"]): string {
   if (items.length === 0) return "(none)";
   return items.map(item => `${item.id} type=${item.type} strength=${typeof item.strength === "number" ? item.strength.toFixed(3) : "unknown"} text=${JSON.stringify(item.textPreview)}`).join(" | ");
@@ -264,6 +408,15 @@ function formatMemoryPreviews(items: ReviewBoardReport["facts"]["memoryContent"]
 
 function formatPercent(value: number): string {
   return `${(Number.isFinite(value) ? value * 100 : 0).toFixed(1)}%`;
+}
+
+function formatCoveragePercent(value: number): string {
+  if (!Number.isFinite(value)) return "0%";
+  return Number.isInteger(value) ? `${value}%` : `${value.toFixed(1)}%`;
+}
+
+function formatInteger(value: number): string {
+  return new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 }).format(value);
 }
 
 function formatProvenance(provenance: CandidateProvenance): string {

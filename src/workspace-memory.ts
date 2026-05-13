@@ -9,7 +9,8 @@ import { redactCredentials } from "./redaction.ts";
 import {
   RETENTION_TYPE_MAX,
   calculateRetentionStrength,
-  reinforceMemory,
+  tryReinforceMemory,
+  type ReinforcementDecision,
 } from "./retention.ts";
 import type { EvidenceEventInput, MemoryEvidenceRef } from "./evidence-log.ts";
 import { appendEvidenceEvents } from "./evidence-log.ts";
@@ -559,7 +560,13 @@ function consolidationEvent(
 
 function capacityRemovalEvidence(
   memory: LongTermMemoryEntry,
-  reason: "type_cap" | "global_cap" | "capacity",
+  reason: "type_cap" | "global_cap",
+  details: {
+    strengthAtRemoval: number;
+    rankAtRemoval: number;
+    typeRankAtRemoval: number;
+    ageDaysAtRemoval: number;
+  },
 ): EvidenceEventInput {
   return {
     type: "memory_removed_capacity",
@@ -578,6 +585,7 @@ function capacityRemovalEvidence(
       ...(typeof memory.retentionClock === "number" && Number.isFinite(memory.retentionClock) ? { retentionClock: memory.retentionClock } : {}),
       ...(memory.createdAt ? { createdAt: memory.createdAt } : {}),
       ...(memory.source ? { source: memory.source } : {}),
+      ...details,
     },
   };
 }
@@ -664,8 +672,8 @@ export function enforceLongTermLimitsWithAccounting(
   const typeCapLosers = sorted.filter(entry => !cappedIds.has(entry.id));
   const globalCapLosers = capped.filter(entry => !keptIds.has(entry.id));
   const capacityEvidence: EvidenceEventInput[] = [
-    ...typeCapLosers.map(entry => capacityRemovalEvidence(entry, "type_cap")),
-    ...globalCapLosers.map(entry => capacityRemovalEvidence(entry, "global_cap")),
+    ...typeCapLosers.map(entry => capacityRemovalEvidence(entry, "type_cap", capacityRemovalSnapshot(entry, sorted, now, lastActivityAt))),
+    ...globalCapLosers.map(entry => capacityRemovalEvidence(entry, "global_cap", capacityRemovalSnapshot(entry, sorted, now, lastActivityAt))),
   ];
   const capacityDropped = sorted
     .filter(entry => !keptIds.has(entry.id))
@@ -677,6 +685,28 @@ export function enforceLongTermLimitsWithAccounting(
     absorbed: dedupeResult.absorbed,
     superseded: dedupeResult.superseded,
     evidence: [...dedupeResult.evidence, ...capacityEvidence],
+  };
+}
+
+function capacityRemovalSnapshot(
+  memory: LongTermMemoryEntry,
+  sorted: LongTermMemoryEntry[],
+  now: number,
+  lastActivityAt?: string,
+): {
+  strengthAtRemoval: number;
+  rankAtRemoval: number;
+  typeRankAtRemoval: number;
+  ageDaysAtRemoval: number;
+} {
+  const createdAtMs = new Date(memory.createdAt).getTime();
+  const rank = sorted.findIndex(entry => entry.id === memory.id);
+  const typeRank = sorted.filter(entry => entry.type === memory.type).findIndex(entry => entry.id === memory.id);
+  return {
+    strengthAtRemoval: calculateRetentionStrength(memory, now, lastActivityAt),
+    rankAtRemoval: rank >= 0 ? rank + 1 : -1,
+    typeRankAtRemoval: typeRank >= 0 ? typeRank + 1 : -1,
+    ageDaysAtRemoval: Number.isFinite(createdAtMs) ? Math.floor(Math.max(0, now - createdAtMs) / 86_400_000) : 0,
   };
 }
 
@@ -732,12 +762,13 @@ export function dedupeLongTermEntriesWithAccounting(entries: LongTermMemoryEntry
       const reason = workspaceMemoryExactKey(entry) === workspaceMemoryExactKey(existing)
         ? "absorbed_exact" as const
         : "absorbed_identity" as const;
-      const reinforced = reinforceMemory(
+      const decision = tryReinforceMemory(
         retained,
         reinforcementSessionId(retained, dropped),
         now,
       );
-      const reinforcedEvent = reinforcementEvidence(retained, dropped, reinforced, reason);
+      const reinforced = decision.memory;
+      const reinforcedEvent = reinforcementEvidence(retained, dropped, decision, reason, now);
       if (reinforcedEvent) evidence.push(reinforcedEvent);
 
       absorbed.push(consolidationEvent(dropped, reason, reinforced));
@@ -760,12 +791,13 @@ export function dedupeLongTermEntriesWithAccounting(entries: LongTermMemoryEntry
       const reason = workspaceMemoryExactKey(entry) === workspaceMemoryExactKey(existing)
         ? "absorbed_exact" as const
         : "superseded_existing" as const; // v1.5.4 placeholder: unreachable until numbered refs
-      const reinforced = reinforceMemory(
+      const decision = tryReinforceMemory(
         retained,
         reinforcementSessionId(retained, dropped),
         now,
       );
-      const reinforcedEvent = reinforcementEvidence(retained, dropped, reinforced, reason);
+      const reinforced = decision.memory;
+      const reinforcedEvent = reinforcementEvidence(retained, dropped, decision, reason, now);
       if (reinforcedEvent) evidence.push(reinforcedEvent);
 
       if (reason === "superseded_existing") {
@@ -807,11 +839,41 @@ function memoryEvidenceRef(memory: LongTermMemoryEntry): MemoryEvidenceRef {
 function reinforcementEvidence(
   retained: LongTermMemoryEntry,
   dropped: LongTermMemoryEntry,
-  reinforced: LongTermMemoryEntry,
+  decision: ReinforcementDecision,
   reason: "absorbed_exact" | "absorbed_identity" | "superseded_existing",
+  attemptedAt: number,
 ): EvidenceEventInput | undefined {
-  if ((reinforced.reinforcementCount ?? 0) <= (retained.reinforcementCount ?? 0)) return undefined;
   const duplicateReason = reason === "absorbed_identity" ? "duplicate_identity" : "duplicate_exact";
+  if (decision.outcome === "blocked") {
+    return {
+      type: "memory_reinforced",
+      phase: "reinforcement",
+      outcome: "rejected",
+      memory: memoryEvidenceRef(retained),
+      relations: [
+        { role: "target", memory: memoryEvidenceRef(retained) },
+        { role: "reinforced_by", memory: memoryEvidenceRef(dropped) },
+      ],
+      reasonCodes: [duplicateReason, "reinforcement_window_blocked", `reinforcement_block_${decision.blockReason}`],
+      details: {
+        memoryId: retained.id,
+        droppedMemoryId: dropped.id,
+        blockReason: decision.blockReason,
+        attemptedAtMs: attemptedAt,
+        attemptedAtIso: new Date(attemptedAt).toISOString(),
+        ...(decision.lastReinforcedAt ? {
+          lastReinforcedAtMs: decision.lastReinforcedAt,
+          lastReinforcedAtIso: new Date(decision.lastReinforcedAt).toISOString(),
+        } : {}),
+        reinforcementCount: decision.reinforcementCount,
+        maxReinforcementCount: decision.maxReinforcementCount,
+        minIntervalMs: decision.minIntervalMs,
+      },
+      textPreview: retained.text,
+    };
+  }
+
+  const reinforced = decision.memory;
   return {
     type: "memory_reinforced",
     phase: "reinforcement",
@@ -822,6 +884,13 @@ function reinforcementEvidence(
       { role: "reinforced_by", memory: memoryEvidenceRef(dropped) },
     ],
     reasonCodes: [duplicateReason, "reinforcement_window_allowed"],
+    details: {
+      memoryId: reinforced.id,
+      droppedMemoryId: dropped.id,
+      reinforcementOutcome: "reinforced",
+      previousReinforcementCount: decision.previousReinforcementCount,
+      newReinforcementCount: decision.newReinforcementCount,
+    },
     textPreview: reinforced.text,
   };
 }

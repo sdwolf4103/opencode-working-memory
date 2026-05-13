@@ -7,6 +7,7 @@ import { assessMemoryQuality } from "./memory-quality.ts";
 import { extractionRejectionLogPath } from "./paths.ts";
 import { redactCredentials } from "./redaction.ts";
 import type { EvidenceEventInput } from "./evidence-log.ts";
+import { producerFields } from "./instrumentation.ts";
 
 function id(prefix: string): string {
   return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -329,6 +330,11 @@ type ExtractionRejectionLogEntry = {
   source: "compaction";
   workspaceKey?: string;
   workspaceRootHash?: string;
+  producerName?: string;
+  producerVersion?: string;
+  instrumentationVersion?: number;
+  decisionLogicName?: string;
+  decisionLogicVersion?: number;
 };
 
 type WorkspaceMemoryCandidateParseOptions = {
@@ -381,6 +387,9 @@ function evaluateWorkspaceMemoryCandidate(
       source: "compaction",
       workspaceKey: options.workspaceKey,
       workspaceRootHash: options.workspaceRootHash,
+      ...producerFields(),
+      decisionLogicName: "assessMemoryQuality",
+      decisionLogicVersion: 1,
     });
     return { accepted: false, reasons: quality.reasons };
   }

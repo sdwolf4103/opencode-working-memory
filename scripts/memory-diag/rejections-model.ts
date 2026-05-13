@@ -27,6 +27,11 @@ export function normalizeRejection(record: RejectionLogRecord): NormalizedReject
     source: record.source,
     origin,
     fromTrigger: typeof record.fromTrigger === "boolean" ? record.fromTrigger : origin === "explicit_trigger",
+    producerName: typeof record.producerName === "string" ? record.producerName : undefined,
+    producerVersion: typeof record.producerVersion === "string" ? record.producerVersion : undefined,
+    instrumentationVersion: typeof record.instrumentationVersion === "number" ? record.instrumentationVersion : undefined,
+    decisionLogicName: typeof record.decisionLogicName === "string" ? record.decisionLogicName : undefined,
+    decisionLogicVersion: typeof record.decisionLogicVersion === "number" ? record.decisionLogicVersion : undefined,
     text: record.text,
     reasons: record.reasons,
   };

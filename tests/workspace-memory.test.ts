@@ -30,7 +30,7 @@ import {
   calculateRetentionStrength,
   calculateDormantDays,
   calculateEffectiveAgeDays,
-  reinforceMemory,
+  tryReinforceMemory,
 } from "../src/retention.ts";
 import { redactCredentials } from "../src/redaction.ts";
 import { assessMemoryQuality, isHardQualityReason, isProgressSnapshotViolation } from "../src/memory-quality.ts";
@@ -583,7 +583,7 @@ test("normalizeWorkspaceMemoryWithAccounting uses dormant workspace days for str
 test("reinforceMemory enforces session interval and max guards", () => {
   const now = Date.UTC(2026, 3, 29);
   const base = entry("reinforce", "Durable memory should reinforce only when gated");
-  const reinforced = reinforceMemory(base, "session-a", now);
+  const reinforced = tryReinforceMemory(base, "session-a", now).memory;
 
   assert.notEqual(reinforced, base);
   assert.equal(reinforced.reinforcementCount, 1);
@@ -591,15 +591,15 @@ test("reinforceMemory enforces session interval and max guards", () => {
   assert.equal(reinforced.lastReinforcedSessionID, "session-a");
   assert.equal(reinforced.retentionClock, now);
 
-  assert.equal(reinforceMemory(reinforced, "session-a", now + 2 * 60 * 60 * 1000), reinforced);
-  assert.equal(reinforceMemory(reinforced, "session-b", now + 30 * 60 * 1000), reinforced);
+  assert.equal(tryReinforceMemory(reinforced, "session-a", now + 2 * 60 * 60 * 1000).memory, reinforced);
+  assert.equal(tryReinforceMemory(reinforced, "session-b", now + 30 * 60 * 1000).memory, reinforced);
 
   const atMax: LongTermMemoryEntry = {
     ...base,
     reinforcementCount: 6,
     lastReinforcedAt: now - 2 * 60 * 60 * 1000,
   };
-  assert.equal(reinforceMemory(atMax, "session-c", now), atMax);
+  assert.equal(tryReinforceMemory(atMax, "session-c", now).memory, atMax);
 });
 
 test("reinforceMemory requires distinct UTC calendar days between reinforcements", () => {
@@ -613,9 +613,9 @@ test("reinforceMemory requires distinct UTC calendar days between reinforcements
     lastReinforcedSessionID: "session-a",
   };
 
-  assert.equal(reinforceMemory(base, "session-b", sameUtcDayMuchLater), base);
+  assert.equal(tryReinforceMemory(base, "session-b", sameUtcDayMuchLater).memory, base);
 
-  const reinforcedNextDay = reinforceMemory(base, "session-b", nextUtcDayAfterInterval);
+  const reinforcedNextDay = tryReinforceMemory(base, "session-b", nextUtcDayAfterInterval).memory;
   assert.notEqual(reinforcedNextDay, base);
   assert.equal(reinforcedNextDay.reinforcementCount, 2);
   assert.equal(reinforcedNextDay.lastReinforcedAt, nextUtcDayAfterInterval);
@@ -626,7 +626,7 @@ test("reinforceMemory requires distinct UTC calendar days between reinforcements
     ...base,
     reinforcementCount: 6,
   };
-  assert.equal(reinforceMemory(atMax, "session-c", nextUtcDayAfterInterval), atMax);
+  assert.equal(tryReinforceMemory(atMax, "session-c", nextUtcDayAfterInterval).memory, atMax);
 });
 
 test("dedupeLongTermEntriesWithAccounting reinforces absorbed exact duplicates", () => {
@@ -737,7 +737,34 @@ test("dedupe reinforcement does not increment for same session", () => {
   assert.ok(retained, "existing manual memory should be retained");
   assert.equal(retained.reinforcementCount, 1);
   assert.equal(retained.lastReinforcedSessionID, "same-session");
-  assert.equal(result.evidence.some(event => event.type === "memory_reinforced"), false);
+  assert.equal(result.evidence.some(event => event.type === "memory_reinforced" && event.outcome === "reinforced"), false);
+  assert.ok(result.evidence.some(event => event.type === "memory_reinforced" && event.outcome === "rejected" && event.details?.blockReason === "same_session"));
+});
+
+test("dedupe blocked reinforcement emits exact block reason details", () => {
+  const now = Date.now();
+  const existing: LongTermMemoryEntry = {
+    ...entry("existing-blocked", "Prefer deterministic consolidation accounting", "feedback"),
+    source: "manual",
+    reinforcementCount: 1,
+    lastReinforcedAt: now - 30 * 60 * 1000,
+    lastReinforcedSessionID: "old-session",
+  };
+  const duplicate: LongTermMemoryEntry = {
+    ...entry("duplicate-blocked", "prefer deterministic consolidation accounting!!!", "feedback"),
+    pendingOwnerSessionID: "new-session",
+  };
+
+  const result = dedupeLongTermEntriesWithAccounting([existing, duplicate]);
+  const blocked = result.evidence.find(event => event.type === "memory_reinforced" && event.outcome === "rejected");
+
+  assert.ok(blocked, "blocked duplicate reinforcement should emit diagnostic evidence");
+  assert.ok(blocked.reasonCodes.includes("reinforcement_window_blocked"));
+  assert.ok(blocked.reasonCodes.includes("reinforcement_block_min_interval"));
+  assert.equal(blocked.details?.blockReason, "min_interval");
+  assert.equal(blocked.details?.reinforcementCount, 1);
+  assert.equal(blocked.details?.maxReinforcementCount, 6);
+  assert.equal(blocked.details?.minIntervalMs, 60 * 60 * 1000);
 });
 
 test("dedupe reinforcement does not increment under one hour", () => {
@@ -760,7 +787,8 @@ test("dedupe reinforcement does not increment under one hour", () => {
   assert.ok(retained, "existing manual memory should be retained");
   assert.equal(retained.reinforcementCount, 1);
   assert.equal(retained.lastReinforcedSessionID, "old-session");
-  assert.equal(result.evidence.some(event => event.type === "memory_reinforced"), false);
+  assert.equal(result.evidence.some(event => event.type === "memory_reinforced" && event.outcome === "reinforced"), false);
+  assert.ok(result.evidence.some(event => event.type === "memory_reinforced" && event.outcome === "rejected" && event.details?.blockReason === "min_interval"));
 });
 
 test("dedupe reinforcement does not emit evidence at max reinforcement count", () => {
@@ -776,7 +804,8 @@ test("dedupe reinforcement does not emit evidence at max reinforcement count", (
 
   const result = dedupeLongTermEntriesWithAccounting([existing, duplicate]);
 
-  assert.equal(result.evidence.some(event => event.type === "memory_reinforced"), false);
+  assert.equal(result.evidence.some(event => event.type === "memory_reinforced" && event.outcome === "reinforced"), false);
+  assert.ok(result.evidence.some(event => event.type === "memory_reinforced" && event.outcome === "rejected" && event.details?.blockReason === "max_count"));
 });
 
 test("enforceLongTermLimits orders entries by retention strength", () => {
@@ -2644,6 +2673,10 @@ test("enforceLongTermLimitsWithAccounting keeps 11th and 12th decisions and type
     assert.ok(event.relations?.[0]?.memory.memoryKeyHash, "removed relation should include memory key hash");
     assert.ok(event.relations?.[0]?.memory.identityKeyHash, "removed relation should include identity key hash");
     assert.deepEqual(event.reasonCodes, ["type_cap"]);
+    assert.equal(typeof event.details?.strengthAtRemoval, "number");
+    assert.equal(typeof event.details?.rankAtRemoval, "number");
+    assert.equal(typeof event.details?.typeRankAtRemoval, "number");
+    assert.equal(typeof event.details?.ageDaysAtRemoval, "number");
   }
 });
 

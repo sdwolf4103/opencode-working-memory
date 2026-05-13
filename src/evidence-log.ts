@@ -4,6 +4,7 @@ import { appendFile, mkdir, readFile, realpath, rename, rm, stat, writeFile } fr
 import { dirname, join } from "node:path";
 import { dataHome, workspaceEvidenceLogPath, workspaceKey } from "./paths.ts";
 import { redactCredentials } from "./redaction.ts";
+import { producerFields } from "./instrumentation.ts";
 
 export type EvidenceEventType =
   | "extraction_candidate_accepted"
@@ -95,6 +96,9 @@ export type EvidenceEventV1 = {
   workspaceRootHash: string;
   sessionHash?: string;
   messageHash?: string;
+  producerName?: string;
+  producerVersion?: string;
+  instrumentationVersion?: number;
   type: EvidenceEventType;
   phase: EvidencePhase;
   outcome: EvidenceOutcome;
@@ -273,7 +277,10 @@ function buildEvidenceEvent(
   if (details) event.details = details;
   if (input.textPreview) event.textPreview = evidenceTextPreview(input.textPreview, textPreviewMax);
 
-  return event;
+  return {
+    ...event,
+    ...producerFields(),
+  };
 }
 
 async function safeAppendEvidenceLine(path: string, line: string): Promise<void> {

@@ -1,5 +1,11 @@
 import type { LongTermMemoryEntry, WorkspaceMemoryStore } from "./types.ts";
 
+export type ReinforcementBlockReason = "same_session" | "same_utc_day" | "min_interval" | "max_count";
+
+export type ReinforcementDecision =
+  | { outcome: "reinforced"; memory: LongTermMemoryEntry; previousReinforcementCount: number; newReinforcementCount: number }
+  | { outcome: "blocked"; memory: LongTermMemoryEntry; blockReason: ReinforcementBlockReason; lastReinforcedAt?: number; reinforcementCount: number; maxReinforcementCount: number; minIntervalMs: number };
+
 // Retention decay model constants (v1.5)
 export const BASE_HALF_LIFE_DAYS = 45;
 export const REINFORCEMENT_HALFLIFE_FACTOR = 0.85;
@@ -116,33 +122,59 @@ function isSameUTCCalendarDay(ts1: number, ts2: number): boolean {
     && d1.getUTCDate() === d2.getUTCDate();
 }
 
-export function reinforceMemory(
+export function tryReinforceMemory(
   memory: LongTermMemoryEntry,
   sessionId: string,
   now: number,
-): LongTermMemoryEntry {
-  if (memory.lastReinforcedSessionID === sessionId) {
-    return memory;
+): ReinforcementDecision {
+  const count = memory.reinforcementCount ?? 0;
+  const lastAt = memory.lastReinforcedAt ?? 0;
+  const lastSession = memory.lastReinforcedSessionID;
+
+  if (lastSession === sessionId) {
+    return blockedDecision(memory, "same_session", count, lastAt);
   }
 
-  // Calendar-day diversity gate (OQ-2): same UTC day = no reinforcement.
-  if (memory.lastReinforcedAt && isSameUTCCalendarDay(memory.lastReinforcedAt, now)) {
-    return memory;
+  if (count >= REINFORCEMENT_MAX_COUNT) {
+    return blockedDecision(memory, "max_count", count, lastAt);
   }
 
-  if (memory.lastReinforcedAt && now - memory.lastReinforcedAt < REINFORCEMENT_MIN_INTERVAL_MS) {
-    return memory;
+  if (lastAt > 0 && now < lastAt + REINFORCEMENT_MIN_INTERVAL_MS) {
+    return blockedDecision(memory, "min_interval", count, lastAt);
   }
 
-  if ((memory.reinforcementCount ?? 0) >= REINFORCEMENT_MAX_COUNT) {
-    return memory;
+  if (lastAt > 0 && isSameUTCCalendarDay(lastAt, now)) {
+    return blockedDecision(memory, "same_utc_day", count, lastAt);
   }
 
-  return {
+  const reinforced: LongTermMemoryEntry = {
     ...memory,
-    reinforcementCount: (memory.reinforcementCount ?? 0) + 1,
+    reinforcementCount: count + 1,
     lastReinforcedAt: now,
     lastReinforcedSessionID: sessionId,
     retentionClock: now,
+  };
+  return {
+    outcome: "reinforced",
+    memory: reinforced,
+    previousReinforcementCount: count,
+    newReinforcementCount: count + 1,
+  };
+}
+
+function blockedDecision(
+  memory: LongTermMemoryEntry,
+  blockReason: ReinforcementBlockReason,
+  reinforcementCount: number,
+  lastReinforcedAt: number,
+): ReinforcementDecision {
+  return {
+    outcome: "blocked",
+    memory,
+    blockReason,
+    ...(lastReinforcedAt > 0 ? { lastReinforcedAt } : {}),
+    reinforcementCount,
+    maxReinforcementCount: REINFORCEMENT_MAX_COUNT,
+    minIntervalMs: REINFORCEMENT_MIN_INTERVAL_MS,
   };
 }

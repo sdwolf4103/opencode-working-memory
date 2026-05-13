@@ -93,6 +93,11 @@ export type RejectionLogRecord = {
   fromTrigger?: boolean;
   text?: string;
   reasons?: string[];
+  producerName?: string;
+  producerVersion?: string;
+  instrumentationVersion?: number;
+  decisionLogicName?: string;
+  decisionLogicVersion?: number;
 };
 
 export type NormalizedRejection = Required<Pick<RejectionLogRecord, "timestamp" | "type" | "text" | "reasons">> & {
@@ -102,6 +107,11 @@ export type NormalizedRejection = Required<Pick<RejectionLogRecord, "timestamp" 
   source?: string;
   origin: Origin;
   fromTrigger: boolean;
+  producerName?: string;
+  producerVersion?: string;
+  instrumentationVersion?: number;
+  decisionLogicName?: string;
+  decisionLogicVersion?: number;
 };
 
 export type MigrationLogRecord = {

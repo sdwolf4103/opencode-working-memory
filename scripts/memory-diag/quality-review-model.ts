@@ -1,12 +1,143 @@
 import { createHash } from "node:crypto";
 import type { EvidenceEventV1 } from "../../src/evidence-log.ts";
+import { producerFields } from "../../src/instrumentation.ts";
 import { RETENTION_TYPE_MAX } from "../../src/retention.ts";
 import type { LongTermMemoryEntry, LongTermType } from "../../src/types.ts";
 import { TYPES } from "./constants.ts";
 import { disappearanceRows } from "./inspection-model.ts";
-import { rejectionQualitySummary, uniqueByCanonicalText } from "./rejections-model.ts";
+import { hasWorkspaceScope, rejectionQualitySummary, uniqueByCanonicalText } from "./rejections-model.ts";
 import { canonicalMemoryText, cleanText, countBy, objectFromCounts, truncate, uniqueStrings, workspaceRootHash } from "./text.ts";
 import type { MemoryInspectionReadModel, NormalizedRejection } from "./types.ts";
+
+export type AnswerabilityLevel = "supported" | "partial" | "inventory_only" | "not_instrumented";
+
+export type ProducerVersionGroup = "current" | "previous" | "unknown_unversioned";
+
+export type VersionSampleAssessment =
+  | "observed"
+  | "not_observed_but_sample_small"
+  | "not_observed_with_sufficient_sample"
+  | "no_current_version_opportunities";
+
+export type VersionAvailability = {
+  noProducerFields: number;
+  unknownProducerVersion: number;
+  emptyProducerVersion: number;
+  knownProducerVersion: number;
+};
+
+export type VersionCoverage = {
+  totalEvents: number;
+  currentVersionEvents: number;
+  previousVersionEvents: number;
+  unknownVersionEvents: number;
+  coveragePercent: number;
+  isTransitional: boolean;
+};
+
+export type VersionedMechanismInference = {
+  status:
+    | "current_recurrence_detected"
+    | "pattern_persists_across_versions"
+    | "no_current_evidence_observed"
+    | "no_current_evidence_sample_small"
+    | "no_current_version_opportunities"
+    | "no_previous_pattern_observed";
+  message: string;
+  caveat: "Version grouping is based only on producerVersion strings in evidence";
+};
+
+export type VersionBucketFacts<TFacts> = {
+  group: ProducerVersionGroup;
+  label: string;
+  opportunityCount: number;
+  observedPatternCount: number;
+  producerVersions: Record<string, number>;
+  versionAvailability: VersionAvailability;
+  answerabilityLevel: AnswerabilityLevel;
+  sampleAssessment: VersionSampleAssessment;
+  facts: TFacts;
+};
+
+export type VersionedMechanismDiagnosticQuestion = {
+  mechanism: "reinforcement_rule";
+  group: ProducerVersionGroup;
+  question: string;
+  evidence: string[];
+};
+
+export type VersionedMechanismFacts<TFacts> = {
+  currentPackageVersion: string;
+  opportunityName: string;
+  sampleThreshold: number;
+  buckets: Record<ProducerVersionGroup, VersionBucketFacts<TFacts>>;
+  inference: VersionedMechanismInference;
+  diagnosticQuestions?: VersionedMechanismDiagnosticQuestion[];
+};
+
+export type RejectionVersionFacts = {
+  totalRecords: number;
+  candidateRecords: number;
+  byRawReasonCode: Record<string, number>;
+  byType: Record<string, number>;
+  ambiguousOrArchitectureLike: number;
+};
+
+export type ReinforcementVersionFacts = {
+  reinforceEvents: number;
+  reinforcedEvents: number;
+  rejectedOrBlockedEvents: number;
+  windowBlockedEvents: number;
+  windowBlockRate: number;
+  repeatedBlocksByMemory: Array<{ memoryId: string; count: number; refs: string[]; rawReasonCodes: string[] }>;
+  blocksByExactReason: Record<string, number>;
+  windowBlocksByUtcDay: Record<string, number>;
+  blockDetailsMissing: number;
+  malformedCommandEvents: number;
+};
+
+export type EvictionVersionFacts = {
+  removedByCapacity: number;
+  removedByGlobalCap: number;
+  removedByTypeCap: number;
+  recentEvictionsByType: Record<string, number>;
+  recentCapacityRemovalsWithSnapshot: number;
+  capacitySnapshotsMissing: number;
+  highestRankRemoved?: { memoryId?: string; rankAtRemoval: number; strengthAtRemoval?: number; type?: string; eventId: string };
+};
+
+export type VersionedSystemMechanismFacts = {
+  currentPackageVersion: string;
+  versionCoverage: VersionCoverage;
+  buckets: ProducerVersionGroup[];
+  sampleThresholds: {
+    rejectionFilters: 5;
+    reinforcementRules: 5;
+    evictionAndCaps: 5;
+  };
+  rejectionFilters: VersionedMechanismFacts<RejectionVersionFacts>;
+  reinforcementRules: VersionedMechanismFacts<ReinforcementVersionFacts>;
+  evictionAndCaps: VersionedMechanismFacts<EvictionVersionFacts>;
+};
+
+export type AnswerabilityAssessment = {
+  level: AnswerabilityLevel;
+  question: string;
+  decision: string;
+  competingExplanations: string[];
+  requiredSignals: string[];
+  currentSignals: string[];
+  outputPermission: string;
+};
+
+export type AnswerabilityReport = {
+  rejectionFilters: AnswerabilityAssessment;
+  reinforcementRules: AnswerabilityAssessment;
+  evictionAndCaps: AnswerabilityAssessment;
+  unknownDisappearances: AnswerabilityAssessment;
+  identityAndDedup: AnswerabilityAssessment;
+  memoryContent: AnswerabilityAssessment;
+};
 
 export type ReviewBoardReport = {
   version: 1;
@@ -17,7 +148,7 @@ export type ReviewBoardReport = {
     nonAuthoritative: true;
     mutation: "none";
     rawReasonCodesAreEvidence: true;
-    producerVersionRecorded: false;
+    producerVersionRecorded: boolean;
     provenanceInferenceOnly: true;
     primaryReviewPurpose: "system_mechanism_observations";
     secondaryReviewPurpose: "memory_content_quality";
@@ -26,7 +157,7 @@ export type ReviewBoardReport = {
     method: "migration_timestamp_and_format_inference";
     confidenceDisclaimer: string;
     falseCurrentRiskBias: "prefer_unversioned_ambiguous_when_uncertain";
-    producerVersionAvailable: false;
+    producerVersionAvailable: boolean;
     migrationTimeline: Array<{ migrationId: string; presentInStore: boolean; firstEvidenceAt?: string }>;
     lastActivityAt?: string;
     countsByClassification: Record<ProvenanceClassification, number>;
@@ -39,6 +170,13 @@ export type ReviewBoardReport = {
   };
   facts: {
     systemMechanisms: {
+      instrumentation: {
+        evidenceEventsTotal: number;
+        evidenceEventsWithProducer: number;
+        rejectionRecordsTotal: number;
+        rejectionRecordsWithProducer: number;
+        instrumentationVersions: Record<string, number>;
+      };
       rejectionFilters: {
         totalRecords: number;
         uniqueTexts: number;
@@ -55,6 +193,9 @@ export type ReviewBoardReport = {
         windowBlockedEvents: number;
         windowBlockRate: number;
         repeatedBlocksByMemory: Array<{ memoryId: string; count: number; refs: string[]; rawReasonCodes: string[] }>;
+        blocksByExactReason: Record<string, number>;
+        windowBlocksByUtcDay: Record<string, number>;
+        blockDetailsMissing: number;
         malformedCommandEvents: number;
       };
       evictionAndCaps: {
@@ -71,6 +212,9 @@ export type ReviewBoardReport = {
         removedByTypeCap: number;
         recentEvictionsByType: Record<string, number>;
         recentEvictedContentShown: number;
+        recentCapacityRemovalsWithSnapshot: number;
+        capacitySnapshotsMissing: number;
+        highestRankRemoved?: { memoryId?: string; rankAtRemoval: number; strengthAtRemoval?: number; type?: string; eventId: string };
       };
       identityAndDedup: {
         replacementEvents: number;
@@ -79,6 +223,7 @@ export type ReviewBoardReport = {
         supersededEntries: number;
         duplicateTextOrIdentityGroups: number;
       };
+      versionedFacts?: VersionedSystemMechanismFacts;
     };
     memoryContent: {
       activeMemories: number;
@@ -102,6 +247,7 @@ export type ReviewBoardReport = {
     systemMechanism: string[];
     memoryContent: string[];
   };
+  answerability?: AnswerabilityReport;
   nextCommands: string[];
 };
 
@@ -133,6 +279,12 @@ export type ReviewBoardCandidate = {
   facts: Record<string, unknown>;
   evidence: { eventIds?: string[]; rawReasonCodes?: string[]; textPreview?: string; textAvailable: boolean };
   provenance?: CandidateProvenance;
+  versionContext?: {
+    group: ProducerVersionGroup;
+    currentPackageVersion: string;
+    producerVersion?: string;
+    basis: string;
+  };
   heuristicFlags: HeuristicFlag[];
   reviewQuestions: string[];
   nextCommands: string[];
@@ -160,9 +312,12 @@ export type HeuristicFlag = {
   caveat: string;
 };
 
-export const ACTIVE_MEMORY_FULL_TEXT_THRESHOLD = 40;
-export const REPRESENTATIVE_CANDIDATE_LIMIT = 10;
-export const RECENT_EVICTION_DAYS = 7;
+const ACTIVE_MEMORY_FULL_TEXT_THRESHOLD = 40;
+const REPRESENTATIVE_CANDIDATE_LIMIT = 10;
+const RECENT_EVICTION_DAYS = 7;
+const VERSION_ANALYSIS_SAMPLE_THRESHOLD = 5;
+const VERSION_GROUPS: ProducerVersionGroup[] = ["current", "previous", "unknown_unversioned"];
+const VERSION_GROUPING_CAVEAT = "Version grouping is based only on producerVersion strings in evidence" as const;
 
 const KNOWN_MIGRATION_IDS = [
   "2026-04-26-p0-cleanup",
@@ -217,10 +372,11 @@ type DatedCandidateInput = {
 
 export function buildQualityReviewBoard(
   model: MemoryInspectionReadModel,
-  options: { verbose?: boolean; raw?: boolean; noEmoji?: boolean; json?: boolean },
+  options: { verbose?: boolean; raw?: boolean; json?: boolean; currentProducerVersion?: string },
   generatedAt = new Date().toISOString(),
 ): ReviewBoardReport {
   const raw = options.raw === true;
+  const currentPackageVersion = options.currentProducerVersion ?? producerFields().producerVersion;
   const activeMemories = model.store.entries.filter(entry => entry.status !== "superseded");
   const typeCounts = typeCountsFor(activeMemories);
   const typeCaps = Object.fromEntries(TYPES.map(type => [type, RETENTION_TYPE_MAX[type]]));
@@ -232,18 +388,21 @@ export function buildQualityReviewBoard(
   const reabsorbedKeys = new Set(activeKeyMatches.map(match => match.key));
   const activeMemoryByKey = new Map(activeKeyMatches.map(match => [match.key, match.activeMemory]));
   const disappearances = disappearanceRows(model);
+  const instrumentationFacts = buildInstrumentationFacts(model.evidenceEvents, model.rejectionRecords);
   const reinforcementFacts = buildReinforcementFacts(model.evidenceEvents);
   const evictionFacts = buildEvictionFacts(model, activeMemories, typeCounts, typeCaps, disappearances, generatedAt);
   const identityFacts = buildIdentityFacts(model, activeMemories);
+  const versionedFacts = buildVersionedSystemMechanismFacts(model.evidenceEvents, model.rejectionRecords, currentPackageVersion, generatedAt);
   const memoryContentFacts = buildMemoryContentFacts(model, activeMemories, typeCounts, typeCaps, raw);
+  const producerVersionAvailable = [...model.evidenceEvents, ...model.rejectionRecords].some(hasKnownProducerVersion);
   const systemMechanismCandidateInputs = {
     rejection_filter: [
-      ...buildRejectionCandidates(model.rejectionRecords, provenanceInputs, raw),
-      ...buildReabsorptionCandidates(activeKeyMatches, provenanceInputs, raw),
+      ...buildRejectionCandidates(model.rejectionRecords, provenanceInputs, raw, currentPackageVersion),
+      ...buildReabsorptionCandidates(activeKeyMatches, provenanceInputs, raw, currentPackageVersion),
     ],
-    reinforcement_rule: buildReinforcementCandidates(model.evidenceEvents, provenanceInputs, raw),
-    eviction_cap: buildEvictionCandidates(disappearances, model.evidenceEvents, provenanceInputs, raw, generatedAt),
-    identity_dedup: buildIdentityCandidates(model, activeMemories, provenanceInputs, raw),
+    reinforcement_rule: buildReinforcementCandidates(model.evidenceEvents, provenanceInputs, raw, currentPackageVersion),
+    eviction_cap: buildEvictionCandidates(disappearances, model.evidenceEvents, provenanceInputs, raw, generatedAt, currentPackageVersion),
+    identity_dedup: buildIdentityCandidates(model, activeMemories, provenanceInputs, raw, currentPackageVersion),
   };
   const showAllSystemMechanismCandidates = options.verbose === true || options.json === true;
   const systemCandidateDisplay = buildSystemCandidateDisplay(systemMechanismCandidateInputs, showAllSystemMechanismCandidates);
@@ -256,7 +415,9 @@ export function buildQualityReviewBoard(
   const activeMemoryDisplay = buildActiveMemoryDisplay(model, activeMemories, reabsorbedKeys, activeMemoryByKey, provenanceInputs, raw, options.verbose === true);
   const countsByClassification = countProvenanceClassifications(allSystemMechanismCandidates);
 
-  return {
+  const answerabilityReport = buildAnswerabilityReport();
+  applyInstrumentedAnswerability(answerabilityReport, model.evidenceEvents, reinforcementFacts, evictionFacts, currentPackageVersion);
+  const report: ReviewBoardReport = {
     version: 1,
     generatedAt,
     workspace: {
@@ -268,7 +429,7 @@ export function buildQualityReviewBoard(
       nonAuthoritative: true,
       mutation: "none",
       rawReasonCodesAreEvidence: true,
-      producerVersionRecorded: false,
+      producerVersionRecorded: producerVersionAvailable,
       provenanceInferenceOnly: true,
       primaryReviewPurpose: "system_mechanism_observations",
       secondaryReviewPurpose: "memory_content_quality",
@@ -277,7 +438,7 @@ export function buildQualityReviewBoard(
       method: "migration_timestamp_and_format_inference",
       confidenceDisclaimer: "Producer version is not recorded in historical evidence; provenance is inferred and should not be used as proof of current behavior.",
       falseCurrentRiskBias: "prefer_unversioned_ambiguous_when_uncertain",
-      producerVersionAvailable: false,
+      producerVersionAvailable,
       migrationTimeline,
       lastActivityAt: model.store.lastActivityAt,
       countsByClassification,
@@ -285,6 +446,7 @@ export function buildQualityReviewBoard(
     },
     facts: {
       systemMechanisms: {
+        instrumentation: instrumentationFacts,
         rejectionFilters: {
           totalRecords: rejectionSummary.totalRecords,
           uniqueTexts: rejectionSummary.uniqueTexts,
@@ -299,6 +461,7 @@ export function buildQualityReviewBoard(
         reinforcementRules: reinforcementFacts,
         evictionAndCaps: evictionFacts,
         identityAndDedup: identityFacts,
+        versionedFacts,
       },
       memoryContent: memoryContentFacts,
     },
@@ -310,6 +473,480 @@ export function buildQualityReviewBoard(
     },
     nextCommands: nextCommands(),
   };
+  report.answerability = answerabilityReport;
+  return report;
+}
+
+function buildAnswerabilityReport(): AnswerabilityReport {
+  return {
+    rejectionFilters: {
+      level: "partial",
+      question: "Are durable memories being rejected?",
+      decision: "Tune rejection filter or leave unchanged",
+      competingExplanations: [
+        "Rejection filter correctly identifies non-durable candidates",
+        "Rejection filter over-filters durable architectural decisions",
+      ],
+      requiredSignals: ["full rejected text", "reason codes", "source/origin", "decision logic version", "later reabsorption"],
+      currentSignals: ["redacted text preview", "reason code distribution", "type distribution"],
+      outputPermission: "Show candidates and ask for review; do not claim false positives.",
+    },
+    reinforcementRules: {
+      level: "inventory_only",
+      question: "Is the reinforcement window appropriate?",
+      decision: "Change reinforcement policy or leave unchanged",
+      competingExplanations: [
+        "Window blocks same-day repeated command inventory",
+        "Window blocks legitimate recurring reinforcement across days",
+      ],
+      requiredSignals: ["per-attempt timestamp", "prior reinforcement timestamp", "exact block reason", "session/day grouping"],
+      currentSignals: ["block count", "repeated block groups", "window block rate"],
+      outputPermission: "Show counts and event IDs only; do not characterize the policy as strict or lenient.",
+    },
+    evictionAndCaps: {
+      level: "inventory_only",
+      question: "Is capacity causing important memory loss?",
+      decision: "Raise caps or leave unchanged",
+      competingExplanations: [
+        "Full caps are naturally occupied with healthy turnover",
+        "Full caps are causing premature eviction of important memories",
+      ],
+      requiredSignals: ["strength/rank at removal", "cutoff context", "age", "source", "reinforcement count"],
+      currentSignals: ["removal count", "cap occupancy", "type counts"],
+      outputPermission: "Show occupancy and removal counts only; do not infer a capacity problem from full caps.",
+    },
+    unknownDisappearances: {
+      level: "inventory_only",
+      question: "Are missing memories current instrumentation defects?",
+      decision: "Fix removal logging or accept historical gaps",
+      competingExplanations: [
+        "Missing memories were removed before terminal-removal instrumentation existed",
+        "Missing memories indicate a current data-loss defect",
+      ],
+      requiredSignals: ["producer/instrumentation version", "terminal-removal instrumentation epoch", "latest event timestamp"],
+      currentSignals: ["evidence absence", "latest known event timestamp"],
+      outputPermission: "Call them unversioned/ambiguous disappearance inventory unless producer data proves current instrumentation.",
+    },
+    identityAndDedup: {
+      level: "partial",
+      question: "Are separate concepts incorrectly merged?",
+      decision: "Review identity rules or accept current behavior",
+      competingExplanations: [
+        "Replacements correctly update semantic duplicates",
+        "Replacements incorrectly collapse distinct concepts with similar text",
+      ],
+      requiredSignals: ["before/after content", "identity keys", "replacement reason"],
+      currentSignals: ["replacement events", "superseded entries"],
+      outputPermission: "Show replacement/duplicate inventory; do not infer semantic correctness.",
+    },
+    memoryContent: {
+      level: "partial",
+      question: "Are active memories useful and current?",
+      decision: "Review active memories or leave unchanged",
+      competingExplanations: [
+        "Low text preview indicates a naturally ephemeral memory",
+        "Low text preview indicates potentially stale content",
+      ],
+      requiredSignals: ["full text", "type", "source", "age", "evidence coverage"],
+      currentSignals: ["text preview", "type distribution", "strength distribution"],
+      outputPermission: "Show review surface with text previews; invariant heuristic flags only.",
+    },
+  };
+}
+
+function applyInstrumentedAnswerability(
+  report: AnswerabilityReport,
+  events: EvidenceEventV1[],
+  reinforcementFacts: ReviewBoardReport["facts"]["systemMechanisms"]["reinforcementRules"],
+  evictionFacts: ReviewBoardReport["facts"]["systemMechanisms"]["evictionAndCaps"],
+  currentPackageVersion: string,
+): void {
+  const hasInstrumentedBlocks = events.some(event =>
+    isReinforcementEvent(event)
+    && event.reasonCodes.includes("reinforcement_window_blocked")
+    && typeof event.details?.blockReason === "string"
+    && hasProducerFields(event)
+    && producerVersionGroupFor(event, currentPackageVersion) === "current"
+  );
+  if (hasInstrumentedBlocks && Object.keys(reinforcementFacts.blocksByExactReason).length > 0) {
+    report.reinforcementRules.level = "partial";
+    report.reinforcementRules.currentSignals = uniqueStrings([
+      ...report.reinforcementRules.currentSignals,
+      "exact block reasons",
+      "UTC day grouping",
+    ]);
+    report.reinforcementRules.outputPermission = "Show exact block reasons and day grouping; causal fields exist but human content judgment is still required.";
+  }
+
+  const hasCapacitySnapshots = evictionFacts.recentCapacityRemovalsWithSnapshot > 0
+    && events.some(event => event.type === "memory_removed_capacity" && hasProducerFields(event) && hasCapacitySnapshot(event) && producerVersionGroupFor(event, currentPackageVersion) === "current");
+  if (hasCapacitySnapshots) {
+    report.evictionAndCaps.level = "partial";
+    report.evictionAndCaps.currentSignals = uniqueStrings([
+      ...report.evictionAndCaps.currentSignals,
+      "rank at removal",
+      "strength at removal",
+    ]);
+    report.evictionAndCaps.outputPermission = "Show removal snapshots with rank/strength/age; causal fields exist but human judgment of importance is still required.";
+  }
+}
+
+function buildInstrumentationFacts(
+  events: EvidenceEventV1[],
+  rejections: NormalizedRejection[],
+): ReviewBoardReport["facts"]["systemMechanisms"]["instrumentation"] {
+  const instrumentedEvents = events.filter(hasProducerFields);
+  const instrumentedRejections = rejections.filter(hasProducerFields);
+  const instrumentationVersions: Record<string, number> = {};
+  for (const record of [...instrumentedEvents, ...instrumentedRejections]) {
+    const version = record.instrumentationVersion;
+    if (typeof version !== "number") continue;
+    const key = String(version);
+    instrumentationVersions[key] = (instrumentationVersions[key] ?? 0) + 1;
+  }
+  return {
+    evidenceEventsTotal: events.length,
+    evidenceEventsWithProducer: instrumentedEvents.length,
+    rejectionRecordsTotal: rejections.length,
+    rejectionRecordsWithProducer: instrumentedRejections.length,
+    instrumentationVersions,
+  };
+}
+
+function buildVersionedSystemMechanismFacts(
+  events: EvidenceEventV1[],
+  rejections: NormalizedRejection[],
+  currentPackageVersion: string,
+  generatedAt: string,
+): VersionedSystemMechanismFacts {
+  const versionCoverage = buildVersionCoverage(events, rejections, currentPackageVersion);
+  return {
+    currentPackageVersion,
+    versionCoverage,
+    buckets: VERSION_GROUPS,
+    sampleThresholds: {
+      rejectionFilters: VERSION_ANALYSIS_SAMPLE_THRESHOLD,
+      reinforcementRules: VERSION_ANALYSIS_SAMPLE_THRESHOLD,
+      evictionAndCaps: VERSION_ANALYSIS_SAMPLE_THRESHOLD,
+    },
+    rejectionFilters: buildVersionedRejectionFacts(rejections, currentPackageVersion),
+    reinforcementRules: buildVersionedReinforcementFacts(events, currentPackageVersion),
+    evictionAndCaps: buildVersionedEvictionFacts(events, currentPackageVersion, generatedAt),
+  };
+}
+
+function buildVersionedRejectionFacts(
+  records: NormalizedRejection[],
+  currentPackageVersion: string,
+): VersionedMechanismFacts<RejectionVersionFacts> {
+  const buckets = buildVersionBuckets(records, currentPackageVersion, bucketRecords => {
+    const candidateRecords = bucketRecords.filter(isReviewableRejectionCandidate);
+    const facts: RejectionVersionFacts = {
+      totalRecords: bucketRecords.length,
+      candidateRecords: candidateRecords.length,
+      byRawReasonCode: objectFromCounts(countBy(bucketRecords.flatMap(record => record.reasons))),
+      byType: objectFromCounts(countBy(bucketRecords.map(record => record.type))),
+      ambiguousOrArchitectureLike: candidateRecords.length,
+    };
+    return { facts, opportunityCount: candidateRecords.length, observedPatternCount: candidateRecords.length };
+  });
+  const base: Omit<VersionedMechanismFacts<RejectionVersionFacts>, "inference"> = {
+    currentPackageVersion,
+    opportunityName: "rejection candidates",
+    sampleThreshold: VERSION_ANALYSIS_SAMPLE_THRESHOLD,
+    buckets,
+  };
+  return {
+    ...base,
+    inference: computeVersionedInference(base, {
+      observedPattern: "rejected candidates",
+      patternName: "reviewable_rejection_candidate",
+    }),
+  };
+}
+
+function buildVersionedReinforcementFacts(
+  events: EvidenceEventV1[],
+  currentPackageVersion: string,
+): VersionedMechanismFacts<ReinforcementVersionFacts> {
+  const mechanismEvents = events.filter(event => isReinforcementEvent(event) || isMalformedCommandEvent(event));
+  const buckets = buildVersionBuckets(mechanismEvents, currentPackageVersion, bucketEvents => {
+    const attempts = bucketEvents.filter(isReinforcementEvent);
+    const facts = buildReinforcementFacts(bucketEvents) as ReinforcementVersionFacts;
+    return {
+      facts,
+      opportunityCount: attempts.length,
+      observedPatternCount: attempts.filter(event => event.reasonCodes.includes("reinforcement_window_blocked")).length,
+    };
+  });
+  const base: Omit<VersionedMechanismFacts<ReinforcementVersionFacts>, "inference"> = {
+    currentPackageVersion,
+    opportunityName: "attempts",
+    sampleThreshold: VERSION_ANALYSIS_SAMPLE_THRESHOLD,
+    buckets,
+  };
+  return {
+    ...base,
+    inference: computeVersionedInference(base, {
+      observedPattern: "blocked",
+      patternName: "reinforcement_window_blocked",
+    }),
+    ...diagnosticQuestionsProperty(buildReinforcementDiagnosticQuestions(mechanismEvents, currentPackageVersion)),
+  };
+}
+
+function diagnosticQuestionsProperty(questions: VersionedMechanismDiagnosticQuestion[]): { diagnosticQuestions?: VersionedMechanismDiagnosticQuestion[] } {
+  return questions.length > 0 ? { diagnosticQuestions: questions } : {};
+}
+
+function buildReinforcementDiagnosticQuestions(events: EvidenceEventV1[], currentPackageVersion: string): VersionedMechanismDiagnosticQuestion[] {
+  const matching = events
+    .filter(event => isReinforcementEvent(event)
+      && event.reasonCodes.includes("reinforcement_window_blocked")
+      && producerVersionGroupFor(event, currentPackageVersion) === "current"
+      && event.details?.blockReason === "same_session")
+    .map(event => {
+      const attemptedAtIso = stringDetail(event, "attemptedAtIso");
+      const lastReinforcedAtIso = stringDetail(event, "lastReinforcedAtIso");
+      return { event, attemptedAtIso, lastReinforcedAtIso };
+    })
+    .filter((item): item is { event: EvidenceEventV1; attemptedAtIso: string; lastReinforcedAtIso: string } =>
+      typeof item.attemptedAtIso === "string"
+      && typeof item.lastReinforcedAtIso === "string"
+      && isValidIsoDate(item.attemptedAtIso)
+      && isValidIsoDate(item.lastReinforcedAtIso)
+      && item.attemptedAtIso.slice(0, 10) !== item.lastReinforcedAtIso.slice(0, 10)
+    )
+    .sort((a, b) => compareIso(b.attemptedAtIso, a.attemptedAtIso) || a.event.eventId.localeCompare(b.event.eventId));
+
+  const representative = matching[0];
+  if (!representative) return [];
+  return [{
+    mechanism: "reinforcement_rule",
+    group: "current",
+    question: "Should same_session reinforcement blocking apply across UTC days?",
+    evidence: [
+      `count=${matching.length}`,
+      `eventId=${representative.event.eventId}`,
+      `attemptedAtIso=${representative.attemptedAtIso}`,
+      `lastReinforcedAtIso=${representative.lastReinforcedAtIso}`,
+    ],
+  }];
+}
+
+function buildVersionedEvictionFacts(
+  events: EvidenceEventV1[],
+  currentPackageVersion: string,
+  generatedAt: string,
+): VersionedMechanismFacts<EvictionVersionFacts> {
+  const capacityEvents = events.filter(event => event.type === "memory_removed_capacity");
+  const buckets = buildVersionBuckets(capacityEvents, currentPackageVersion, bucketEvents => {
+    const facts = buildEvictionVersionFacts(bucketEvents, generatedAt);
+    return {
+      facts,
+      opportunityCount: bucketEvents.length,
+      observedPatternCount: facts.capacitySnapshotsMissing,
+    };
+  });
+  const base: Omit<VersionedMechanismFacts<EvictionVersionFacts>, "inference"> = {
+    currentPackageVersion,
+    opportunityName: "capacity removals",
+    sampleThreshold: VERSION_ANALYSIS_SAMPLE_THRESHOLD,
+    buckets,
+  };
+  return {
+    ...base,
+    inference: computeVersionedInference(base, {
+      observedPattern: "missing snapshots",
+      patternName: "capacity_snapshot_missing",
+    }),
+  };
+}
+
+function buildVersionBuckets<TRecord extends ProducerBearingRecord, TFacts>(
+  records: TRecord[],
+  currentPackageVersion: string,
+  summarize: (records: TRecord[]) => { facts: TFacts; opportunityCount: number; observedPatternCount: number },
+): Record<ProducerVersionGroup, VersionBucketFacts<TFacts>> {
+  const grouped = Object.fromEntries(VERSION_GROUPS.map(group => [group, []])) as Record<ProducerVersionGroup, TRecord[]>;
+  for (const record of records) grouped[producerVersionGroupFor(record, currentPackageVersion)].push(record);
+  return Object.fromEntries(VERSION_GROUPS.map(group => {
+    const bucketRecords = grouped[group];
+    const summary = summarize(bucketRecords);
+    return [group, {
+      group,
+      label: versionGroupLabel(group, currentPackageVersion),
+      opportunityCount: summary.opportunityCount,
+      observedPatternCount: summary.observedPatternCount,
+      producerVersions: producerVersionCounts(bucketRecords),
+      versionAvailability: buildVersionAvailability(bucketRecords),
+      answerabilityLevel: group === "current" && summary.opportunityCount > 0 ? "partial" : "inventory_only",
+      sampleAssessment: sampleAssessmentFor(group, summary.opportunityCount, summary.observedPatternCount, currentPackageVersion),
+      facts: summary.facts,
+    } satisfies VersionBucketFacts<TFacts>];
+  })) as Record<ProducerVersionGroup, VersionBucketFacts<TFacts>>;
+}
+
+function buildEvictionVersionFacts(capacityEvents: EvidenceEventV1[], generatedAt: string): EvictionVersionFacts {
+  const recentCapacityEvents = capacityEvents.filter(event => isWithinDaysOf(event.createdAt, generatedAt, RECENT_EVICTION_DAYS));
+  const capacityEventsWithSnapshot = capacityEvents.filter(hasCapacitySnapshot);
+  const capacityEventsWithRank = capacityEvents.filter(event => numberDetail(event, "rankAtRemoval") !== undefined);
+  const highestRankRemovedEvent = [...capacityEventsWithRank]
+    .sort((a, b) => (numberDetail(a, "rankAtRemoval") ?? Number.POSITIVE_INFINITY) - (numberDetail(b, "rankAtRemoval") ?? Number.POSITIVE_INFINITY))[0];
+  return {
+    removedByCapacity: capacityEvents.length,
+    removedByGlobalCap: capacityEvents.filter(event => event.reasonCodes.includes("global_cap")).length,
+    removedByTypeCap: capacityEvents.filter(event => event.reasonCodes.includes("type_cap")).length,
+    recentEvictionsByType: objectFromCounts(countBy(recentCapacityEvents.map(event => event.memory?.type ?? "unknown"))),
+    recentCapacityRemovalsWithSnapshot: capacityEventsWithSnapshot.length,
+    capacitySnapshotsMissing: capacityEvents.length - capacityEventsWithSnapshot.length,
+    ...(highestRankRemovedEvent ? { highestRankRemoved: highestRankRemoved(highestRankRemovedEvent) } : {}),
+  };
+}
+
+function isReviewableRejectionCandidate(record: NormalizedRejection): boolean {
+  if (!record.reasons.includes("bad_decision")) return false;
+  const label = neutralRejectionLabel(record);
+  return label === "architecture_like_rejected_candidate" || label === "ambiguous_rejected_candidate";
+}
+
+function producerVersionCounts(records: ProducerBearingRecord[]): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const record of records) {
+    if (!hasKnownProducerVersion(record)) continue;
+    const version = String(record.producerVersion).trim();
+    counts[version] = (counts[version] ?? 0) + 1;
+  }
+  return counts;
+}
+
+function versionGroupLabel(group: ProducerVersionGroup, currentPackageVersion: string): string {
+  if (group === "current") return `current version ${currentPackageVersion}`;
+  if (group === "previous") return "previous versions";
+  return "unknown/unversioned";
+}
+
+function sampleAssessmentFor(
+  group: ProducerVersionGroup,
+  opportunityCount: number,
+  observedPatternCount: number,
+  currentPackageVersion: string,
+): VersionSampleAssessment {
+  if (observedPatternCount > 0) return "observed";
+  if (group === "current" && (!isAssessableCurrentPackageVersion(currentPackageVersion) || opportunityCount === 0)) return "no_current_version_opportunities";
+  if (opportunityCount < VERSION_ANALYSIS_SAMPLE_THRESHOLD) return "not_observed_but_sample_small";
+  return "not_observed_with_sufficient_sample";
+}
+
+function isAssessableCurrentPackageVersion(currentPackageVersion: string): boolean {
+  const trimmed = currentPackageVersion.trim();
+  return trimmed.length > 0 && trimmed !== "unknown";
+}
+
+function computeVersionedInference<TFacts>(
+  mechanism: Omit<VersionedMechanismFacts<TFacts>, "inference">,
+  text: { observedPattern: string; patternName: string },
+): VersionedMechanismInference {
+  const current = mechanism.buckets.current;
+  const previous = mechanism.buckets.previous;
+  const currentFact = `Current version: ${current.observedPatternCount} ${text.observedPattern} in ${current.opportunityCount} ${mechanism.opportunityName}.`;
+  const previousFact = `Previous versions: ${previous.observedPatternCount} ${text.observedPattern} in ${previous.opportunityCount} ${mechanism.opportunityName}.`;
+  const unknownUnversioned = mechanism.buckets.unknown_unversioned;
+  if (!isAssessableCurrentPackageVersion(mechanism.currentPackageVersion) || current.opportunityCount === 0) {
+    return inference("no_current_version_opportunities", "Current package version is unknown or has no events; cannot assess recurrence.");
+  }
+  if (current.observedPatternCount > 0 && previous.observedPatternCount === 0 && unknownUnversioned.observedPatternCount === 0) {
+    return inference("no_previous_pattern_observed", `${currentFact} No previous pattern observed — this is a new pattern, not a recurrence.`);
+  }
+  if (current.observedPatternCount > 0) {
+    if (previous.observedPatternCount > 0) {
+      return inference("pattern_persists_across_versions", `${currentFact} ${previousFact} Current recurrence detected — ${text.patternName} observed in current version. Pattern persists across versions.`);
+    }
+    // Current has signal, previous has none, but unknown/unversioned has signal
+    return inference("current_recurrence_detected", `${currentFact} No known previous-version pattern observed, but unknown/unversioned evidence shows ${unknownUnversioned.observedPatternCount} ${text.observedPattern}. Pattern may persist — version grouping cannot confirm or deny.`);
+  }
+  if (current.opportunityCount < mechanism.sampleThreshold) {
+    return inference("no_current_evidence_sample_small", `${currentFact} ${previousFact} No current evidence observed, but current-version opportunity count is ${current.opportunityCount} (<${mechanism.sampleThreshold}); do not infer absence.`);
+  }
+  return inference("no_current_evidence_observed", `${currentFact} ${previousFact} No recurrence observed with sufficient current-version sample.`);
+}
+
+function inference(status: VersionedMechanismInference["status"], message: string): VersionedMechanismInference {
+  return { status, message, caveat: VERSION_GROUPING_CAVEAT };
+}
+
+function hasProducerFields(record: Pick<EvidenceEventV1, "producerName" | "producerVersion" | "instrumentationVersion"> | Pick<NormalizedRejection, "producerName" | "producerVersion" | "instrumentationVersion">): boolean {
+  return typeof record.producerName === "string"
+    && record.producerName.length > 0
+    && typeof record.producerVersion === "string"
+    && record.producerVersion.length > 0
+    && typeof record.instrumentationVersion === "number";
+}
+
+type ProducerBearingRecord = Pick<EvidenceEventV1 | NormalizedRejection, "producerName" | "producerVersion" | "instrumentationVersion">;
+
+export function hasKnownProducerVersion(record: ProducerBearingRecord): boolean {
+  if (typeof record.producerVersion !== "string") return false;
+  const producerVersion = record.producerVersion.trim();
+  return producerVersion.length > 0 && producerVersion !== "unknown";
+}
+
+export function producerVersionGroupFor(record: ProducerBearingRecord, currentPackageVersion: string): ProducerVersionGroup {
+  if (!hasKnownProducerVersion(record)) return "unknown_unversioned";
+  const producerVersion = String(record.producerVersion).trim();
+  const currentVersion = currentPackageVersion.trim();
+  if (currentVersion.length > 0 && currentVersion !== "unknown" && producerVersion === currentVersion) return "current";
+  return "previous";
+}
+
+function buildVersionAvailability(records: ProducerBearingRecord[]): VersionAvailability {
+  const availability: VersionAvailability = {
+    noProducerFields: 0,
+    unknownProducerVersion: 0,
+    emptyProducerVersion: 0,
+    knownProducerVersion: 0,
+  };
+  for (const record of records) {
+    const hasAnyProducerField = typeof record.producerName === "string"
+      || typeof record.producerVersion === "string"
+      || typeof record.instrumentationVersion === "number";
+    if (!hasAnyProducerField) {
+      availability.noProducerFields += 1;
+      continue;
+    }
+    if (typeof record.producerVersion !== "string" || record.producerVersion.trim().length === 0) {
+      availability.emptyProducerVersion += 1;
+      continue;
+    }
+    if (record.producerVersion.trim() === "unknown") {
+      availability.unknownProducerVersion += 1;
+      continue;
+    }
+    availability.knownProducerVersion += 1;
+  }
+  return availability;
+}
+
+function buildVersionCoverage(events: EvidenceEventV1[], rejections: NormalizedRejection[], currentPackageVersion: string): VersionCoverage {
+  const coverage: VersionCoverage = {
+    totalEvents: events.length + rejections.length,
+    currentVersionEvents: 0,
+    previousVersionEvents: 0,
+    unknownVersionEvents: 0,
+    coveragePercent: 0,
+    isTransitional: true,
+  };
+  for (const record of [...events, ...rejections]) {
+    const group = producerVersionGroupFor(record, currentPackageVersion);
+    if (group === "current") coverage.currentVersionEvents += 1;
+    if (group === "previous") coverage.previousVersionEvents += 1;
+    if (group === "unknown_unversioned") coverage.unknownVersionEvents += 1;
+  }
+  coverage.coveragePercent = coverage.totalEvents === 0
+    ? 0
+    : Math.round(((coverage.currentVersionEvents + coverage.previousVersionEvents) / coverage.totalEvents) * 1000) / 10;
+  coverage.isTransitional = coverage.coveragePercent < 50;
+  return coverage;
 }
 
 function typeCountsFor(entries: LongTermMemoryEntry[]): Record<string, number> {
@@ -381,9 +1018,22 @@ function provenance(classification: ProvenanceClassification, confidence: Candid
   };
 }
 
-function hasWorkspaceScope(record: NormalizedRejection): boolean {
-  return Boolean(record.workspaceKey || record.workspaceRoot || record.workspaceRootHash);
+function versionContextFor(record: ProducerBearingRecord | undefined, currentPackageVersion: string): ReviewBoardCandidate["versionContext"] | undefined {
+  if (!record) return undefined;
+  const group = producerVersionGroupFor(record, currentPackageVersion);
+  const producerVersion = typeof record.producerVersion === "string" ? record.producerVersion.trim() : undefined;
+  return {
+    group,
+    currentPackageVersion,
+    ...(producerVersion ? { producerVersion } : {}),
+    basis: group === "current"
+      ? "producerVersion matches current package version"
+      : group === "previous"
+        ? "producerVersion differs from current package version"
+        : "producerVersion is missing, unknown, or empty",
+  };
 }
+
 
 function compareIso(a: string, b: string): number {
   const aTime = new Date(a).getTime();
@@ -414,6 +1064,9 @@ function buildReinforcementFacts(events: EvidenceEventV1[]): ReviewBoardReport["
   const attempts = events.filter(isReinforcementEvent);
   const windowBlocked = attempts.filter(event => event.reasonCodes.includes("reinforcement_window_blocked"));
   const grouped = new Map<string, { memoryId: string; count: number; refs: Set<string>; rawReasonCodes: Set<string>; eventIds: string[] }>();
+  const blocksByExactReason: Record<string, number> = {};
+  const windowBlocksByUtcDay: Record<string, number> = {};
+  let blockDetailsMissing = 0;
   for (const event of windowBlocked) {
     const memoryId = event.memory?.memoryId ?? "unknown";
     const current = grouped.get(memoryId) ?? { memoryId, count: 0, refs: new Set<string>(), rawReasonCodes: new Set<string>(), eventIds: [] };
@@ -423,6 +1076,15 @@ function buildReinforcementFacts(events: EvidenceEventV1[]): ReviewBoardReport["
     if (ref) current.refs.add(ref);
     for (const reason of event.reasonCodes) current.rawReasonCodes.add(reason);
     grouped.set(memoryId, current);
+
+    const blockReason = typeof event.details?.blockReason === "string" ? event.details.blockReason : undefined;
+    if (blockReason) {
+      blocksByExactReason[blockReason] = (blocksByExactReason[blockReason] ?? 0) + 1;
+      const utcDay = event.createdAt?.slice(0, 10) || "unknown";
+      windowBlocksByUtcDay[utcDay] = (windowBlocksByUtcDay[utcDay] ?? 0) + 1;
+    } else {
+      blockDetailsMissing += 1;
+    }
   }
 
   return {
@@ -435,6 +1097,9 @@ function buildReinforcementFacts(events: EvidenceEventV1[]): ReviewBoardReport["
       .filter(group => group.count > 1)
       .sort((a, b) => b.count - a.count || a.memoryId.localeCompare(b.memoryId))
       .map(group => ({ memoryId: group.memoryId, count: group.count, refs: [...group.refs].sort(), rawReasonCodes: [...group.rawReasonCodes].sort() })),
+    blocksByExactReason,
+    windowBlocksByUtcDay,
+    blockDetailsMissing,
     malformedCommandEvents: events.filter(isMalformedCommandEvent).length,
   };
 }
@@ -462,6 +1127,10 @@ function buildEvictionFacts(
 ): ReviewBoardReport["facts"]["systemMechanisms"]["evictionAndCaps"] {
   const capacityEvents = model.evidenceEvents.filter(event => event.type === "memory_removed_capacity");
   const recentCapacityEvents = capacityEvents.filter(event => isWithinDaysOf(event.createdAt, generatedAt, RECENT_EVICTION_DAYS));
+  const capacityEventsWithSnapshot = capacityEvents.filter(hasCapacitySnapshot);
+  const capacityEventsWithRank = capacityEvents.filter(event => numberDetail(event, "rankAtRemoval") !== undefined);
+  const highestRankRemovedEvent = [...capacityEventsWithRank]
+    .sort((a, b) => (numberDetail(a, "rankAtRemoval") ?? Number.POSITIVE_INFINITY) - (numberDetail(b, "rankAtRemoval") ?? Number.POSITIVE_INFINITY))[0];
   const fullCaps = [
     ...(activeMemories.length >= model.store.limits.maxEntries ? ["global"] : []),
     ...TYPES.filter(type => (typeCounts[type] ?? 0) >= (typeCaps[type] ?? Number.POSITIVE_INFINITY)),
@@ -481,7 +1150,42 @@ function buildEvictionFacts(
     removedByTypeCap: capacityEvents.filter(event => event.reasonCodes.includes("type_cap")).length,
     recentEvictionsByType: objectFromCounts(countBy(recentCapacityEvents.map(event => event.memory?.type ?? "unknown"))),
     recentEvictedContentShown: recentCapacityEvents.length,
+    recentCapacityRemovalsWithSnapshot: capacityEventsWithSnapshot.length,
+    capacitySnapshotsMissing: capacityEvents.length - capacityEventsWithSnapshot.length,
+    ...(highestRankRemovedEvent ? { highestRankRemoved: highestRankRemoved(highestRankRemovedEvent) } : {}),
   };
+}
+
+function hasCapacitySnapshot(event: EvidenceEventV1): boolean {
+  return event.type === "memory_removed_capacity"
+    && numberDetail(event, "strengthAtRemoval") !== undefined
+    && numberDetail(event, "rankAtRemoval") !== undefined;
+}
+
+function highestRankRemoved(event: EvidenceEventV1): NonNullable<ReviewBoardReport["facts"]["systemMechanisms"]["evictionAndCaps"]["highestRankRemoved"]> {
+  const rankAtRemoval = numberDetail(event, "rankAtRemoval") ?? Number.POSITIVE_INFINITY;
+  const strengthAtRemoval = numberDetail(event, "strengthAtRemoval");
+  return {
+    ...(event.memory?.memoryId ? { memoryId: event.memory.memoryId } : {}),
+    rankAtRemoval,
+    ...(strengthAtRemoval !== undefined ? { strengthAtRemoval } : {}),
+    ...(event.memory?.type ? { type: event.memory.type } : {}),
+    eventId: event.eventId,
+  };
+}
+
+function numberDetail(event: EvidenceEventV1, key: string): number | undefined {
+  const value = event.details?.[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function stringDetail(event: EvidenceEventV1, key: string): string | undefined {
+  const value = event.details?.[key];
+  return typeof value === "string" && value.trim().length > 0 ? value : undefined;
+}
+
+function isValidIsoDate(value: string): boolean {
+  return Number.isFinite(new Date(value).getTime()) && /^\d{4}-\d{2}-\d{2}/.test(value);
 }
 
 function isWithinDaysOf(iso: string, referenceIso: string, days: number): boolean {
@@ -638,7 +1342,7 @@ function buildSystemCandidateDisplay(
   return { candidates, limited, summary: { shown, total, byMechanism } };
 }
 
-function buildRejectionCandidates(records: NormalizedRejection[], context: ProvenanceContextInputs, raw: boolean): DatedCandidateInput[] {
+function buildRejectionCandidates(records: NormalizedRejection[], context: ProvenanceContextInputs, raw: boolean, currentPackageVersion: string): DatedCandidateInput[] {
   const candidateRecords = records
     .filter(record => record.reasons.includes("bad_decision"))
     .map(record => ({ record, label: neutralRejectionLabel(record) }))
@@ -660,7 +1364,8 @@ function buildRejectionCandidates(records: NormalizedRejection[], context: Prove
         facts: { type: record.type, neutralLabel: label, timestamp: record.timestamp || undefined, origin: record.origin },
         evidence: { rawReasonCodes: record.reasons, textPreview: truncate(cleanText(record.text, raw), 120), textAvailable: true },
         provenance: classifyProvenance({ rejection: record }, context),
-        heuristicFlags: [flag(label, label.replaceAll("_", " "), "existing rejection summary grouped this record for human review")],
+        versionContext: versionContextFor(record, currentPackageVersion),
+        heuristicFlags: [],
         reviewQuestions: ["Are rejection filters over-filtering durable decisions or under-filtering non-durable candidates for this workspace?"],
         nextCommands: ["memory-diag rejected --verbose"],
       }),
@@ -680,7 +1385,7 @@ function neutralRejectionLabel(record: NormalizedRejection): "architecture_like_
   return "ambiguous_rejected_candidate";
 }
 
-function buildReabsorptionCandidates(matches: ReabsorbedMatch[], context: ProvenanceContextInputs, raw: boolean): DatedCandidateInput[] {
+function buildReabsorptionCandidates(matches: ReabsorbedMatch[], context: ProvenanceContextInputs, raw: boolean, currentPackageVersion: string): DatedCandidateInput[] {
   const candidates = matches.map(match => ({
     candidate: candidate({
       concernKind: "system_mechanism",
@@ -690,7 +1395,8 @@ function buildReabsorptionCandidates(matches: ReabsorbedMatch[], context: Proven
       facts: { activeMemoryId: match.activeMemory.id, type: match.activeMemory.type, rejectedAt: match.record.timestamp || undefined },
       evidence: { rawReasonCodes: match.record.reasons, textPreview: truncate(cleanText(match.record.text, raw), 120), textAvailable: true },
       provenance: classifyProvenance({ rejection: match.record, reabsorbed: true }, context),
-      heuristicFlags: [flag("reabsorbed_rejected_text", "Rejected text appears in active memory", "typed canonical text is present in both rejection records and active memory")],
+      versionContext: versionContextFor(match.record, currentPackageVersion),
+      heuristicFlags: [],
       reviewQuestions: ["Did later context make this rejected candidate worth reviewing for filter calibration?"],
       nextCommands: ["memory-diag rejected --verbose", `memory-diag explain ${match.activeMemory.id}`],
     }),
@@ -701,7 +1407,7 @@ function buildReabsorptionCandidates(matches: ReabsorbedMatch[], context: Proven
   return candidates;
 }
 
-function buildReinforcementCandidates(events: EvidenceEventV1[], context: ProvenanceContextInputs, raw: boolean): DatedCandidateInput[] {
+function buildReinforcementCandidates(events: EvidenceEventV1[], context: ProvenanceContextInputs, raw: boolean, currentPackageVersion: string): DatedCandidateInput[] {
   const blocked = events.filter(event => isReinforcementEvent(event) && event.reasonCodes.includes("reinforcement_window_blocked"));
   const grouped = [...groupBy(blocked, event => event.memory?.memoryId ?? "unknown").entries()].map(([memoryId, group]) => ({ memoryId, group }));
   const repeated = grouped.filter(item => item.group.length > 1).map(item => {
@@ -715,8 +1421,9 @@ function buildReinforcementCandidates(events: EvidenceEventV1[], context: Proven
         facts: { memoryId: item.memoryId, blockCount: item.group.length, refs: uniqueStrings(item.group.map(event => String(event.details?.ref ?? "")).filter(Boolean)).sort() },
         evidence: { eventIds: item.group.map(event => event.eventId), rawReasonCodes: uniqueStrings(item.group.flatMap(event => event.reasonCodes)).sort(), textAvailable: false },
         provenance: classifyProvenance({ event: latest }, context),
-        heuristicFlags: [flag("repeated_reinforcement_window_block", "Repeated reinforcement window block", `${item.group.length} reinforcement attempts were blocked for memory ${item.memoryId}`)],
-        reviewQuestions: ["Is the day-based reinforcement window too restrictive when the same memory receives repeated reinforce intent?"],
+        versionContext: versionContextFor(latest, currentPackageVersion),
+        heuristicFlags: [flag("repeated_reinforcement_window_block", "Repeated reinforcement window block inventory", `${item.group.length} reinforcement attempts were blocked for memory ${item.memoryId}`)],
+        reviewQuestions: ["What reinforcement block patterns are present for repeated reinforce intent?"],
         nextCommands: ["memory-diag commands --verbose", `memory-diag explain ${item.memoryId}`],
       }),
       timestamp: latest?.createdAt,
@@ -733,6 +1440,7 @@ function buildReinforcementCandidates(events: EvidenceEventV1[], context: Proven
       facts: { eventType: event.type, createdAt: event.createdAt },
       evidence: { eventIds: [event.eventId], rawReasonCodes: event.reasonCodes, textPreview: event.textPreview ? truncate(cleanText(event.textPreview, raw), 120) : undefined, textAvailable: Boolean(event.textPreview) },
       provenance: classifyProvenance({ event }, context),
+      versionContext: versionContextFor(event, currentPackageVersion),
       heuristicFlags: [flag("malformed_numbered_command", "Malformed numbered-memory command evidence", "command parser rejected a memory command form")],
       reviewQuestions: ["Do numbered-memory command rules match how agents actually express reinforcement intent?"],
       nextCommands: ["memory-diag commands --verbose"],
@@ -750,6 +1458,7 @@ function buildEvictionCandidates(
   context: ProvenanceContextInputs,
   raw: boolean,
   generatedAt: string,
+  currentPackageVersion: string,
 ): DatedCandidateInput[] {
   const recentCapacity = events.filter(event => event.type === "memory_removed_capacity" && isWithinDaysOf(event.createdAt, generatedAt, RECENT_EVICTION_DAYS));
   const capacityCandidates = recentCapacity.map(event => ({
@@ -761,8 +1470,9 @@ function buildEvictionCandidates(
       facts: { ...(safeDetails(event.details, raw) ?? {}), createdAt: event.createdAt, memoryId: event.memory?.memoryId, type: event.memory?.type },
       evidence: { eventIds: [event.eventId], rawReasonCodes: event.reasonCodes, textPreview: event.textPreview ? truncate(cleanText(event.textPreview, raw), 120) : undefined, textAvailable: Boolean(event.textPreview) },
       provenance: classifyProvenance({ event }, context),
-      heuristicFlags: [flag("recent_capacity_removal", "Recent capacity-removal evidence", "memory_removed_capacity appeared within the recent eviction window")],
-      reviewQuestions: ["Are eviction and cap rules preserving the intended memories under pressure?"],
+      versionContext: versionContextFor(event, currentPackageVersion),
+      heuristicFlags: [flag("recent_capacity_removal", "Recent capacity-removal inventory", "memory_removed_capacity appeared within the recent eviction window")],
+      reviewQuestions: ["What capacity-removal inventory is present for this memory?"],
       nextCommands: ["memory-diag missing --verbose --explain"],
     }),
     timestamp: event.createdAt,
@@ -783,8 +1493,9 @@ function buildEvictionCandidates(
           facts: { memoryId: row.id, terminalType: row.terminalType, eventCount: row.events.length },
           evidence: { eventIds: row.events.map(event => event.eventId), rawReasonCodes: uniqueStrings(row.events.flatMap(event => event.reasonCodes)).sort(), textPreview: latest?.textPreview ? truncate(cleanText(latest.textPreview, raw), 120) : undefined, textAvailable: Boolean(latest?.textPreview) },
           provenance: classifyProvenance({ event: latest }, context),
-          heuristicFlags: [flag("unknown_disappearance", "Evidence-only disappearance without terminal removal evidence", `memory ${row.id} has evidence but is not active`)],
-          reviewQuestions: ["Does missing-memory evidence indicate a cap, retention, or recording rule needs review?"],
+          versionContext: versionContextFor(latest, currentPackageVersion),
+          heuristicFlags: [flag("unknown_disappearance", "Unversioned disappearance inventory", `memory ${row.id} has evidence but is not active`)],
+          reviewQuestions: ["What unversioned disappearance inventory exists for this memory?"],
           nextCommands: ["memory-diag missing --verbose --explain"],
         }),
         timestamp: latest?.createdAt,
@@ -800,7 +1511,7 @@ function safeDetails(details: EvidenceEventV1["details"], raw: boolean): Record<
   return Object.fromEntries(Object.entries(details).map(([key, value]) => [key, typeof value === "string" ? cleanText(value, raw) : value]));
 }
 
-function buildIdentityCandidates(model: MemoryInspectionReadModel, activeMemories: LongTermMemoryEntry[], context: ProvenanceContextInputs, raw: boolean): DatedCandidateInput[] {
+function buildIdentityCandidates(model: MemoryInspectionReadModel, activeMemories: LongTermMemoryEntry[], context: ProvenanceContextInputs, raw: boolean, currentPackageVersion: string): DatedCandidateInput[] {
   const replacementCandidates = model.evidenceEvents
     .filter(event => event.type === "memory_replaced_numbered_ref" || event.type === "promotion_superseded")
     .map(event => ({
@@ -812,7 +1523,8 @@ function buildIdentityCandidates(model: MemoryInspectionReadModel, activeMemorie
         facts: { eventType: event.type, memoryId: event.memory?.memoryId, relationRoles: event.relations?.map(relation => relation.role) ?? [] },
         evidence: { eventIds: [event.eventId], rawReasonCodes: event.reasonCodes, textPreview: event.textPreview ? truncate(cleanText(event.textPreview, raw), 120) : undefined, textAvailable: Boolean(event.textPreview) },
         provenance: classifyProvenance({ event }, context),
-        heuristicFlags: [flag("replacement_or_supersession", "Replacement or supersession evidence", `${event.type} records identity/dedup behavior`)],
+        versionContext: versionContextFor(event, currentPackageVersion),
+        heuristicFlags: [],
         reviewQuestions: ["Are identity and dedup rules preserving separate memories when expected to remain distinct?"],
         nextCommands: ["memory-diag commands --verbose", event.memory?.memoryId ? `memory-diag explain ${event.memory.memoryId}` : "memory-diag missing --verbose --explain"],
       }),
@@ -829,7 +1541,7 @@ function buildIdentityCandidates(model: MemoryInspectionReadModel, activeMemorie
       facts: { memoryIds: group.memoryIds, basis: group.basis },
       evidence: { eventIds: group.memoryIds.flatMap(id => (model.evidenceByMemoryId.get(id) ?? []).map(event => event.eventId)), rawReasonCodes: [], textAvailable: false },
       provenance: classifyProvenance({}, context),
-      heuristicFlags: [flag("exact_duplicate_group", "Exact duplicate text or identity group", `${group.memoryIds.length} memories share ${group.basis}`)],
+      heuristicFlags: [],
       reviewQuestions: ["Are exact duplicate text or identity groups expected for this workspace?"],
       nextCommands: group.memoryIds.map(id => `memory-diag explain ${id}`).slice(0, 3),
     }),
@@ -893,8 +1605,8 @@ function flag(id: string, label: string, evidence: string): HeuristicFlag {
 function systemMechanismQuestions(): string[] {
   return [
     "Are rejection rules over-filtering durable decisions or under-filtering non-durable candidates for this workspace?",
-    "Is the reinforcement window too restrictive when the same memory receives repeated reinforce intent?",
-    "Are eviction and cap rules preserving target memories under full caps?",
+    "What block patterns are present for repeated reinforcement intent?",
+    "What cap occupancy and capacity-removal inventory is present?",
     "Are identity and dedup rules collapsing items expected to remain separate, or not collapsing equivalent items?",
   ];
 }

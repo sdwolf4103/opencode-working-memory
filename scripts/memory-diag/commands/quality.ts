@@ -8,7 +8,6 @@ export async function runQuality(options: CliOptions): Promise<CommandResult> {
   const report = buildQualityReviewBoard(model, {
     verbose: options.verbose,
     raw: options.raw,
-    noEmoji: options.noEmoji,
     json: options.json,
   });
 
@@ -16,5 +15,5 @@ export async function runQuality(options: CliOptions): Promise<CommandResult> {
     return { stdout: JSON.stringify(buildQualityJSON(report, options.raw), null, 2) };
   }
 
-  return { stdout: formatQualityReviewBoard(report, { verbose: options.verbose, noEmoji: options.noEmoji }) };
+  return { stdout: formatQualityReviewBoard(report, { verbose: options.verbose }) };
 }

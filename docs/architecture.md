@@ -55,6 +55,30 @@ Long-term memory that persists across sessions within the same workspace. Perfec
   }
   ```
 
+### Evidence Log Schema
+
+Workspace diagnostics also read the append-only evidence log for the current workspace. New evidence records are additive and keep historical records valid:
+
+```typescript
+{
+  version: 1,
+  eventId: string,
+  createdAt: string,
+  workspaceKey: string,
+  workspaceRootHash: string,
+  producerName?: string,
+  producerVersion?: string,
+  instrumentationVersion?: number,
+  type: EvidenceEventType,
+  phase: EvidencePhase,
+  outcome: EvidenceOutcome,
+  reasonCodes: string[],
+  details?: Record<string, string | number | boolean | null | string[] | number[]>
+}
+```
+
+Instrumentation version 2 adds optional causal details for future diagnostics without backfilling old JSONL records. Reinforcement-block events may include `details.blockReason` (for example `same_session` or `same_utc_day`). Capacity-removal events may include `details.strengthAtRemoval`, `details.rankAtRemoval`, `details.typeRankAtRemoval`, and `details.ageDaysAtRemoval`. `memory-diag quality` treats missing producer/instrumentation fields as historical or ambiguous rather than proof of current behavior.
+
 ### Entry Types
 
 | Type | Purpose | Example |
