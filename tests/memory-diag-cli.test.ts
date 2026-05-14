@@ -126,6 +126,16 @@ test("commands accepts workspace json and verbose flags", () => {
   assert.equal("options" in parsed && parsed.options.verbose, true);
 });
 
+test("commands accepts memory drill-down selector", () => {
+  const parsed = parseArgs(["commands", "--workspace", "/tmp/workspace", "--memory", "mem-1", "--json", "--verbose"]);
+
+  assert.equal(parsed.ok, true);
+  assert.equal("command" in parsed && parsed.command, "commands");
+  assert.equal("options" in parsed && parsed.options.memory, "mem-1");
+  assert.equal("options" in parsed && parsed.options.json, true);
+  assert.equal("options" in parsed && parsed.options.verbose, true);
+});
+
 test("revert accepts memory or event selectors and apply flag", () => {
   const byMemory = parseArgs(["revert", "--memory", "mem-new", "--workspace", "/tmp/workspace", "--apply"]);
   assert.equal(byMemory.ok, true);

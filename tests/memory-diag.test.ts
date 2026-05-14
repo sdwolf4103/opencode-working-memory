@@ -123,6 +123,74 @@ function replacementEvidence(original: LongTermMemoryEntry, replacement: LongTer
   });
 }
 
+const attributionSafetyTerms = [
+  "b" + "ug",
+  "fix" + "ed",
+  "incor" + "rect",
+  "wrong" + "ly blocked",
+  "caused memory" + " loss",
+  "prevent" + "ed retention",
+  "should" + " allow",
+  "policy" + " failure",
+  "regres" + "sion",
+];
+
+function assertNoAttributionSafetyTerms(text: string): void {
+  for (const term of attributionSafetyTerms) {
+    assert.doesNotMatch(text, new RegExp(term, "i"));
+  }
+}
+
+async function setupMemoryCommandDetailFixture(root: string): Promise<void> {
+  await writeWorkspaceStore(root, [
+    { ...entry("mem-detail", "Detail drill-down memory remains current", "decision"), source: "explicit" as const },
+  ]);
+  await appendEvidenceEvents(root, [
+    evidence({
+      type: "memory_reinforced",
+      phase: "reinforcement",
+      outcome: "reinforced",
+      memory: { memoryId: "mem-detail", type: "decision", source: "explicit", status: "active" },
+      reasonCodes: ["numbered_ref_reinforce", "reinforcement_window_allowed"],
+      details: { ref: "M3", attemptedAtIso: "2026-05-12T23:55:00.000Z", reinforcedAtIso: "2026-05-12T23:55:01.000Z" },
+      sessionHash: "command-session-one",
+      messageHash: "command-message-one",
+    }),
+    evidence({
+      type: "memory_reinforced",
+      phase: "reinforcement",
+      outcome: "rejected",
+      memory: { memoryId: "mem-detail", type: "decision", source: "explicit", status: "active" },
+      reasonCodes: ["numbered_ref_reinforce", "reinforcement_window_blocked", "reinforcement_block_same_session"],
+      details: {
+        ref: "M3",
+        blockReason: "same_session",
+        attemptedAtIso: "2026-05-13T00:05:00.000Z",
+        lastReinforcedAtIso: "2026-05-12T23:55:01.000Z",
+      },
+      sessionHash: "command-session-one",
+      messageHash: "command-message-two",
+    }),
+    evidence({
+      type: "memory_reinforced",
+      phase: "reinforcement",
+      outcome: "rejected",
+      memory: { memoryId: "mem-detail", type: "decision", source: "explicit", status: "active" },
+      reasonCodes: ["numbered_ref_reinforce", "reinforcement_window_blocked"],
+      details: { ref: "M3", attemptedAtIso: "2026-05-13T00:06:00.000Z" },
+      sessionHash: "command-session-two",
+      messageHash: "command-message-three",
+    }),
+    evidence({
+      type: "render_selected",
+      phase: "render",
+      outcome: "rendered",
+      memory: { memoryId: "mem-detail", type: "decision", source: "explicit", status: "active" },
+      reasonCodes: ["within_caps", "within_char_budget"],
+    }),
+  ]);
+}
+
 test("status handles missing workspace store as empty", async () => {
   const root = mkdtempSync(join(tmpdir(), "opencode-memory-diag-missing-health-"));
   try {
@@ -397,6 +465,93 @@ test("memory-diag commands json exposes protected replacement counts", async () 
     assert.equal(parsed.commands.replace, 2);
     assert.equal(parsed.commands.reinforce, 0);
     assert.equal(parsed.outcomes.rejected, 2);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("memory-diag commands memory selector prints reinforcement detail", async () => {
+  const root = await mkdtemp(join(tmpdir(), "opencode-memory-diag-commands-memory-"));
+  try {
+    await setupMemoryCommandDetailFixture(root);
+
+    const stdout = await runMemoryDiag(["commands", "--memory", "mem-detail", "--workspace", root]);
+
+    assert.match(stdout, /Memory command diagnostics for mem-detail/);
+    assert.match(stdout, /Current memory:/);
+    assert.match(stdout, /status: active/);
+    assert.match(stdout, /render: rendered/);
+    assert.match(stdout, /Reinforcement summary:/);
+    assert.match(stdout, /attempts: 3/);
+    assert.match(stdout, /reinforced: 1/);
+    assert.match(stdout, /rejected\/blocked: 2/);
+    assert.match(stdout, /window blocked: 2/);
+    assert.match(stdout, /block reasons: same_session=1, unknown=1/);
+    assert.match(stdout, /block details missing: 1/);
+    assert.match(stdout, /same-session cross UTC day blocks: 1/);
+    assert.match(stdout, /refs: M3/);
+    assert.match(stdout, /crossUtcDay=yes/);
+    assert.doesNotMatch(stdout, /render_selected/);
+    assertNoAttributionSafetyTerms(stdout);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("memory-diag commands memory selector emits stable JSON", async () => {
+  const root = await mkdtemp(join(tmpdir(), "opencode-memory-diag-commands-memory-json-"));
+  try {
+    await setupMemoryCommandDetailFixture(root);
+
+    const stdout = await runMemoryDiag(["commands", "--memory", "mem-detail", "--workspace", root, "--json"]);
+    const parsed = JSON.parse(stdout) as {
+      version: 1;
+      memoryId: string;
+      current: { present: boolean; status?: string; renderStatus?: string };
+      summary: {
+        attempts: number;
+        reinforced: number;
+        rejectedOrBlocked: number;
+        blocksByReason: Record<string, number>;
+        blockDetailsMissing: number;
+        sameSessionCrossUtcDayBlocks: number;
+      };
+      events: Array<{ eventId: string; outcome: string; blockReason?: string; crossUtcDay?: boolean | "unknown" }>;
+    };
+
+    assert.equal(parsed.version, 1);
+    assert.equal(parsed.memoryId, "mem-detail");
+    assert.equal(parsed.current.present, true);
+    assert.equal(parsed.current.status, "active");
+    assert.equal(parsed.current.renderStatus, "rendered");
+    assert.equal(parsed.summary.attempts, 3);
+    assert.equal(parsed.summary.reinforced, 1);
+    assert.equal(parsed.summary.rejectedOrBlocked, 2);
+    assert.equal(parsed.summary.blocksByReason.same_session, 1);
+    assert.equal(parsed.summary.blocksByReason.unknown, 1);
+    assert.equal(parsed.summary.blockDetailsMissing, 1);
+    assert.equal(parsed.summary.sameSessionCrossUtcDayBlocks, 1);
+    assert.equal(parsed.events.some(event => event.blockReason === "same_session" && event.crossUtcDay === true), true);
+    assert.equal(parsed.events.some(event => event.blockReason === "unknown" && event.crossUtcDay === "unknown"), true);
+    assert.equal(JSON.stringify(parsed).includes("command-session"), false);
+    assert.equal(JSON.stringify(parsed).includes("command-message"), false);
+    assert.equal(JSON.stringify(parsed).includes("Detail drill-down memory remains current"), false);
+    assertNoAttributionSafetyTerms(stdout);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("memory-diag commands memory selector reports empty evidence neutrally", async () => {
+  const root = await mkdtemp(join(tmpdir(), "opencode-memory-diag-commands-memory-empty-"));
+  try {
+    await writeWorkspaceStore(root, [entry("mem-empty", "Memory without reinforcement command evidence", "feedback")]);
+
+    const stdout = await runMemoryDiag(["commands", "--memory", "mem-empty", "--workspace", root]);
+
+    assert.match(stdout, /Memory command diagnostics for mem-empty/);
+    assert.match(stdout, /No reinforcement command evidence found for mem-empty\./);
+    assertNoAttributionSafetyTerms(stdout);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

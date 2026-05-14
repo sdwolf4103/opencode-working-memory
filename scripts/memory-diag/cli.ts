@@ -9,7 +9,7 @@ export function usage(): string {
   memory-diag rejected [--workspace <path>] [--verbose] [--json]
   memory-diag missing [--workspace <path>] [--verbose] [--json]
   memory-diag explain [memory-id] [--workspace <path>] [--raw]
-  memory-diag commands [--workspace <path>] [--verbose] [--json]
+  memory-diag commands [--workspace <path>] [--verbose] [--json] [--memory <id>]
   memory-diag quality [--workspace <path>] [--verbose] [--json] [--raw] [--no-emoji]
   memory-diag revert (--memory <replacement-id> | --event <event-id>) [--workspace <path>] [--apply]
 
@@ -121,7 +121,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
   if (command !== "audit" && options.migration) {
     return error(`${command} does not accept --migration`);
   }
-  if (command !== "explain" && command !== "revert" && options.memory) {
+  if (command !== "explain" && command !== "revert" && command !== "commands" && options.memory) {
     return error(`${command} does not accept --memory`);
   }
   if (command !== "revert" && options.event) return error(`${command} does not accept --event`);
