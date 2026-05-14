@@ -301,10 +301,18 @@ test("quality review model applies active memory threshold, full text, and redac
   assert.equal(defaultReport.activeMemoryDisplay.items[0].text.includes("Keep full text with"), true);
   assert.doesNotMatch(defaultReport.activeMemoryDisplay.items[0].text, /secret-value|\/Users\/alice/);
   assert.match(defaultReport.activeMemoryDisplay.items[0].text, /\[REDACTED\]|<path>/);
+  assert.equal(defaultReport.reviewCandidates.every(candidate => candidate.source !== "active_memory"), true);
+  assert.equal(defaultReport.reviewCandidates.every(candidate => candidate.concernKind === "system_mechanism"), true);
 
   const verboseReport = buildQualityReviewBoard(model, { verbose: true }, generatedAt);
   assert.equal(verboseReport.activeMemoryDisplay.mode, "all");
   assert.equal(verboseReport.activeMemoryDisplay.shown, 41);
+
+  const jsonReport = buildQualityReviewBoard(model, { json: true }, generatedAt);
+  assert.equal(jsonReport.activeMemoryDisplay.mode, "all");
+  assert.equal(jsonReport.activeMemoryDisplay.shown, 41);
+  assert.equal(jsonReport.activeMemoryDisplay.total, 41);
+  assert.equal(jsonReport.reviewCandidates.every(candidate => candidate.source !== "active_memory"), true);
 
   const rawReport = buildQualityReviewBoard(model, { raw: true }, generatedAt);
   assert.match(rawReport.activeMemoryDisplay.items[0].text, /secret-value|\/Users\/alice/);
@@ -524,8 +532,11 @@ test("quality review model builds system mechanism facts and neutral candidates"
   assert.ok(report.reviewCandidates.some(candidate => candidate.mechanism === "reinforcement_rule"));
   assert.ok(report.reviewCandidates.some(candidate => candidate.source === "eviction_cap_evidence" && candidate.evidence.textAvailable === false));
   assert.ok(report.reviewCandidates.some(candidate => candidate.source === "identity_dedup_evidence"));
+  assert.ok(report.reviewCandidates.length > 0);
+  assert.equal(report.reviewCandidates.every(candidate => candidate.source !== "active_memory"), true);
+  assert.equal(report.reviewCandidates.every(candidate => candidate.concernKind === "system_mechanism"), true);
   assert.ok(report.reviewCandidates.every(candidate => Array.isArray(candidate.heuristicFlags) && Array.isArray(candidate.reviewQuestions)));
-  assert.ok(report.reviewCandidates.filter(candidate => candidate.source !== "active_memory").every(candidate => candidate.provenance));
+  assert.ok(report.reviewCandidates.every(candidate => candidate.provenance));
   assert.doesNotMatch(JSON.stringify(report), /secret-value|\/tmp\/private/);
 });
 

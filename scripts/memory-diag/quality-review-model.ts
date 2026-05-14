@@ -265,10 +265,9 @@ export type ReviewBoardActiveMemory = {
 };
 
 export type ReviewBoardCandidate = {
-  concernKind: "system_mechanism" | "memory_content";
-  mechanism?: "rejection_filter" | "reinforcement_rule" | "eviction_cap" | "identity_dedup" | "retention_rendering";
+  concernKind: "system_mechanism";
+  mechanism?: "rejection_filter" | "reinforcement_rule" | "eviction_cap" | "identity_dedup";
   source:
-    | "active_memory"
     | "rejection_rule_evidence"
     | "missing_evidence"
     | "numbered_command_evidence"
@@ -410,9 +409,8 @@ export function buildQualityReviewBoard(
     .flatMap(inputs => selectRepresentative(inputs, true).map(item => item.candidate));
   const reviewCandidates = [
     ...systemCandidateDisplay.candidates,
-    ...buildMemoryContentCandidates(model, activeMemories, raw),
   ];
-  const activeMemoryDisplay = buildActiveMemoryDisplay(model, activeMemories, reabsorbedKeys, activeMemoryByKey, provenanceInputs, raw, options.verbose === true);
+  const activeMemoryDisplay = buildActiveMemoryDisplay(model, activeMemories, reabsorbedKeys, activeMemoryByKey, provenanceInputs, raw, options.verbose === true || options.json === true);
   const countsByClassification = countProvenanceClassifications(allSystemMechanismCandidates);
 
   const answerabilityReport = buildAnswerabilityReport();
@@ -1550,23 +1548,6 @@ function buildIdentityCandidates(model: MemoryInspectionReadModel, activeMemorie
     textHash: group.id,
   }));
   return [...replacementCandidates, ...duplicateCandidates];
-}
-
-function buildMemoryContentCandidates(model: MemoryInspectionReadModel, activeMemories: LongTermMemoryEntry[], raw: boolean): ReviewBoardCandidate[] {
-  return activeMemories.slice(0, ACTIVE_MEMORY_FULL_TEXT_THRESHOLD).map(memory => {
-    const events = model.evidenceByMemoryId.get(memory.id) ?? [];
-    return candidate({
-      concernKind: "memory_content",
-      mechanism: "retention_rendering",
-      source: "active_memory",
-      id: `active:${memory.id}`,
-      facts: { id: memory.id, type: memory.type, source: memory.source, status: memory.status },
-      evidence: { eventIds: events.map(event => event.eventId), rawReasonCodes: uniqueStrings(events.flatMap(event => event.reasonCodes)).sort(), textPreview: truncate(cleanText(memory.text, raw), 120), textAvailable: true },
-      heuristicFlags: activeMemoryFlags(memory, events),
-      reviewQuestions: memoryContentQuestions(),
-      nextCommands: [`memory-diag explain ${memory.id}`],
-    });
-  });
 }
 
 function candidate(input: ReviewBoardCandidate): ReviewBoardCandidate {
