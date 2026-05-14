@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.3] - 2026-05-14
+
+### Added
+
+- Added `memory-diag quality`, a read-only review board for memory-system mechanism evidence, answerability levels, provenance classification, active-memory review surfaces, and JSON review output.
+- Added producer/version-aware diagnostic facts so current instrumentation can be separated from historical or unversioned evidence when reviewing reinforcement, rejection, and eviction patterns.
+- Added `memory-diag commands --memory <memory-id>` for focused reinforcement command detail, including current memory status, recorded block reasons, missing block detail counts, UTC-day evidence, and privacy-safe JSON.
+
+### Changed
+
+- Made `activeMemoryDisplay` the canonical active-memory review surface in `memory-diag quality` JSON and removed duplicate active-memory `reviewCandidates` entries.
+- Clarified diagnostic provenance and answerability wording so `memory-diag quality` separates facts, heuristic flags, review questions, and human judgment requirements.
+
+### Fixed
+
+- Removed duplicate active-memory candidate construction from `memory-diag quality` to prevent drift between human output and JSON surfaces.
+- Kept reinforcement detail diagnostics evidence-only so blocked reinforcement attempts are shown as recorded evidence without claiming policy failure or memory loss.
+
 ## [1.6.2] - 2026-05-11
 
 ### Fixed

@@ -13,6 +13,7 @@ The npm package is `opencode-working-memory`; the installed bin is `memory-diag`
 | Where did my memory go? | `npx --package opencode-working-memory memory-diag missing` |
 | Why is this memory shown or hidden? | `npx --package opencode-working-memory memory-diag explain <memory-id>` |
 | How are numbered memory commands behaving? | `npx --package opencode-working-memory memory-diag commands` |
+| What reinforcement evidence exists for one memory? | `npx --package opencode-working-memory memory-diag commands --memory <memory-id>` |
 | How do I review memory quality without automatic cleanup? | `npx --package opencode-working-memory memory-diag quality` |
 | Revert a numbered replacement? | `npx --package opencode-working-memory memory-diag revert --memory <replacement-memory-id>` |
 
@@ -49,6 +50,7 @@ npx --package opencode-working-memory memory-diag rejected --verbose
 npx --package opencode-working-memory memory-diag missing --workspace /path/to/project
 npx --package opencode-working-memory memory-diag status --json
 npx --package opencode-working-memory memory-diag commands --verbose
+npx --package opencode-working-memory memory-diag commands --memory <memory-id>
 npx --package opencode-working-memory memory-diag quality
 npx --package opencode-working-memory memory-diag revert --memory <replacement-memory-id>
 ```
@@ -73,9 +75,12 @@ Use `memory-diag commands` to inspect `REINFORCE [M#]` and `REPLACE [M#]` outcom
 ```bash
 npx --package opencode-working-memory memory-diag commands
 npx --package opencode-working-memory memory-diag commands --verbose
+npx --package opencode-working-memory memory-diag commands --memory <memory-id>
 ```
 
 The report includes successful reinforcements, successful replacements, malformed commands, stale refs, protected replacement blocks, and latest command events in verbose mode.
+
+Use `commands --memory <memory-id>` when you need a focused, evidence-only reinforcement view for one memory. It reports current memory status separately from recorded reinforcement attempts, block reasons, missing block details, and UTC-day evidence without judging whether the policy is correct.
 
 ## Dry-run Recovery
 

@@ -1,5 +1,46 @@
 # Release Notes
 
+## 1.6.3 (2026-05-14)
+
+### Diagnostic Quality Review Board
+
+This patch release focuses on safer memory diagnostics. It adds a read-only quality review board and finer reinforcement drill-downs so reviewers can inspect memory-system evidence without treating historical artifacts as current failures or turning heuristic flags into automatic cleanup decisions.
+
+The goal is better observability before policy changes: diagnostics show facts, provenance, answerability, and review questions, while leaving judgment to the operator.
+
+### What Changed
+
+- **Quality review board**: `memory-diag quality` now reports system-mechanism facts for rejection filters, reinforcement rules, eviction/caps, identity/dedup, and active memory content review.
+- **Version/provenance context**: diagnostics distinguish current producer-instrumented events from historical or unversioned evidence where possible, and label ambiguous evidence conservatively.
+- **Focused reinforcement drill-down**: `memory-diag commands --memory <memory-id>` shows one memory's reinforcement command evidence, current status, recorded block reasons, missing details, and UTC-day evidence.
+- **Canonical active-memory JSON surface**: `memory-diag quality --json` now uses `activeMemoryDisplay` as the single active-memory review surface instead of duplicating active memories under `reviewCandidates`.
+- **Attribution-safe wording**: quality and reinforcement diagnostics avoid claiming that a block is a bug, policy failure, or cause of memory loss; they present recorded evidence and review prompts instead.
+
+### Upgrade Notes
+
+- No configuration changes are required.
+- Existing workspace memory files and evidence logs remain compatible.
+- If you consume `memory-diag quality --json` from unreleased builds after v1.6.2, read active-memory review data from `activeMemoryDisplay`; `reviewCandidates` is now reserved for system-mechanism candidates.
+
+### Useful Commands
+
+```bash
+npx --package opencode-working-memory@1.6.3 memory-diag quality
+npx --package opencode-working-memory@1.6.3 memory-diag quality --json
+npx --package opencode-working-memory@1.6.3 memory-diag commands --memory <memory-id>
+```
+
+### Validation
+
+- `node --test --experimental-strip-types tests/memory-diag-quality.test.ts` — 53 tests passing
+- `node --test --experimental-strip-types tests/memory-diag.test.ts` — 39 tests passing
+- `npm run typecheck` — `TYPECHECK_PASS`
+- `npm test` — 486 tests passing, `TEST_PASS`
+- `npm run build` — `BUILD_PASS`
+- `npm run test:pack:memory-diag` — packed tarball smoke test passed
+
+---
+
 ## 1.6.2 (2026-05-11)
 
 ### Published `memory-diag` Bin Fix
