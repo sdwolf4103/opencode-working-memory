@@ -6,7 +6,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 let cachedVersion: string | undefined;
 
 const MEMORY_PRODUCER_NAME = "opencode-working-memory";
-const MEMORY_INSTRUMENTATION_VERSION = 2;
+const MEMORY_INSTRUMENTATION_VERSION = 3;
 
 function producerVersion(): string {
   if (cachedVersion) return cachedVersion;

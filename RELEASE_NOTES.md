@@ -1,5 +1,39 @@
 # Release Notes
 
+## 1.6.4 (2026-05-15)
+
+### Rolling Weekly Reinforcement
+
+This patch release fixes the reinforcement policy for users who work in long-lived OpenCode sessions. Reinforcement no longer treats `same_session` as a hard block. Instead, each memory uses a rolling 7-day elapsed window, so recurring preferences can be reinforced after meaningful weekly use even when the session stays open.
+
+The base retention half-life remains 45 days. The max reinforcement count remains 6, but it now acts as a growth saturation point rather than a lifetime hard stop.
+
+### What Changed
+
+- **7-day rolling window**: repeated reinforcement is allowed once 7 rolling days have elapsed since the memory's last reinforcement; 7 days minus 1ms still blocks.
+- **Same-session as evidence**: `sameSession` is recorded for diagnostics but no longer blocks reinforcement by itself.
+- **Refresh-only saturation**: memories at reinforcement count 6 can refresh `retentionClock`, `lastReinforcedAt`, and session evidence after the weekly window without increasing count or effective half-life.
+- **Instrumentation v3**: new reinforcement evidence records elapsed-window fields, `sameSession`, `reinforcementMode`, and legacy missing timestamp markers.
+- **Diagnostics updated**: `memory-diag commands --memory` exposes the new fields, while `memory-diag quality` keeps historical `same_session` block analysis separate from new same-session evidence.
+
+### Upgrade Notes
+
+- No configuration changes are required.
+- Existing workspace memory files and evidence logs remain compatible.
+- Historical diagnostics may still show older block reasons such as `same_session`, `same_utc_day`, `min_interval`, or `max_count`; new instrumentation-version-3 events use the rolling elapsed-window semantics.
+- Consumers of `memory-diag commands --memory --json` should use `reinforcementMode` to distinguish count-increment reinforcement from refresh-only saturation.
+
+### Validation
+
+- `node --test --experimental-strip-types tests/retention.test.ts` — 10 tests passing
+- `node --test --experimental-strip-types tests/workspace-memory.test.ts tests/plugin.test.ts` — 181 tests passing
+- `node --test --experimental-strip-types tests/memory-diag.test.ts tests/memory-diag-quality.test.ts` — 93 tests passing
+- `npm run typecheck` — `TYPECHECK_PASS`
+- `npm test` — 498 tests passing, `TEST_PASS`
+- `npm run build` — `BUILD_PASS`
+
+---
+
 ## 1.6.3 (2026-05-14)
 
 ### Diagnostic Quality Review Board

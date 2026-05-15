@@ -182,6 +182,85 @@ async function setupMemoryCommandDetailFixture(root: string): Promise<void> {
       messageHash: "command-message-three",
     }),
     evidence({
+      type: "memory_reinforced",
+      phase: "reinforcement",
+      outcome: "rejected",
+      memory: { memoryId: "mem-detail", type: "decision", source: "explicit", status: "active" },
+      reasonCodes: ["numbered_ref_reinforce", "reinforcement_window_blocked", "reinforcement_block_min_elapsed_window"],
+      details: {
+        ref: "M3",
+        blockReason: "min_elapsed_window",
+        attemptedAtIso: "2026-05-20T00:05:00.000Z",
+        lastReinforcedAtIso: "2026-05-13T00:05:00.001Z",
+        elapsedMs: 604_799_999,
+        requiredElapsedMs: 604_800_000,
+        sameSession: true,
+        sessionID: "raw-session-secret",
+        lastReinforcedSessionID: "raw-last-session-secret",
+      },
+      sessionHash: "command-session-three",
+      messageHash: "command-message-four",
+    }),
+    evidence({
+      type: "memory_reinforced",
+      phase: "reinforcement",
+      outcome: "reinforced",
+      memory: { memoryId: "mem-detail", type: "decision", source: "explicit", status: "active" },
+      reasonCodes: ["numbered_ref_reinforce", "reinforcement_window_allowed"],
+      details: {
+        ref: "M3",
+        reinforcementOutcome: "reinforced",
+        reinforcementMode: "increment",
+        attemptedAtIso: "2026-05-20T00:05:00.001Z",
+        lastReinforcedAtIso: "2026-05-13T00:05:00.001Z",
+        elapsedMs: 604_800_000,
+        requiredElapsedMs: 604_800_000,
+        sameSession: false,
+        sessionID: "raw-increment-session-secret",
+      },
+      sessionHash: "command-session-four",
+      messageHash: "command-message-five",
+    }),
+    evidence({
+      type: "memory_reinforced",
+      phase: "reinforcement",
+      outcome: "reinforced",
+      memory: { memoryId: "mem-detail", type: "decision", source: "explicit", status: "active" },
+      reasonCodes: ["numbered_ref_reinforce", "reinforcement_window_allowed", "reinforcement_saturation_refresh"],
+      details: {
+        ref: "M3",
+        reinforcementOutcome: "refreshed",
+        reinforcementMode: "refresh_only",
+        attemptedAtIso: "2026-05-27T00:05:00.001Z",
+        lastReinforcedAtIso: "2026-05-20T00:05:00.001Z",
+        elapsedMs: 604_800_000,
+        requiredElapsedMs: 604_800_000,
+        sameSession: true,
+        lastReinforcedSessionID: "raw-refresh-last-session-secret",
+      },
+      sessionHash: "command-session-five",
+      messageHash: "command-message-six",
+    }),
+    evidence({
+      type: "memory_reinforced",
+      phase: "reinforcement",
+      outcome: "reinforced",
+      memory: { memoryId: "mem-detail", type: "decision", source: "explicit", status: "active" },
+      reasonCodes: ["numbered_ref_reinforce", "reinforcement_window_allowed"],
+      details: {
+        ref: "M3",
+        reinforcementOutcome: "reinforced",
+        reinforcementMode: "increment",
+        attemptedAtIso: "2026-05-28T00:05:00.001Z",
+        requiredElapsedMs: 604_800_000,
+        sameSession: false,
+        legacyMissingTimestamp: true,
+        sessionID: "raw-legacy-session-secret",
+      },
+      sessionHash: "command-session-six",
+      messageHash: "command-message-seven",
+    }),
+    evidence({
       type: "render_selected",
       phase: "render",
       outcome: "rendered",
@@ -482,16 +561,26 @@ test("memory-diag commands memory selector prints reinforcement detail", async (
     assert.match(stdout, /status: active/);
     assert.match(stdout, /render: rendered/);
     assert.match(stdout, /Reinforcement summary:/);
-    assert.match(stdout, /attempts: 3/);
-    assert.match(stdout, /reinforced: 1/);
-    assert.match(stdout, /rejected\/blocked: 2/);
-    assert.match(stdout, /window blocked: 2/);
-    assert.match(stdout, /block reasons: same_session=1, unknown=1/);
+    assert.match(stdout, /attempts: 7/);
+    assert.match(stdout, /reinforced: 4/);
+    assert.match(stdout, /rejected\/blocked: 3/);
+    assert.match(stdout, /window blocked: 3/);
+    assert.match(stdout, /block reasons: min_elapsed_window=1, same_session=1, unknown=1/);
     assert.match(stdout, /block details missing: 1/);
     assert.match(stdout, /same-session cross UTC day blocks: 1/);
     assert.match(stdout, /refs: M3/);
+    assert.match(stdout, /blockReason=min_elapsed_window/);
+    assert.match(stdout, /elapsedMs=604799999/);
+    assert.match(stdout, /requiredElapsedMs=604800000/);
+    assert.match(stdout, /sameSession=yes/);
+    assert.match(stdout, /sameSession=no/);
+    assert.match(stdout, /reinforcementMode=refresh_only/);
+    assert.match(stdout, /legacyMissingTimestamp=yes/);
     assert.match(stdout, /crossUtcDay=yes/);
     assert.doesNotMatch(stdout, /render_selected/);
+    assert.doesNotMatch(stdout, /raw-session-secret/);
+    assert.doesNotMatch(stdout, /raw-last-session-secret/);
+    assert.doesNotMatch(stdout, /raw-refresh-last-session-secret/);
     assertNoAttributionSafetyTerms(stdout);
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -516,7 +605,18 @@ test("memory-diag commands memory selector emits stable JSON", async () => {
         blockDetailsMissing: number;
         sameSessionCrossUtcDayBlocks: number;
       };
-      events: Array<{ eventId: string; outcome: string; blockReason?: string; crossUtcDay?: boolean | "unknown" }>;
+      events: Array<{
+        eventId: string;
+        outcome: string;
+        blockReason?: string;
+        crossUtcDay?: boolean | "unknown";
+        elapsedMs?: number;
+        requiredElapsedMs?: number;
+        sameSession?: boolean;
+        legacyMissingTimestamp?: boolean;
+        reinforcementMode?: string;
+        instrumentationVersion?: number;
+      }>;
     };
 
     assert.equal(parsed.version, 1);
@@ -524,18 +624,27 @@ test("memory-diag commands memory selector emits stable JSON", async () => {
     assert.equal(parsed.current.present, true);
     assert.equal(parsed.current.status, "active");
     assert.equal(parsed.current.renderStatus, "rendered");
-    assert.equal(parsed.summary.attempts, 3);
-    assert.equal(parsed.summary.reinforced, 1);
-    assert.equal(parsed.summary.rejectedOrBlocked, 2);
+    assert.equal(parsed.summary.attempts, 7);
+    assert.equal(parsed.summary.reinforced, 4);
+    assert.equal(parsed.summary.rejectedOrBlocked, 3);
+    assert.equal(parsed.summary.blocksByReason.min_elapsed_window, 1);
     assert.equal(parsed.summary.blocksByReason.same_session, 1);
     assert.equal(parsed.summary.blocksByReason.unknown, 1);
     assert.equal(parsed.summary.blockDetailsMissing, 1);
     assert.equal(parsed.summary.sameSessionCrossUtcDayBlocks, 1);
+    assert.equal(parsed.events.some(event => event.blockReason === "min_elapsed_window" && event.elapsedMs === 604_799_999 && event.requiredElapsedMs === 604_800_000 && event.sameSession === true), true);
+    assert.equal(parsed.events.some(event => event.reinforcementMode === "increment" && event.elapsedMs === 604_800_000 && event.sameSession === false), true);
+    assert.equal(parsed.events.some(event => event.reinforcementMode === "refresh_only" && event.elapsedMs === 604_800_000 && event.sameSession === true), true);
+    assert.equal(parsed.events.some(event => event.legacyMissingTimestamp === true), true);
+    assert.equal(parsed.events.every(event => event.instrumentationVersion === 3), true);
     assert.equal(parsed.events.some(event => event.blockReason === "same_session" && event.crossUtcDay === true), true);
     assert.equal(parsed.events.some(event => event.blockReason === "unknown" && event.crossUtcDay === "unknown"), true);
     assert.equal(JSON.stringify(parsed).includes("command-session"), false);
     assert.equal(JSON.stringify(parsed).includes("command-message"), false);
     assert.equal(JSON.stringify(parsed).includes("Detail drill-down memory remains current"), false);
+    assert.equal(JSON.stringify(parsed).includes("raw-session-secret"), false);
+    assert.equal(JSON.stringify(parsed).includes("raw-last-session-secret"), false);
+    assert.equal(JSON.stringify(parsed).includes("raw-refresh-last-session-secret"), false);
     assertNoAttributionSafetyTerms(stdout);
   } finally {
     await rm(root, { recursive: true, force: true });

@@ -1,19 +1,52 @@
 import type { LongTermMemoryEntry, WorkspaceMemoryStore } from "./types.ts";
 
-export type ReinforcementBlockReason = "same_session" | "same_utc_day" | "min_interval" | "max_count";
+export type ReinforcementBlockReason =
+  | "min_elapsed_window"
+  /** @deprecated Historical diagnostic literal; no longer produced by new policy. */
+  | "same_session"
+  /** @deprecated Historical diagnostic literal; no longer produced by new policy. */
+  | "same_utc_day"
+  /** @deprecated Historical diagnostic literal; no longer produced by new policy. */
+  | "min_interval"
+  /** @deprecated Historical diagnostic literal; no longer produced by new policy. */
+  | "max_count";
+
+export type ReinforcementMode = "increment" | "refresh_only";
+
+type ReinforcementDecisionMetadata = {
+  attemptedAt: number;
+  lastReinforcedAt?: number;
+  elapsedMs?: number;
+  requiredElapsedMs: number;
+  sameSession: boolean;
+  legacyMissingTimestamp?: boolean;
+};
 
 export type ReinforcementDecision =
-  | { outcome: "reinforced"; memory: LongTermMemoryEntry; previousReinforcementCount: number; newReinforcementCount: number }
-  | { outcome: "blocked"; memory: LongTermMemoryEntry; blockReason: ReinforcementBlockReason; lastReinforcedAt?: number; reinforcementCount: number; maxReinforcementCount: number; minIntervalMs: number };
+  | ({
+      outcome: "reinforced";
+      memory: LongTermMemoryEntry;
+      previousReinforcementCount: number;
+      newReinforcementCount: number;
+      reinforcementMode: ReinforcementMode;
+    } & ReinforcementDecisionMetadata)
+  | ({
+      outcome: "blocked";
+      memory: LongTermMemoryEntry;
+      blockReason: ReinforcementBlockReason;
+      reinforcementCount: number;
+      maxReinforcementCount: number;
+    } & ReinforcementDecisionMetadata);
 
 // Retention decay model constants (v1.5)
 export const BASE_HALF_LIFE_DAYS = 45;
 export const REINFORCEMENT_HALFLIFE_FACTOR = 0.85;
 export const REINFORCEMENT_MAX_COUNT = 6;
-export const REINFORCEMENT_MIN_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
+export const DAY_MS = 24 * 60 * 60 * 1000;
+export const REINFORCEMENT_MIN_ELAPSED_MS = 7 * DAY_MS;
+export const REINFORCEMENT_MIN_INTERVAL_MS = 60 * 60 * 1000; // Deprecated compatibility constant; new policy uses REINFORCEMENT_MIN_ELAPSED_MS.
 export const WORKSPACE_DORMANT_AFTER_DAYS = 14;
 export const DORMANT_DECAY_MULTIPLIER = 0.25;
-export const DAY_MS = 24 * 60 * 60 * 1000;
 
 export const TYPE_FACTOR = {
   reference: 1.0,
@@ -114,42 +147,38 @@ export function calculateEffectiveAgeDays(
   return activeDays + dormantOverlapDays * DORMANT_DECAY_MULTIPLIER;
 }
 
-function isSameUTCCalendarDay(ts1: number, ts2: number): boolean {
-  const d1 = new Date(ts1);
-  const d2 = new Date(ts2);
-  return d1.getUTCFullYear() === d2.getUTCFullYear()
-    && d1.getUTCMonth() === d2.getUTCMonth()
-    && d1.getUTCDate() === d2.getUTCDate();
-}
-
 export function tryReinforceMemory(
   memory: LongTermMemoryEntry,
   sessionId: string,
   now: number,
 ): ReinforcementDecision {
   const count = memory.reinforcementCount ?? 0;
-  const lastAt = memory.lastReinforcedAt ?? 0;
+  const lastAt = validLastReinforcedAt(memory.lastReinforcedAt);
   const lastSession = memory.lastReinforcedSessionID;
+  const sameSession = lastSession === sessionId;
+  const legacyMissingTimestamp = count > 0 && lastAt === undefined;
+  const metadata: ReinforcementDecisionMetadata = {
+    attemptedAt: now,
+    ...(lastAt !== undefined ? {
+      lastReinforcedAt: lastAt,
+      elapsedMs: now - lastAt,
+    } : {}),
+    requiredElapsedMs: REINFORCEMENT_MIN_ELAPSED_MS,
+    sameSession,
+    ...(legacyMissingTimestamp ? { legacyMissingTimestamp: true } : {}),
+  };
 
-  if (lastSession === sessionId) {
-    return blockedDecision(memory, "same_session", count, lastAt);
+  if (lastAt !== undefined && now - lastAt < REINFORCEMENT_MIN_ELAPSED_MS) {
+    return blockedDecision(memory, "min_elapsed_window", count, metadata);
   }
 
-  if (count >= REINFORCEMENT_MAX_COUNT) {
-    return blockedDecision(memory, "max_count", count, lastAt);
-  }
-
-  if (lastAt > 0 && now < lastAt + REINFORCEMENT_MIN_INTERVAL_MS) {
-    return blockedDecision(memory, "min_interval", count, lastAt);
-  }
-
-  if (lastAt > 0 && isSameUTCCalendarDay(lastAt, now)) {
-    return blockedDecision(memory, "same_utc_day", count, lastAt);
-  }
-
+  const reinforcementMode: ReinforcementMode = count >= REINFORCEMENT_MAX_COUNT
+    ? "refresh_only"
+    : "increment";
+  const newReinforcementCount = reinforcementMode === "refresh_only" ? count : count + 1;
   const reinforced: LongTermMemoryEntry = {
     ...memory,
-    reinforcementCount: count + 1,
+    reinforcementCount: newReinforcementCount,
     lastReinforcedAt: now,
     lastReinforcedSessionID: sessionId,
     retentionClock: now,
@@ -158,23 +187,29 @@ export function tryReinforceMemory(
     outcome: "reinforced",
     memory: reinforced,
     previousReinforcementCount: count,
-    newReinforcementCount: count + 1,
+    newReinforcementCount,
+    reinforcementMode,
+    ...metadata,
   };
+}
+
+function validLastReinforcedAt(value: unknown): number | undefined {
+  if (typeof value !== "number") return undefined;
+  return Number.isFinite(value) && value > 0 ? value : undefined;
 }
 
 function blockedDecision(
   memory: LongTermMemoryEntry,
   blockReason: ReinforcementBlockReason,
   reinforcementCount: number,
-  lastReinforcedAt: number,
+  metadata: ReinforcementDecisionMetadata,
 ): ReinforcementDecision {
   return {
     outcome: "blocked",
     memory,
     blockReason,
-    ...(lastReinforcedAt > 0 ? { lastReinforcedAt } : {}),
     reinforcementCount,
     maxReinforcementCount: REINFORCEMENT_MAX_COUNT,
-    minIntervalMs: REINFORCEMENT_MIN_INTERVAL_MS,
+    ...metadata,
   };
 }

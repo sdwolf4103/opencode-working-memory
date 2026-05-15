@@ -68,6 +68,11 @@ type MemoryCommandDetail = {
     reasonCodes: string[];
     attemptedAtIso?: string;
     lastReinforcedAtIso?: string;
+    elapsedMs?: number;
+    requiredElapsedMs?: number;
+    sameSession?: boolean;
+    legacyMissingTimestamp?: boolean;
+    reinforcementMode?: string;
     crossUtcDay?: boolean | "unknown";
     producerVersion?: string;
     instrumentationVersion?: number;
@@ -114,6 +119,16 @@ function isReinforcementEvent(event: EvidenceEventV1): boolean {
 function stringDetail(event: EvidenceEventV1, key: string): string | undefined {
   const value = event.details?.[key];
   return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function numberDetail(event: EvidenceEventV1, key: string): number | undefined {
+  const value = event.details?.[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function booleanDetail(event: EvidenceEventV1, key: string): boolean | undefined {
+  const value = event.details?.[key];
+  return typeof value === "boolean" ? value : undefined;
 }
 
 function isRejectedOrBlocked(event: EvidenceEventV1): boolean {
@@ -175,6 +190,11 @@ function detailEventJSON(event: EvidenceEventV1): MemoryCommandDetail["events"][
     reasonCodes: event.reasonCodes,
     attemptedAtIso,
     lastReinforcedAtIso,
+    elapsedMs: numberDetail(event, "elapsedMs"),
+    requiredElapsedMs: numberDetail(event, "requiredElapsedMs"),
+    sameSession: booleanDetail(event, "sameSession"),
+    legacyMissingTimestamp: booleanDetail(event, "legacyMissingTimestamp") === true ? true : undefined,
+    reinforcementMode: stringDetail(event, "reinforcementMode"),
     crossUtcDay: blocked ? isCrossUtcDay(attemptedAtIso, lastReinforcedAtIso) : undefined,
     producerVersion: event.producerVersion,
     instrumentationVersion: event.instrumentationVersion,
@@ -315,15 +335,24 @@ function formatCrossUtcDay(value: boolean | "unknown" | undefined): string {
   return "unknown";
 }
 
+function formatBoolean(value: boolean): string {
+  return value ? "yes" : "no";
+}
+
 function formatMemoryCommandDetailEvents(events: MemoryCommandDetail["events"]): string[] {
   if (events.length === 0) return ["  (none)"];
   return events.map(event => {
     const ref = event.ref ? ` ref=${event.ref}` : "";
     const blockReason = event.blockReason ? ` blockReason=${event.blockReason}` : "";
+    const reinforcementMode = event.reinforcementMode ? ` reinforcementMode=${event.reinforcementMode}` : "";
     const attemptedAt = event.attemptedAtIso ? ` attemptedAt=${event.attemptedAtIso}` : "";
     const lastReinforcedAt = event.lastReinforcedAtIso ? ` lastReinforcedAt=${event.lastReinforcedAtIso}` : "";
+    const elapsedMs = event.elapsedMs !== undefined ? ` elapsedMs=${event.elapsedMs}` : "";
+    const requiredElapsedMs = event.requiredElapsedMs !== undefined ? ` requiredElapsedMs=${event.requiredElapsedMs}` : "";
+    const sameSession = event.sameSession !== undefined ? ` sameSession=${formatBoolean(event.sameSession)}` : "";
+    const legacyMissingTimestamp = event.legacyMissingTimestamp === true ? " legacyMissingTimestamp=yes" : "";
     const crossUtcDay = event.crossUtcDay !== undefined ? ` crossUtcDay=${formatCrossUtcDay(event.crossUtcDay)}` : "";
-    return `  - ${event.createdAt} outcome=${event.outcome}${ref}${blockReason}${attemptedAt}${lastReinforcedAt}${crossUtcDay} reasons=${event.reasonCodes.join(",") || "none"}`;
+    return `  - ${event.createdAt} outcome=${event.outcome}${ref}${blockReason}${reinforcementMode}${attemptedAt}${lastReinforcedAt}${elapsedMs}${requiredElapsedMs}${sameSession}${legacyMissingTimestamp}${crossUtcDay} reasons=${event.reasonCodes.join(",") || "none"}`;
   });
 }
 

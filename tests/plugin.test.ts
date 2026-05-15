@@ -100,6 +100,60 @@ function createSessionWithError(sessionID: string, error: OpenError) {
   };
 }
 
+async function withMockedDateNow<T>(now: number, fn: () => Promise<T>): Promise<T> {
+  const originalDateNow = Date.now;
+  Date.now = () => now;
+  try {
+    return await fn();
+  } finally {
+    Date.now = originalDateNow;
+  }
+}
+
+async function withNumberedReinforceScenario(
+  options: { sessionID: string; nowMs: number; existing: LongTermMemoryEntry; summary?: string },
+  assertions: (context: {
+    workspace: Awaited<ReturnType<typeof loadWorkspaceMemory>>;
+    events: Awaited<ReturnType<typeof queryEvidenceEvents>>;
+  }) => Promise<void> | void,
+): Promise<void> {
+  const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-test-"));
+  try {
+    await updateWorkspaceMemory(tmpDir, store => {
+      store.entries.push(options.existing);
+      return store;
+    });
+    await saveSessionState(tmpDir, {
+      version: 1,
+      sessionID: options.sessionID,
+      turn: 0,
+      updatedAt: new Date(options.nowMs).toISOString(),
+      activeFiles: [],
+      openErrors: [],
+      recentDecisions: [],
+      pendingMemories: [],
+      compactionMemoryRefs: [compactionRefFor(options.existing)],
+    });
+
+    const plugin = await MemoryV2Plugin({
+      directory: tmpDir,
+      client: mockClientWithCompactionSummary(options.summary ?? "Memory candidates:\nREINFORCE [M1]"),
+    });
+    await withMockedDateNow(options.nowMs, async () => {
+      await (plugin as Record<string, Function>)["event"]({
+        event: { type: "session.compacted", properties: { sessionID: options.sessionID } },
+      });
+    });
+
+    await assertions({
+      workspace: await loadWorkspaceMemory(tmpDir),
+      events: await queryEvidenceEvents(tmpDir, { types: ["memory_reinforced"] }),
+    });
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+}
+
 test("tool.execute.after: undefined exitCode does NOT create open error", async () => {
   // 1. Temp directory for isolated file I/O
   const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-test-"));
@@ -1032,8 +1086,9 @@ test("session.compacted applies numbered REINFORCE command to referenced memory"
   const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-test-"));
 
   try {
-    const now = new Date().toISOString();
-    const oldRetentionClock = Date.now() - 10 * 24 * 60 * 60 * 1000;
+    const nowMs = Date.UTC(2026, 4, 15, 12, 0, 0);
+    const now = new Date(nowMs).toISOString();
+    const lastReinforcedAt = nowMs - 8 * 24 * 60 * 60 * 1000;
     const existing: LongTermMemoryEntry = {
       id: "numbered-reinforce-memory",
       type: "decision",
@@ -1043,7 +1098,10 @@ test("session.compacted applies numbered REINFORCE command to referenced memory"
       status: "active",
       createdAt: now,
       updatedAt: now,
-      retentionClock: oldRetentionClock,
+      retentionClock: lastReinforcedAt,
+      reinforcementCount: 1,
+      lastReinforcedAt,
+      lastReinforcedSessionID: "numbered-reinforce-session",
     };
     await updateWorkspaceMemory(tmpDir, store => {
       store.entries.push(existing);
@@ -1065,26 +1123,172 @@ test("session.compacted applies numbered REINFORCE command to referenced memory"
       directory: tmpDir,
       client: mockClientWithCompactionSummary("Memory candidates:\nREINFORCE [M1]"),
     });
-    await (plugin as Record<string, Function>)["event"]({
-      event: { type: "session.compacted", properties: { sessionID: "numbered-reinforce-session" } },
+    await withMockedDateNow(nowMs, async () => {
+      await (plugin as Record<string, Function>)["event"]({
+        event: { type: "session.compacted", properties: { sessionID: "numbered-reinforce-session" } },
+      });
     });
 
     const workspace = await loadWorkspaceMemory(tmpDir);
     const reinforced = workspace.entries.find(entry => entry.id === existing.id);
-    assert.equal(reinforced?.reinforcementCount, 1);
+    assert.equal(reinforced?.reinforcementCount, 2);
     assert.equal(reinforced?.lastReinforcedSessionID, "numbered-reinforce-session");
-    assert.ok((reinforced?.retentionClock ?? 0) > oldRetentionClock);
+    assert.equal(reinforced?.lastReinforcedAt, nowMs);
+    assert.equal(reinforced?.retentionClock, nowMs);
 
     const events = await queryEvidenceEvents(tmpDir, { types: ["memory_reinforced"] });
-    assert.ok(events.some(event =>
+    const event = events.find(event =>
       event.outcome === "reinforced" &&
       event.reasonCodes.includes("numbered_ref_reinforce") &&
       event.reasonCodes.includes("reinforcement_window_allowed") &&
       event.memory?.memoryId === existing.id
-    ));
+    );
+    assert.ok(event, "numbered REINFORCE should emit allowed evidence");
+    assert.equal(event.instrumentationVersion, 3);
+    assert.equal(event.details?.reinforcementOutcome, "reinforced");
+    assert.equal(event.details?.reinforcementMode, "increment");
+    assert.equal(event.details?.sameSession, true);
+    assert.equal(event.details?.elapsedMs, 8 * 24 * 60 * 60 * 1000);
+    assert.equal(event.details?.requiredElapsedMs, 7 * 24 * 60 * 60 * 1000);
+    assert.equal(event.details?.attemptedAtMs, nowMs);
+    assert.equal(event.details?.lastReinforcedAtMs, lastReinforcedAt);
+    assert.equal(event.details?.previousReinforcementCount, 1);
+    assert.equal(event.details?.newReinforcementCount, 2);
+    assert.equal(JSON.stringify(event.details).includes("numbered-reinforce-session"), false);
   } finally {
     await rm(tmpDir, { recursive: true, force: true });
   }
+});
+
+test("session.compacted allows numbered REINFORCE at exact 7-day boundary", async () => {
+  const nowMs = Date.UTC(2026, 4, 15, 12, 0, 0);
+  const lastReinforcedAt = nowMs - 7 * 24 * 60 * 60 * 1000;
+  const existing: LongTermMemoryEntry = {
+    id: "numbered-reinforce-exact-window",
+    type: "decision",
+    text: "Use exact rolling windows for memory reinforcement.",
+    source: "compaction",
+    confidence: 0.9,
+    status: "active",
+    createdAt: new Date(nowMs).toISOString(),
+    updatedAt: new Date(nowMs).toISOString(),
+    retentionClock: lastReinforcedAt,
+    reinforcementCount: 5,
+    lastReinforcedAt,
+    lastReinforcedSessionID: "previous-session",
+  };
+
+  await withNumberedReinforceScenario({ sessionID: "exact-window-session", nowMs, existing }, ({ workspace, events }) => {
+    const reinforced = workspace.entries.find(entry => entry.id === existing.id);
+    const event = events.find(event => event.outcome === "reinforced" && event.memory?.memoryId === existing.id);
+
+    assert.equal(reinforced?.reinforcementCount, 6);
+    assert.equal(reinforced?.retentionClock, nowMs);
+    assert.ok(event, "exact 7-day boundary should emit reinforced evidence");
+    assert.equal(event.details?.reinforcementMode, "increment");
+    assert.equal(event.details?.elapsedMs, 7 * 24 * 60 * 60 * 1000);
+    assert.equal(event.details?.requiredElapsedMs, 7 * 24 * 60 * 60 * 1000);
+    assert.equal(event.instrumentationVersion, 3);
+  });
+});
+
+test("session.compacted blocks different-session numbered REINFORCE below 7-day window", async () => {
+  const nowMs = Date.UTC(2026, 4, 15, 12, 0, 0);
+  const lastReinforcedAt = nowMs - (7 * 24 * 60 * 60 * 1000 - 1);
+  const existing: LongTermMemoryEntry = {
+    id: "numbered-reinforce-below-window",
+    type: "feedback",
+    text: "User prefers below-window reinforcement blocks.",
+    source: "compaction",
+    confidence: 0.9,
+    status: "active",
+    createdAt: new Date(nowMs).toISOString(),
+    updatedAt: new Date(nowMs).toISOString(),
+    retentionClock: nowMs - 10 * 24 * 60 * 60 * 1000,
+    reinforcementCount: 1,
+    lastReinforcedAt,
+    lastReinforcedSessionID: "previous-session",
+  };
+
+  await withNumberedReinforceScenario({ sessionID: "different-session", nowMs, existing }, ({ workspace, events }) => {
+    const blocked = workspace.entries.find(entry => entry.id === existing.id);
+    const event = events.find(event => event.outcome === "rejected" && event.memory?.memoryId === existing.id);
+
+    assert.equal(blocked?.reinforcementCount, 1);
+    assert.ok(event, "below-window different-session attempt should emit rejected evidence");
+    assert.ok(event.reasonCodes.includes("reinforcement_block_min_elapsed_window"));
+    assert.equal(event.details?.blockReason, "min_elapsed_window");
+    assert.equal(event.details?.sameSession, false);
+    assert.equal(event.details?.elapsedMs, 7 * 24 * 60 * 60 * 1000 - 1);
+    assert.equal(event.details?.requiredElapsedMs, 7 * 24 * 60 * 60 * 1000);
+    assert.equal(event.instrumentationVersion, 3);
+  });
+});
+
+test("session.compacted refreshes saturated numbered REINFORCE after rolling window", async () => {
+  const nowMs = Date.UTC(2026, 4, 15, 12, 0, 0);
+  const lastReinforcedAt = nowMs - 7 * 24 * 60 * 60 * 1000;
+  const existing: LongTermMemoryEntry = {
+    id: "numbered-reinforce-refresh-only",
+    type: "decision",
+    text: "Use refresh-only mode for saturated reinforcement.",
+    source: "compaction",
+    confidence: 0.9,
+    status: "active",
+    createdAt: new Date(nowMs).toISOString(),
+    updatedAt: new Date(nowMs).toISOString(),
+    retentionClock: nowMs - 30 * 24 * 60 * 60 * 1000,
+    reinforcementCount: 6,
+    lastReinforcedAt,
+    lastReinforcedSessionID: "previous-session",
+  };
+
+  await withNumberedReinforceScenario({ sessionID: "refresh-only-session", nowMs, existing }, ({ workspace, events }) => {
+    const refreshed = workspace.entries.find(entry => entry.id === existing.id);
+    const event = events.find(event => event.outcome === "reinforced" && event.memory?.memoryId === existing.id);
+
+    assert.equal(refreshed?.reinforcementCount, 6);
+    assert.equal(refreshed?.retentionClock, nowMs);
+    assert.equal(refreshed?.lastReinforcedAt, nowMs);
+    assert.equal(refreshed?.lastReinforcedSessionID, "refresh-only-session");
+    assert.ok(event, "saturated after-window attempt should emit refreshed evidence");
+    assert.equal(event.details?.reinforcementOutcome, "refreshed");
+    assert.equal(event.details?.reinforcementMode, "refresh_only");
+    assert.equal(event.details?.previousReinforcementCount, 6);
+    assert.equal(event.details?.newReinforcementCount, 6);
+    assert.ok(event.reasonCodes.includes("reinforcement_saturation_refresh"));
+    assert.equal(event.reasonCodes.includes("reinforcement_block_max_count"), false);
+    assert.equal(event.instrumentationVersion, 3);
+  });
+});
+
+test("session.compacted emits legacy missing timestamp details for numbered REINFORCE", async () => {
+  const nowMs = Date.UTC(2026, 4, 15, 12, 0, 0);
+  const existing: LongTermMemoryEntry = {
+    id: "numbered-reinforce-legacy-missing",
+    type: "feedback",
+    text: "User prefers legacy timestamp anomalies to be visible.",
+    source: "compaction",
+    confidence: 0.9,
+    status: "active",
+    createdAt: new Date(nowMs).toISOString(),
+    updatedAt: new Date(nowMs).toISOString(),
+    retentionClock: nowMs - 30 * 24 * 60 * 60 * 1000,
+    reinforcementCount: 2,
+    lastReinforcedSessionID: "previous-session",
+  };
+
+  await withNumberedReinforceScenario({ sessionID: "legacy-missing-session", nowMs, existing }, ({ workspace, events }) => {
+    const reinforced = workspace.entries.find(entry => entry.id === existing.id);
+    const event = events.find(event => event.outcome === "reinforced" && event.memory?.memoryId === existing.id);
+
+    assert.equal(reinforced?.reinforcementCount, 3);
+    assert.equal(reinforced?.lastReinforcedAt, nowMs);
+    assert.equal(reinforced?.retentionClock, nowMs);
+    assert.equal(event?.details?.legacyMissingTimestamp, true);
+    assert.equal(event?.details?.reinforcementMode, "increment");
+    assert.equal(event?.instrumentationVersion, 3);
+  });
 });
 
 test("session.compacted rejects invalid unavailable and stale REINFORCE refs without mutation", async () => {
@@ -1163,8 +1367,9 @@ test("session.compacted emits rejected evidence when numbered REINFORCE is block
   const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-test-"));
 
   try {
-    const nowMs = Date.now();
+    const nowMs = Date.UTC(2026, 4, 15, 12, 0, 0);
     const now = new Date(nowMs).toISOString();
+    const lastReinforcedAt = nowMs - (7 * 24 * 60 * 60 * 1000 - 60 * 60 * 1000);
     const existing: LongTermMemoryEntry = {
       id: "blocked-numbered-reinforce",
       type: "feedback",
@@ -1176,7 +1381,7 @@ test("session.compacted emits rejected evidence when numbered REINFORCE is block
       updatedAt: now,
       retentionClock: nowMs - 10 * 24 * 60 * 60 * 1000,
       reinforcementCount: 1,
-      lastReinforcedAt: nowMs - 2 * 60 * 60 * 1000,
+      lastReinforcedAt,
       lastReinforcedSessionID: "blocked-reinforce-session",
     };
     await updateWorkspaceMemory(tmpDir, store => {
@@ -1199,8 +1404,10 @@ test("session.compacted emits rejected evidence when numbered REINFORCE is block
       directory: tmpDir,
       client: mockClientWithCompactionSummary("Memory candidates:\nREINFORCE [M1]"),
     });
-    await (plugin as Record<string, Function>)["event"]({
-      event: { type: "session.compacted", properties: { sessionID: "blocked-reinforce-session" } },
+    await withMockedDateNow(nowMs, async () => {
+      await (plugin as Record<string, Function>)["event"]({
+        event: { type: "session.compacted", properties: { sessionID: "blocked-reinforce-session" } },
+      });
     });
 
     const workspace = await loadWorkspaceMemory(tmpDir);
@@ -1209,13 +1416,31 @@ test("session.compacted emits rejected evidence when numbered REINFORCE is block
     assert.equal(blocked?.reinforcementCount, 1);
 
     const events = await queryEvidenceEvents(tmpDir, { types: ["memory_reinforced"] });
-    assert.ok(events.some(event =>
+    const event = events.find(event =>
       event.outcome === "rejected" &&
       event.reasonCodes.includes("reinforcement_window_blocked") &&
+      event.reasonCodes.includes("reinforcement_block_min_elapsed_window") &&
       event.memory?.memoryId === existing.id &&
       event.relations?.some(relation => relation.role === "target" && relation.memory?.memoryId === existing.id) &&
       !event.relations?.some(relation => relation.role === "reinforced")
-    ));
+    );
+    assert.ok(event, "blocked numbered REINFORCE should emit elapsed-window evidence");
+    assert.equal(event.instrumentationVersion, 3);
+    assert.equal(event.reasonCodes.includes("reinforcement_block_same_session"), false);
+    assert.equal(event.reasonCodes.includes("reinforcement_block_same_utc_day"), false);
+    assert.equal(event.reasonCodes.includes("reinforcement_block_min_interval"), false);
+    assert.equal(event.reasonCodes.includes("reinforcement_block_max_count"), false);
+    assert.equal(event.details?.blockReason, "min_elapsed_window");
+    assert.equal(event.details?.elapsedMs, 7 * 24 * 60 * 60 * 1000 - 60 * 60 * 1000);
+    assert.equal(event.details?.requiredElapsedMs, 7 * 24 * 60 * 60 * 1000);
+    assert.equal(event.details?.sameSession, true);
+    assert.equal(event.details?.attemptedAtMs, nowMs);
+    assert.equal(event.details?.lastReinforcedAtMs, lastReinforcedAt);
+    assert.equal(event.details?.reinforcementCount, 1);
+    assert.equal(event.details?.maxReinforcementCount, 6);
+    assert.equal("minIntervalMs" in (event.details ?? {}), false);
+    assert.equal("reinforcementMode" in (event.details ?? {}), false);
+    assert.equal(JSON.stringify(event.details).includes("blocked-reinforce-session"), false);
   } finally {
     await rm(tmpDir, { recursive: true, force: true });
   }

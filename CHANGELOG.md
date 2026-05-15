@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.4] - 2026-05-15
+
+### Changed
+
+- Replaced same-session reinforcement blocking with a rolling 7-day elapsed reinforcement window so long-lived OpenCode sessions can reinforce durable memories after meaningful weekly recurrence.
+- Kept the 45-day base half-life while changing the max reinforcement count to a growth saturation point: memories at count 6 can refresh retention timestamps weekly without increasing count or effective half-life.
+- Bumped memory evidence instrumentation to version 3 for the new elapsed-window and refresh-only reinforcement semantics.
+- Updated `memory-diag commands --memory` to show elapsed-window details, `sameSession` evidence, `reinforcementMode`, and legacy missing timestamp markers without exposing raw session IDs.
+- Updated `memory-diag quality` to keep historical `same_session` block accounting while preventing new `sameSession` evidence from triggering old same-session diagnostic questions.
+
+### Fixed
+
+- Prevented long-lived sessions from indefinitely blocking reinforcement solely because the session ID stayed the same across days.
+- Prevented saturated memories from growing stronger beyond the max reinforcement count while still allowing continued weekly use to keep them fresh.
+- Preserved historical block reason compatibility for `same_session`, `same_utc_day`, `min_interval`, and `max_count` without producing those reasons from the new policy path.
+
 ## [1.6.3] - 2026-05-14
 
 ### Added

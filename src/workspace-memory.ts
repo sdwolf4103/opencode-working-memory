@@ -7,6 +7,7 @@ import { atomicWriteJSON, readJSON, updateJSON } from "./storage.ts";
 import { assessMemoryQuality, isHardQualityReason, isProgressSnapshotViolation } from "./memory-quality.ts";
 import { redactCredentials } from "./redaction.ts";
 import {
+  REINFORCEMENT_MAX_COUNT,
   RETENTION_TYPE_MAX,
   calculateRetentionStrength,
   tryReinforceMemory,
@@ -768,7 +769,7 @@ export function dedupeLongTermEntriesWithAccounting(entries: LongTermMemoryEntry
         now,
       );
       const reinforced = decision.memory;
-      const reinforcedEvent = reinforcementEvidence(retained, dropped, decision, reason, now);
+      const reinforcedEvent = reinforcementEvidence(retained, dropped, decision, reason);
       if (reinforcedEvent) evidence.push(reinforcedEvent);
 
       absorbed.push(consolidationEvent(dropped, reason, reinforced));
@@ -797,7 +798,7 @@ export function dedupeLongTermEntriesWithAccounting(entries: LongTermMemoryEntry
         now,
       );
       const reinforced = decision.memory;
-      const reinforcedEvent = reinforcementEvidence(retained, dropped, decision, reason, now);
+      const reinforcedEvent = reinforcementEvidence(retained, dropped, decision, reason);
       if (reinforcedEvent) evidence.push(reinforcedEvent);
 
       if (reason === "superseded_existing") {
@@ -841,7 +842,6 @@ function reinforcementEvidence(
   dropped: LongTermMemoryEntry,
   decision: ReinforcementDecision,
   reason: "absorbed_exact" | "absorbed_identity" | "superseded_existing",
-  attemptedAt: number,
 ): EvidenceEventInput | undefined {
   const duplicateReason = reason === "absorbed_identity" ? "duplicate_identity" : "duplicate_exact";
   if (decision.outcome === "blocked") {
@@ -859,21 +859,19 @@ function reinforcementEvidence(
         memoryId: retained.id,
         droppedMemoryId: dropped.id,
         blockReason: decision.blockReason,
-        attemptedAtMs: attemptedAt,
-        attemptedAtIso: new Date(attemptedAt).toISOString(),
-        ...(decision.lastReinforcedAt ? {
-          lastReinforcedAtMs: decision.lastReinforcedAt,
-          lastReinforcedAtIso: new Date(decision.lastReinforcedAt).toISOString(),
-        } : {}),
+        ...reinforcementDecisionTimingDetails(decision),
         reinforcementCount: decision.reinforcementCount,
         maxReinforcementCount: decision.maxReinforcementCount,
-        minIntervalMs: decision.minIntervalMs,
       },
       textPreview: retained.text,
     };
   }
 
   const reinforced = decision.memory;
+  const reasonCodes = [duplicateReason, "reinforcement_window_allowed"];
+  if (decision.reinforcementMode === "refresh_only") {
+    reasonCodes.push("reinforcement_saturation_refresh");
+  }
   return {
     type: "memory_reinforced",
     phase: "reinforcement",
@@ -883,15 +881,34 @@ function reinforcementEvidence(
       { role: "reinforced", memory: memoryEvidenceRef(reinforced) },
       { role: "reinforced_by", memory: memoryEvidenceRef(dropped) },
     ],
-    reasonCodes: [duplicateReason, "reinforcement_window_allowed"],
+    reasonCodes,
     details: {
       memoryId: reinforced.id,
       droppedMemoryId: dropped.id,
-      reinforcementOutcome: "reinforced",
+      reinforcementOutcome: decision.reinforcementMode === "refresh_only" ? "refreshed" : "reinforced",
+      reinforcementMode: decision.reinforcementMode,
+      ...reinforcementDecisionTimingDetails(decision),
       previousReinforcementCount: decision.previousReinforcementCount,
       newReinforcementCount: decision.newReinforcementCount,
+      reinforcementCount: decision.newReinforcementCount,
+      maxReinforcementCount: REINFORCEMENT_MAX_COUNT,
     },
     textPreview: reinforced.text,
+  };
+}
+
+function reinforcementDecisionTimingDetails(decision: ReinforcementDecision): EvidenceEventInput["details"] {
+  return {
+    attemptedAtMs: decision.attemptedAt,
+    attemptedAtIso: new Date(decision.attemptedAt).toISOString(),
+    ...(decision.lastReinforcedAt !== undefined ? {
+      lastReinforcedAtMs: decision.lastReinforcedAt,
+      lastReinforcedAtIso: new Date(decision.lastReinforcedAt).toISOString(),
+    } : {}),
+    ...(decision.elapsedMs !== undefined ? { elapsedMs: decision.elapsedMs } : {}),
+    requiredElapsedMs: decision.requiredElapsedMs,
+    sameSession: decision.sameSession,
+    ...(decision.legacyMissingTimestamp ? { legacyMissingTimestamp: true } : {}),
   };
 }
 

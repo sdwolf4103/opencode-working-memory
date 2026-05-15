@@ -571,9 +571,9 @@ function applyInstrumentedAnswerability(
     report.reinforcementRules.currentSignals = uniqueStrings([
       ...report.reinforcementRules.currentSignals,
       "exact block reasons",
-      "UTC day grouping",
+      "elapsed-window details when present",
     ]);
-    report.reinforcementRules.outputPermission = "Show exact block reasons and day grouping; causal fields exist but human content judgment is still required.";
+    report.reinforcementRules.outputPermission = "Show exact block reasons and elapsed-window details when present; causal fields exist but human content judgment is still required.";
   }
 
   const hasCapacitySnapshots = evictionFacts.recentCapacityRemovalsWithSnapshot > 0

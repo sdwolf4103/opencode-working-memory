@@ -44,7 +44,7 @@ import {
   workspaceMemoryExactKey,
   workspaceMemoryIdentityKey,
 } from "./workspace-memory.ts";
-import { tryReinforceMemory } from "./retention.ts";
+import { REINFORCEMENT_MAX_COUNT, tryReinforceMemory, type ReinforcementDecision } from "./retention.ts";
 import {
   appendPendingMemories,
   clearPendingMemories,
@@ -311,6 +311,21 @@ export const MemoryV2Plugin: Plugin = async (input) => {
     };
   }
 
+  function reinforcementDecisionTimingDetails(decision: ReinforcementDecision): EvidenceEventInput["details"] {
+    return {
+      attemptedAtMs: decision.attemptedAt,
+      attemptedAtIso: new Date(decision.attemptedAt).toISOString(),
+      ...(decision.lastReinforcedAt !== undefined ? {
+        lastReinforcedAtMs: decision.lastReinforcedAt,
+        lastReinforcedAtIso: new Date(decision.lastReinforcedAt).toISOString(),
+      } : {}),
+      ...(decision.elapsedMs !== undefined ? { elapsedMs: decision.elapsedMs } : {}),
+      requiredElapsedMs: decision.requiredElapsedMs,
+      sameSession: decision.sameSession,
+      ...(decision.legacyMissingTimestamp ? { legacyMissingTimestamp: true } : {}),
+    };
+  }
+
   function replacementMemoryId(): string {
     return `mem_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   }
@@ -434,26 +449,28 @@ export const MemoryV2Plugin: Plugin = async (input) => {
             evidence.push(memoryReinforcedEvidence(target, command.ref, "rejected", ["numbered_ref_reinforce", "reinforcement_window_blocked", `reinforcement_block_${decision.blockReason}`], {
               memoryId: refSnapshot.memoryId,
               blockReason: decision.blockReason,
-              attemptedAtMs: now,
-              attemptedAtIso: new Date(now).toISOString(),
-              ...(decision.lastReinforcedAt ? {
-                lastReinforcedAtMs: decision.lastReinforcedAt,
-                lastReinforcedAtIso: new Date(decision.lastReinforcedAt).toISOString(),
-              } : {}),
+              ...reinforcementDecisionTimingDetails(decision),
               reinforcementCount: decision.reinforcementCount,
               maxReinforcementCount: decision.maxReinforcementCount,
-              minIntervalMs: decision.minIntervalMs,
             }));
             continue;
           }
 
           const reinforced = decision.memory;
           workspaceMemory.entries[targetIndex] = reinforced;
-          evidence.push(memoryReinforcedEvidence(reinforced, command.ref, "reinforced", ["numbered_ref_reinforce", "reinforcement_window_allowed"], {
+          const reasonCodes = ["numbered_ref_reinforce", "reinforcement_window_allowed"];
+          if (decision.reinforcementMode === "refresh_only") {
+            reasonCodes.push("reinforcement_saturation_refresh");
+          }
+          evidence.push(memoryReinforcedEvidence(reinforced, command.ref, "reinforced", reasonCodes, {
             memoryId: refSnapshot.memoryId,
-            reinforcementOutcome: "reinforced",
+            reinforcementOutcome: decision.reinforcementMode === "refresh_only" ? "refreshed" : "reinforced",
+            reinforcementMode: decision.reinforcementMode,
+            ...reinforcementDecisionTimingDetails(decision),
             previousReinforcementCount: decision.previousReinforcementCount,
             newReinforcementCount: decision.newReinforcementCount,
+            reinforcementCount: decision.newReinforcementCount,
+            maxReinforcementCount: REINFORCEMENT_MAX_COUNT,
           }));
           continue;
         }

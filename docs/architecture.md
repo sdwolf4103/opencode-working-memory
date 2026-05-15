@@ -77,7 +77,7 @@ Workspace diagnostics also read the append-only evidence log for the current wor
 }
 ```
 
-Instrumentation version 2 adds optional causal details for future diagnostics without backfilling old JSONL records. Reinforcement-block events may include `details.blockReason` (for example `same_session` or `same_utc_day`). Capacity-removal events may include `details.strengthAtRemoval`, `details.rankAtRemoval`, `details.typeRankAtRemoval`, and `details.ageDaysAtRemoval`. `memory-diag quality` treats missing producer/instrumentation fields as historical or ambiguous rather than proof of current behavior.
+Instrumentation version 2 added optional causal block details for diagnostics without backfilling old JSONL records. Instrumentation version 3 adds elapsed-window reinforcement details such as `details.elapsedMs`, `details.requiredElapsedMs`, `details.sameSession`, `details.reinforcementMode`, and `details.legacyMissingTimestamp`. Historical reinforcement-block events may still include older `details.blockReason` values such as `same_session`, `same_utc_day`, `min_interval`, `max_count`, or may have missing block details. Capacity-removal events may include `details.strengthAtRemoval`, `details.rankAtRemoval`, `details.typeRankAtRemoval`, and `details.ageDaysAtRemoval`. `memory-diag quality` treats missing producer/instrumentation fields as historical or ambiguous rather than proof of current behavior.
 
 ### Entry Types
 
@@ -154,7 +154,7 @@ Default type caps:
 
 The type-cap total is 34, intentionally above the global 28-entry cap. These are maximums, not quotas.
 
-Dormant workspaces age more slowly: after 14 inactive days, additional dormant time counts at 0.25x for retention decay. Repeated duplicate memories reinforce the surviving entry and slow future decay, but same-session and under-one-hour repeats do not stack reinforcement.
+Dormant workspaces age more slowly: after 14 inactive days, additional dormant time counts at 0.25x for retention decay. Repeated duplicate memories reinforce the surviving entry only after a rolling 7-day elapsed window. Below reinforcement count 6, an allowed recurrence increments the reinforcement count and refreshes retention timestamps; at count 6 or higher, an allowed recurrence refreshes retention timestamps without increasing the count. Same-session status is recorded as diagnostic evidence, not as a new-policy block reason.
 
 ### Safety-Critical Deprecation
 

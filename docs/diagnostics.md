@@ -38,8 +38,8 @@ Every diagnostic section must document:
 For `memory-diag quality`:
 - `reinforcementRules`: `inventory_only` (cannot distinguish spam from legitimate blocks)
 - `evictionAndCaps`: `inventory_only` (cannot distinguish healthy turnover from premature eviction)
-- Old evidence remains ambiguous. Answerability improves only for events produced after instrumentation version 2. Mixed old/new logs will show a mix of `inventory_only` and `partial` sections.
-- Producer-instrumented reinforcement blocks can upgrade `reinforcementRules` to `partial` by showing exact block reasons and UTC-day grouping; they still require human content judgment.
+- Old evidence remains ambiguous. Answerability improves for producer-instrumented events, including instrumentation version 2 block details and instrumentation version 3 elapsed-window details. Mixed old/new logs will show a mix of `inventory_only` and `partial` sections.
+- Producer-instrumented reinforcement blocks can upgrade `reinforcementRules` to `partial` by showing exact block reasons and, when available, rolling elapsed-window fields; they still require human content judgment.
 - Producer-instrumented capacity removals with rank/strength snapshots can upgrade `evictionAndCaps` to `partial`; fullness alone remains occupancy inventory, not proof of a capacity problem.
 
 ## Examples
@@ -78,9 +78,11 @@ npx --package opencode-working-memory memory-diag commands --verbose
 npx --package opencode-working-memory memory-diag commands --memory <memory-id>
 ```
 
-The report includes successful reinforcements, successful replacements, malformed commands, stale refs, protected replacement blocks, and latest command events in verbose mode.
+The report includes successful reinforcements, refresh-only reinforcements, successful replacements, malformed commands, stale refs, protected replacement blocks, and latest command events in verbose mode.
 
-Use `commands --memory <memory-id>` when you need a focused, evidence-only reinforcement view for one memory. It reports current memory status separately from recorded reinforcement attempts, block reasons, missing block details, and UTC-day evidence without judging whether the policy is correct.
+Use `commands --memory <memory-id>` when you need a focused, evidence-only reinforcement view for one memory. It reports current memory status separately from recorded reinforcement attempts, block reasons, missing block details, elapsed-window fields (`elapsedMs`, `requiredElapsedMs`), `sameSession` evidence, `reinforcementMode` (`increment` or `refresh_only`), `legacyMissingTimestamp` when true, and historical UTC-day evidence without judging whether the policy is correct.
+
+Current reinforcement policy uses a rolling 7-day elapsed window. Below reinforcement count 6, allowed attempts increment the count and refresh retention timestamps; at count 6 or higher, allowed attempts refresh retention timestamps without increasing the count. Historical evidence can still show older block reasons such as `same_session`, `same_utc_day`, `min_interval`, `max_count`, or missing block details because evidence logs are append-only and are not backfilled.
 
 ## Dry-run Recovery
 

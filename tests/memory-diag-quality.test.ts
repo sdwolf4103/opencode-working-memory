@@ -373,7 +373,7 @@ test("new evidence events include producer metadata and historical events remain
 
     assert.equal(stored.producerName, "opencode-working-memory");
     assert.equal(stored.producerVersion, packageJson.version);
-    assert.equal(stored.instrumentationVersion, 2);
+    assert.equal(stored.instrumentationVersion, 3);
 
     const historical = event("evt-historical-no-producer", {
       type: "render_selected",
@@ -745,6 +745,48 @@ test("quality surfaces same-session cross-day reinforcement as design diagnostic
   assert.match(output, /2026-05-13/);
   assert.match(output, /2026-05-12/);
   assert.doesNotMatch(output, /definitely a bug/i);
+});
+
+test("quality treats elapsed-window and refresh-only reinforcement as new evidence without old same-session question", () => {
+  const report = buildQualityReviewBoard(inspectionModel([], [
+    reinforcementAttempt("evt-elapsed-window-block", packageJson.version, true, {
+      instrumentationVersion: 3,
+      reasonCodes: ["numbered_ref_reinforce", "reinforcement_window_blocked", "reinforcement_block_min_elapsed_window"],
+      details: {
+        blockReason: "min_elapsed_window",
+        elapsedMs: 601_200_000,
+        requiredElapsedMs: 604_800_000,
+        sameSession: true,
+        attemptedAtIso: "2026-05-13T07:48:21.361Z",
+        lastReinforcedAtIso: "2026-05-06T08:48:21.361Z",
+      },
+    }),
+    reinforcementAttempt("evt-refresh-only", packageJson.version, false, {
+      instrumentationVersion: 3,
+      reasonCodes: ["numbered_ref_reinforce", "reinforcement_window_allowed", "reinforcement_saturation_refresh"],
+      details: {
+        reinforcementMode: "refresh_only",
+        elapsedMs: 604_800_000,
+        requiredElapsedMs: 604_800_000,
+        sameSession: true,
+      },
+    }),
+    ...Array.from({ length: 4 }, (_, index) => reinforcementAttempt(`evt-elapsed-ok-${index}`, packageJson.version, false, { instrumentationVersion: 3 })),
+  ]), {}, generatedAt);
+  const facts = report.facts.systemMechanisms.reinforcementRules;
+  const versionedFacts = report.facts.systemMechanisms.versionedFacts?.reinforcementRules.buckets.current.facts;
+  const output = formatQualityReviewBoard(report, {});
+
+  assert.equal(facts.blocksByExactReason.min_elapsed_window, 1);
+  assert.equal(facts.blocksByExactReason.same_session, undefined);
+  assert.equal(facts.reinforcedEvents, 5);
+  assert.equal(facts.rejectedOrBlockedEvents, 1);
+  assert.equal(versionedFacts?.blocksByExactReason.min_elapsed_window, 1);
+  assert.equal(versionedFacts?.reinforcedEvents, 5);
+  assert.equal(versionedFacts?.rejectedOrBlockedEvents, 1);
+  assert.equal(report.facts.systemMechanisms.versionedFacts?.reinforcementRules.diagnosticQuestions, undefined);
+  assert.doesNotMatch(output, /Should same_session reinforcement blocking apply across UTC days/i);
+  assert.doesNotMatch(output, /same_session=1/);
 });
 
 test("versioned quality warns when current reinforcement sample is small", () => {
