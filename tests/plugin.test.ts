@@ -2536,6 +2536,226 @@ test("chat system transform evicts oldest frozen snapshots when cache exceeds se
   }
 });
 
+test("hot session state base prompt stays stable across turns with file edits", async () => {
+  const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-test-"));
+
+  try {
+    const client = mockRootClient();
+    const plugin = await MemoryV2Plugin({ directory: tmpDir, client });
+
+    // Simulate initial tool usage to seed session state with a file
+    await (plugin as Record<string, Function>)["tool.execute.after"](
+      { sessionID: "hot-state-stable-session", tool: "edit", args: { filePath: join(tmpDir, "src/test.ts") } },
+      { output: "" },
+    );
+
+    // First transform: creates frozen hot state snapshot with file count=1
+    const output1 = { system: ["base header"] };
+    await (plugin as Record<string, Function>)["experimental.chat.system.transform"](
+      { sessionID: "hot-state-stable-session", model: {} },
+      output1,
+    );
+
+    const firstHotState = output1.system.find((part: string) => part.startsWith("Hot session state"));
+    assert.ok(firstHotState, "first transform should have hot state");
+    assert.match(firstHotState ?? "", /src\/test\.ts.*edit.*1x/,
+      "hot state should show file with count 1x");
+
+    // Simulate another edit to the same file (count becomes 2)
+    await (plugin as Record<string, Function>)["tool.execute.after"](
+      { sessionID: "hot-state-stable-session", tool: "edit", args: { filePath: join(tmpDir, "src/test.ts") } },
+      { output: "" },
+    );
+
+    // Second transform: base prompt should be identical (frozen), delta should show change
+    const output2 = { system: ["base header"] };
+    await (plugin as Record<string, Function>)["experimental.chat.system.transform"](
+      { sessionID: "hot-state-stable-session", model: {} },
+      output2,
+    );
+
+    const secondHotState = output2.system.find((part: string) => part.startsWith("Hot session state"));
+
+    // Base prompt should be the same reference (frozen cache hit)
+    assert.equal(secondHotState, firstHotState,
+      "hot state base prompt must stay stable after file edit");
+
+    // Delta section should appear with changed counts
+    const deltaSection = output2.system.find((part: string) => part.startsWith("Hot state deltas"));
+    assert.ok(deltaSection, "delta section should appear when file counts change");
+    assert.match(deltaSection ?? "", /src\/test\.ts count: 1→2/,
+      "delta should show the file count change from 1 to 2");
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("hot session state delta does not appear when counts unchanged", async () => {
+  const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-test-"));
+
+  try {
+    const client = mockRootClient();
+    const plugin = await MemoryV2Plugin({ directory: tmpDir, client });
+
+    // First transform: creates frozen hot state snapshot
+    const output1 = { system: ["base header"] };
+    await (plugin as Record<string, Function>)["experimental.chat.system.transform"](
+      { sessionID: "no-delta-session", model: {} },
+      output1,
+    );
+
+    // Second transform without any tool usage: no changes
+    const output2 = { system: ["base header"] };
+    await (plugin as Record<string, Function>)["experimental.chat.system.transform"](
+      { sessionID: "no-delta-session", model: {} },
+      output2,
+    );
+
+    const deltaSection = output2.system.find((part: string) => part.startsWith("Hot state deltas"));
+    assert.equal(deltaSection, undefined,
+      "delta section should not appear when no file counts changed");
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("hot session state delta reports new files not in snapshot", async () => {
+  const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-test-"));
+
+  try {
+    const client = mockRootClient();
+    const plugin = await MemoryV2Plugin({ directory: tmpDir, client });
+
+    // First transform: creates frozen hot state snapshot (empty)
+    const output1 = { system: ["base header"] };
+    await (plugin as Record<string, Function>)["experimental.chat.system.transform"](
+      { sessionID: "new-file-session", model: {} },
+      output1,
+    );
+
+    // Simulate editing a new file after snapshot
+    await (plugin as Record<string, Function>)["tool.execute.after"](
+      { sessionID: "new-file-session", tool: "edit", args: { filePath: join(tmpDir, "src/new.ts") } },
+      { output: "" },
+    );
+
+    // Second transform: delta should report the new file
+    const output2 = { system: ["base header"] };
+    await (plugin as Record<string, Function>)["experimental.chat.system.transform"](
+      { sessionID: "new-file-session", model: {} },
+      output2,
+    );
+
+    const deltaSection = output2.system.find((part: string) => part.startsWith("Hot state deltas"));
+    assert.ok(deltaSection, "delta section should appear for new files");
+    assert.match(deltaSection ?? "", /src\/new\.ts count: new→1/,
+      "delta should report new file with new→count format");
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("hot session state delta reports evicted files removed from snapshot", async () => {
+  const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-test-"));
+
+  try {
+    // Seed session state with a file before snapshot
+    const { updateSessionState } = await import("../src/session-state.ts");
+    await updateSessionState(tmpDir, "evict-session", state => {
+      state.activeFiles.push({
+        path: join(tmpDir, "src/evicted.ts"),
+        action: "edit",
+        count: 5,
+        lastSeen: Date.now(),
+      });
+      return state;
+    });
+
+    const client = mockRootClient();
+    const plugin = await MemoryV2Plugin({ directory: tmpDir, client });
+
+    // First transform: creates frozen hot state snapshot with evicted.ts
+    const output1 = { system: ["base header"] };
+    await (plugin as Record<string, Function>)["experimental.chat.system.transform"](
+      { sessionID: "evict-session", model: {} },
+      output1,
+    );
+
+    const firstHotState = output1.system.find((part: string) => part.startsWith("Hot session state"));
+    assert.ok(firstHotState, "first transform should have hot state");
+    assert.match(firstHotState ?? "", /src\/evicted\.ts/,
+      "hot state should contain evicted.ts in base prompt");
+
+    // Remove the file from session state (simulates eviction by cap)
+    await updateSessionState(tmpDir, "evict-session", state => {
+      state.activeFiles = [];
+      return state;
+    });
+
+    // Second transform: delta should report the file as removed
+    const output2 = { system: ["base header"] };
+    await (plugin as Record<string, Function>)["experimental.chat.system.transform"](
+      { sessionID: "evict-session", model: {} },
+      output2,
+    );
+
+    const deltaSection = output2.system.find((part: string) => part.startsWith("Hot state deltas"));
+    assert.ok(deltaSection, "delta section should appear when files are removed");
+    assert.match(deltaSection ?? "", /src\/evicted\.ts removed/,
+      "delta should report removed file");
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("hot session state cache invalidates when pending memories change", async () => {
+  const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-test-"));
+
+  try {
+    let latestMessages: Array<Record<string, unknown>> = [];
+    const client = {
+      session: {
+        get: async () => ({ data: { parentID: null } }),
+        messages: async () => ({ data: latestMessages }),
+        todo: async () => ({ data: [] }),
+      },
+    };
+    const plugin = await MemoryV2Plugin({ directory: tmpDir, client });
+
+    // First transform: creates frozen hot state snapshot (empty)
+    const output1 = { system: ["base header"] };
+    await (plugin as Record<string, Function>)["experimental.chat.system.transform"](
+      { sessionID: "pending-invalidate-session", model: {} },
+      output1,
+    );
+
+    const firstHotState = output1.system.find((part: string) => part.startsWith("Hot session state"));
+
+    // User says "remember X" - this adds a pending memory
+    latestMessages = [{
+      info: { role: "user", id: "msg-pending-1" },
+      parts: [{ type: "text", text: "remember this: pending memory triggers cache invalidation." }],
+    }];
+
+    // Second transform: should re-render hot state (pending memory changed)
+    const output2 = { system: ["base header"] };
+    await (plugin as Record<string, Function>)["experimental.chat.system.transform"](
+      { sessionID: "pending-invalidate-session", model: {} },
+      output2,
+    );
+
+    const secondHotState = output2.system.find((part: string) => part.startsWith("Hot session state"));
+
+    // Hot state should be different (re-rendered with pending memory)
+    assert.notEqual(secondHotState, firstHotState,
+      "hot state should re-render when pending memories change");
+    assert.match(secondHotState ?? "", /pending memory triggers cache invalidation/,
+      "re-rendered hot state should contain the new pending memory");
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
 test("processed user message cache keeps only the latest message IDs per session", async () => {
   const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-test-"));
 

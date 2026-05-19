@@ -385,7 +385,7 @@ function rankActiveFiles(activeFiles: ActiveFile[]): ActiveFile[] {
   });
 }
 
-function displayPath(workspaceRoot: string, filePath: string): string {
+export function displayPath(workspaceRoot: string, filePath: string): string {
   if (!workspaceRoot || !filePath.startsWith(workspaceRoot)) return filePath;
   return relative(workspaceRoot, filePath) || ".";
 }

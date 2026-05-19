@@ -61,6 +61,7 @@ import {
   markErrorsMaybeFixedForFile,
   addRecentDecision,
   renderHotSessionState,
+  displayPath,
 } from "./session-state.ts";
 import { sessionStatePath, workspaceKey } from "./paths.ts";
 import {
@@ -257,6 +258,18 @@ export const MemoryV2Plugin: Plugin = async (input) => {
     {
       store: Awaited<ReturnType<typeof loadWorkspaceMemory>>;
       renderedPrompt: string;
+      loadedAt: number;
+    }
+  >();
+
+  // Cache for frozen hot session state per session.
+  // Stores the rendered prompt and a snapshot of counts for delta computation.
+  const frozenHotSessionStateCache = new Map<
+    string,
+    {
+      renderedPrompt: string;
+      pendingMemoryIds: string[];
+      fileCounts: Map<string, number>;
       loadedAt: number;
     }
   >();
@@ -758,15 +771,14 @@ export const MemoryV2Plugin: Plugin = async (input) => {
         state.pendingMemories = state.pendingMemories.filter(memory => {
           const key = memoryKey(memory);
           if (!sessionRemovalKeys.has(key)) return true;
-
           if (accounting.clearableKeys.has(key)) return false;
           if (exhaustedRejectedKeys.has(key)) return false;
-
           return true;
         });
         return state;
       });
       clearFrozenWorkspaceMemoryCache(sessionID);
+      clearFrozenHotSessionStateCache(sessionID);
     }
 
     if (accounting.clearableKeys.size > 0) {
@@ -840,6 +852,105 @@ export const MemoryV2Plugin: Plugin = async (input) => {
     frozenWorkspaceMemoryCache.delete(sessionID);
   }
 
+  /**
+   * Get frozen hot session state snapshot for a session.
+   * Returns the rendered prompt plus any delta section for changed file counts.
+   * The base prompt is frozen at snapshot time; only the delta changes between turns.
+   */
+  async function getFrozenHotSessionStateSnapshot(
+    root: string,
+    sessionID: string
+  ): Promise<{
+    basePrompt: string;
+    deltaPrompt: string;
+  }> {
+    const now = Date.now();
+    pruneFrozenHotSessionStateCache(now);
+
+    const sessionState = await loadSessionState(root, sessionID);
+    const currentPendingIds = sessionState.pendingMemories.map(m => m.id).sort();
+    const currentFileCounts = buildFileCountMap(sessionState);
+
+    const cached = frozenHotSessionStateCache.get(sessionID);
+    const pendingChanged = !cached || !arraysEqual(cached.pendingMemoryIds, currentPendingIds);
+
+    if (cached && !pendingChanged) {
+      const delta = computeHotStateDelta(cached.fileCounts, currentFileCounts, root);
+      return { basePrompt: cached.renderedPrompt, deltaPrompt: delta };
+    }
+
+    const renderedPrompt = renderHotSessionState(sessionState, root);
+    frozenHotSessionStateCache.set(sessionID, {
+      renderedPrompt,
+      pendingMemoryIds: currentPendingIds,
+      fileCounts: currentFileCounts,
+      loadedAt: now,
+    });
+    pruneFrozenHotSessionStateCache(now);
+    return { basePrompt: renderedPrompt, deltaPrompt: "" };
+  }
+
+  function buildFileCountMap(state: Awaited<ReturnType<typeof loadSessionState>>): Map<string, number> {
+    const map = new Map<string, number>();
+    for (const file of state.activeFiles) {
+      map.set(file.path, file.count);
+    }
+    return map;
+  }
+
+  function computeHotStateDelta(
+    cachedCounts: Map<string, number>,
+    currentCounts: Map<string, number>,
+    root: string,
+  ): string {
+    const changed: string[] = [];
+    for (const [path, count] of currentCounts) {
+      const cached = cachedCounts.get(path);
+      if (cached === undefined) {
+        changed.push(`- ${displayPath(root, path)} count: new→${count}`);
+      } else if (cached !== count) {
+        changed.push(`- ${displayPath(root, path)} count: ${cached}→${count}`);
+      }
+    }
+    for (const [path] of cachedCounts) {
+      if (!currentCounts.has(path)) {
+        changed.push(`- ${displayPath(root, path)} removed`);
+      }
+    }
+    if (changed.length === 0) return "";
+    return ["Hot state deltas (since snapshot):", ...changed].join("\n");
+  }
+
+  function arraysEqual(a: string[], b: string[]): boolean {
+    if (a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) {
+      if (a[i] !== b[i]) return false;
+    }
+    return true;
+  }
+
+  /**
+   * Clear frozen hot session state cache (e.g., after compaction).
+   */
+  function clearFrozenHotSessionStateCache(sessionID: string): void {
+    frozenHotSessionStateCache.delete(sessionID);
+  }
+
+  function pruneFrozenHotSessionStateCache(now = Date.now()): void {
+    for (const [sessionID, cached] of frozenHotSessionStateCache) {
+      if (now - cached.loadedAt > WORKSPACE_MEMORY_CACHE_LIMITS.frozenTtlMs) {
+        frozenHotSessionStateCache.delete(sessionID);
+      }
+    }
+
+    while (frozenHotSessionStateCache.size > WORKSPACE_MEMORY_CACHE_LIMITS.maxFrozenSessions) {
+      const oldest = [...frozenHotSessionStateCache.entries()]
+        .sort((a, b) => a[1].loadedAt - b[1].loadedAt)[0]?.[0];
+      if (!oldest) break;
+      frozenHotSessionStateCache.delete(oldest);
+    }
+  }
+
   function sessionIDFromEventProperties(properties: unknown): string | undefined {
     const props = properties as { sessionID?: string; info?: { id?: string } } | undefined;
     return props?.sessionID ?? props?.info?.id;
@@ -860,6 +971,7 @@ export const MemoryV2Plugin: Plugin = async (input) => {
 
       try {
         pruneFrozenWorkspaceMemoryCache();
+        pruneFrozenHotSessionStateCache();
         pruneProcessedUserMessagesCache();
 
         // Sub-agents are short-lived - skip memory system
@@ -879,18 +991,22 @@ export const MemoryV2Plugin: Plugin = async (input) => {
         // Get frozen workspace memory snapshot (loaded and rendered once per session)
         const workspaceSnapshot = await getFrozenWorkspaceMemorySnapshot(directory, sessionID);
 
-        // Get current hot session state
-        const sessionState = await loadSessionState(directory, sessionID);
+        // Get frozen hot session state snapshot (re-renders only when pending memories change)
+        const hotSnapshot = await getFrozenHotSessionStateSnapshot(directory, sessionID);
 
         // Inject frozen workspace memory snapshot
         if (workspaceSnapshot.renderedPrompt) {
           output.system.push(workspaceSnapshot.renderedPrompt);
         }
 
-        // Render and inject hot session state
-        const hotPrompt = renderHotSessionState(sessionState, directory);
-        if (hotPrompt) {
-          output.system.push(hotPrompt);
+        // Inject frozen hot session state base
+        if (hotSnapshot.basePrompt) {
+          output.system.push(hotSnapshot.basePrompt);
+        }
+
+        // Inject hot state delta (changed file counts since snapshot)
+        if (hotSnapshot.deltaPrompt) {
+          output.system.push(hotSnapshot.deltaPrompt);
         }
       } catch (error) {
         await warnMemoryHook("chat.system.transform", error, directory);
@@ -1078,6 +1194,7 @@ export const MemoryV2Plugin: Plugin = async (input) => {
             promoted = true;
             if (promoted) {
               frozenWorkspaceMemoryCache.delete(sessionID);
+              frozenHotSessionStateCache.delete(sessionID);
               processedUserMessages.delete(sessionID);
               sessionParentCache.delete(sessionID);
             }
