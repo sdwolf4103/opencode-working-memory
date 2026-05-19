@@ -1,5 +1,43 @@
 # Release Notes
 
+## 1.6.5 (2026-05-19)
+
+### Code Health and Release Hygiene
+
+This patch release is an internal health release before the next feature wave. It does not change memory extraction, reinforcement policy, TUI behavior, or the `memory-diag` CLI contract. Instead, it makes the codebase easier to audit and safer to modify.
+
+The release adds package-version integrity checks, a clean unused-symbol audit, focused characterization tests, storage/evidence contract coverage, a narrow shared memory-type ordering seam, and a small diagnostics versioning extraction.
+
+### What Changed
+
+- **Package integrity check**: added `npm run check:package-integrity` to verify `package.json` and the on-disk `package-lock.json` root versions match, with a clear `run npm install first` message when the ignored lockfile is missing.
+- **Unused-symbol audit**: added `tsconfig.unused.json` and cleaned the existing unused imports/private helpers so the audit now passes cleanly.
+- **Memory type order seam**: centralized the current order (`feedback`, `project`, `decision`, `reference`) for workspace rendering, memory visibility, and TUI grouping without creating a broader policy registry.
+- **Storage/evidence contracts**: documented write-path semantics and added tests for full-state JSON overwrite behavior and concurrent evidence JSONL appends.
+- **Diagnostics containment**: extracted producer-version grouping and inference helpers from `memory-diag quality` into a pure diagnostics-only module while preserving existing output shape and wording.
+- **Characterization coverage**: added render-order coverage and labeled compatibility/policy-contract tests so future refactors can distinguish intentional legacy behavior from brittle fixtures.
+
+### Upgrade Notes
+
+- No configuration changes are required.
+- Existing workspace memory files and evidence logs remain compatible.
+- The `memory-diag` CLI JSON shape and human output wording are intended to be unchanged.
+- `package-lock.json` remains ignored by git in this repository; run `npm install` before `npm run check:package-integrity` if the lockfile is missing locally.
+- `REINFORCEMENT_MIN_INTERVAL_MS` remains exported for compatibility but is now marked `@deprecated`; use `REINFORCEMENT_MIN_ELAPSED_MS` for the rolling reinforcement policy.
+
+### Validation
+
+- `npm run check:package-integrity` — `PACKAGE_INTEGRITY_PASS version=1.6.5`
+- `node --import ./tests/setup-xdg-data-home.ts --test --experimental-strip-types tests/package-integrity.test.ts` — 3 tests passing
+- `./node_modules/.bin/tsc -p tsconfig.unused.json` — no unused-symbol errors
+- `node --test --experimental-strip-types tests/memory-diag-quality.test.ts tests/memory-diag.test.ts` — 93 tests passing
+- `node --import ./tests/setup-xdg-data-home.ts --test --experimental-strip-types tests/storage.test.ts tests/evidence-log.test.ts` — 22 tests passing
+- `npm run typecheck` — `TYPECHECK_PASS`
+- `npm test` — 504 tests passing, `TEST_PASS`
+- `npm run build` — `BUILD_PASS`
+
+---
+
 ## 1.6.4 (2026-05-15)
 
 ### Rolling Weekly Reinforcement

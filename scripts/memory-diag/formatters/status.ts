@@ -3,7 +3,7 @@ import {
   RETENTION_TYPE_MAX,
 } from "../../../src/retention.ts";
 import { TYPES } from "../constants.ts";
-import { daysSinceIso, formatStrength } from "../retention-model.ts";
+import { formatStrength } from "../retention-model.ts";
 import { cleanText, truncate } from "../text.ts";
 import type { MemoryInspectionReadModel, RetentionDiagItem } from "../types.ts";
 

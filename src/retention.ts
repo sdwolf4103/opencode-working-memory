@@ -44,7 +44,8 @@ export const REINFORCEMENT_HALFLIFE_FACTOR = 0.85;
 export const REINFORCEMENT_MAX_COUNT = 6;
 export const DAY_MS = 24 * 60 * 60 * 1000;
 export const REINFORCEMENT_MIN_ELAPSED_MS = 7 * DAY_MS;
-export const REINFORCEMENT_MIN_INTERVAL_MS = 60 * 60 * 1000; // Deprecated compatibility constant; new policy uses REINFORCEMENT_MIN_ELAPSED_MS.
+/** @deprecated Compatibility constant; new policy uses REINFORCEMENT_MIN_ELAPSED_MS. */
+export const REINFORCEMENT_MIN_INTERVAL_MS = 60 * 60 * 1000;
 export const WORKSPACE_DORMANT_AFTER_DAYS = 14;
 export const DORMANT_DECAY_MULTIPLIER = 0.25;
 

@@ -1,6 +1,6 @@
 import type { EvidenceEventV1 } from "../../src/evidence-log.ts";
 import type { LongTermType } from "../../src/types.ts";
-import { countBy, objectFromCounts, uniqueStrings } from "./text.ts";
+import { countBy, objectFromCounts } from "./text.ts";
 import { groupEvidenceByMemoryId } from "./evidence-model.ts";
 import { loadRejectionRecords } from "./rejections-model.ts";
 import { snapshotForOptions } from "./workspace-snapshot.ts";

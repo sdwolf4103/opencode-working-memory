@@ -397,18 +397,6 @@ function evaluateWorkspaceMemoryCandidate(
   return { accepted: true, reasons: ["quality_gate_passed"] };
 }
 
-function shouldAcceptWorkspaceMemoryCandidate(
-  entry: {
-    type: LongTermType;
-    text: string;
-  },
-  options: {
-    fromMemoryTrigger?: boolean;
-  } & WorkspaceMemoryCandidateParseOptions = {},
-): boolean {
-  return evaluateWorkspaceMemoryCandidate(entry, options).accepted;
-}
-
 function commandAttemptReason(line: string): string {
   const normalized = line.replace(/^\s*-\s*/, "").trim();
   const reinforceMatch = normalized.match(/^REINFORCE\s+(.+)$/i);

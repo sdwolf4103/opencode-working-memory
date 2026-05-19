@@ -284,6 +284,9 @@ function buildEvidenceEvent(
 }
 
 async function safeAppendEvidenceLine(path: string, line: string): Promise<void> {
+  // Evidence logs are JSONL append streams, not JSON store read-modify-write
+  // documents. Appends intentionally use appendFile so independent evidence
+  // writers do not need to share the JSON store lock path.
   try {
     await mkdir(dirname(path), { recursive: true });
     await appendFile(path, `${line}\n`, "utf8");
@@ -294,6 +297,9 @@ async function safeAppendEvidenceLine(path: string, line: string): Promise<void>
 }
 
 async function maybePruneEvidenceLog(path: string): Promise<void> {
+  // Bounded pruning is a separate best-effort compaction of the append-only log.
+  // It rewrites the JSONL file only at configured append intervals and never
+  // routes through updateJSON because evidence is not a single JSON document.
   const nextCount = (appendCounts.get(path) ?? 0) + 1;
   appendCounts.set(path, nextCount);
   if (nextCount % EVIDENCE_LOG_LIMITS.pruneEveryAppendCount !== 0) return;

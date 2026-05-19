@@ -208,8 +208,8 @@ const typedData = data as WorkspaceMemoryStore;  // Explicit cast after validati
 // ============================================================================
 
 // ✅ REQUIRED: Block comments for complex logic
-// Quality gate: Reject candidates that are git hashes, errors, or path-heavy
-function shouldAcceptWorkspaceMemoryCandidate(candidate: string): boolean {
+// Quality gate: return accepted/reasons so rejection evidence stays explainable
+function evaluateWorkspaceMemoryCandidate(candidate: WorkspaceMemoryCandidate): CandidateEvaluation {
   // ...
 }
 

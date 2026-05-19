@@ -37,7 +37,6 @@ import {
 import { assessMemoryQuality } from "./memory-quality.ts";
 import {
   loadWorkspaceMemory,
-  updateWorkspaceMemory,
   updateWorkspaceMemoryWithAccounting,
   accountWorkspaceMemoryRender,
   accountWorkspaceMemoryCompactionRefs,

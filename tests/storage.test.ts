@@ -1,11 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { spawn } from "node:child_process";
-import { readJSON, updateJSON } from "../src/storage.ts";
+import { atomicWriteJSON, readJSON, updateJSON } from "../src/storage.ts";
 import { queryEvidenceEvents } from "../src/evidence-log.ts";
 import { workspaceMemoryPath } from "../src/paths.ts";
 
@@ -19,6 +19,23 @@ test("updateJSON serializes concurrent increments", async () => {
 
     const final = await updateJSON(path, () => ({ count: 0 }), current => current);
     assert.equal(final.count, 25);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("atomicWriteJSON is a full-state overwrite primitive", async () => {
+  const root = await mkdtemp(join(tmpdir(), "wm-storage-atomic-overwrite-"));
+  try {
+    const path = join(root, "store.json");
+
+    await atomicWriteJSON(path, { retained: true, removed: true });
+    await atomicWriteJSON(path, { retained: true });
+
+    const raw = await readFile(path, "utf8");
+    assert.deepEqual(JSON.parse(raw), { retained: true });
+    assert.equal(raw.includes("removed"), false, "atomic overwrite should not merge with previous state");
+    assert.equal(existsSync(`${path}.lock`), false, "atomic overwrite should not create the RMW lock file");
   } finally {
     await rm(root, { recursive: true, force: true });
   }

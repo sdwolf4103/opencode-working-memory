@@ -5,6 +5,7 @@ import {
   renderMemoryCommand,
   type MemoryVisibilityCommand,
 } from "./memory-visibility.ts";
+import { MEMORY_TYPE_ORDER } from "./memory-kind-policy.ts";
 
 type DialogContext = {
   clear?: () => void;
@@ -244,8 +245,6 @@ async function showMemoryStatus(api: TuiPluginApi): Promise<void> {
 function showMemoryHelp(api: TuiPluginApi): void {
   showAlertFromMarkdown(api, formatMemoryHelp(), "Memory help", "medium");
 }
-
-const MEMORY_TYPE_ORDER = ["feedback", "project", "decision", "reference"] as const;
 
 async function showMemoryList(api: TuiPluginApi): Promise<void> {
   const dialogApi = getDialogApi(api);

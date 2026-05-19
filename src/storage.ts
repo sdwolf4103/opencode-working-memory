@@ -164,6 +164,9 @@ async function withFileLock<T>(path: string, fn: () => Promise<T>): Promise<T> {
 }
 
 export async function atomicWriteJSON(path: string, data: unknown): Promise<void> {
+  // Full-state overwrite primitive: callers must already own the complete next
+  // JSON document. Do not use this for read-modify-write updates that must
+  // preserve concurrent changes; use updateJSON for that contract instead.
   await mkdir(dirname(path), { recursive: true });
   const tmp = `${path}.${process.pid}.${Date.now()}.${randomUUID()}.tmp`;
   await writeFile(tmp, JSON.stringify(data, null, 2), { encoding: "utf8", mode: 0o600 });
@@ -175,6 +178,9 @@ export async function updateJSON<T>(
   fallback: () => T,
   updater: (current: T) => T | Promise<T>,
 ): Promise<T> {
+  // Locked read-modify-write path: serializes in-process callers and uses a
+  // filesystem lock for cross-process callers before reading, updating, and
+  // atomically replacing the JSON document.
   const previous = fileLocks.get(path) ?? Promise.resolve();
   let release: () => void = () => {};
   const currentLock = new Promise<void>(resolve => {

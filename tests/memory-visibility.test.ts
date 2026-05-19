@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { appendPendingMemories } from "../src/pending-journal.ts";
 import { saveSessionState } from "../src/session-state.ts";
+import { MEMORY_TYPE_ORDER } from "../src/memory-kind-policy.ts";
 import type { LongTermMemoryEntry, WorkspaceMemoryStore } from "../src/types.ts";
 import { workspaceMemoryPath } from "../src/paths.ts";
 import { saveWorkspaceMemory } from "../src/workspace-memory.ts";
@@ -154,6 +155,9 @@ test("formats current workspace memories grouped by type with display-local refs
     assert.match(output, /project:\n- \[M\d+\]/);
     assert.match(output, /decision:\n- \[M\d+\]/);
     assert.match(output, /reference:\n- \[M\d+\]/);
+    const groupIndexes = MEMORY_TYPE_ORDER.map(type => output.indexOf(`${type}:`));
+    assert.equal(groupIndexes.every(index => index >= 0), true, "all memory type groups should render");
+    assert.deepEqual(groupIndexes, [...groupIndexes].sort((a, b) => a - b), "memory list groups should follow shared memory type order");
     assert.match(output, /Shown: \d+ of \d+ active memories\./);
     assert.match(output, /Shown: 4 of 4 active memories\./);
     assert.match(output, /Omitted active memories: 0\./);

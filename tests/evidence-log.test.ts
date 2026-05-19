@@ -109,6 +109,30 @@ test("appendEvidenceEvent redacts text previews before writing", async () => {
   }
 });
 
+test("concurrent evidence appends preserve independent JSONL records", async () => {
+  const root = await tempRoot();
+  try {
+    const count = 40;
+
+    await Promise.all(Array.from({ length: count }, (_, index) =>
+      appendEvidenceEvent(root, eventInput({ memory: { memoryId: `concurrent-${index}` } }))
+    ));
+
+    const raw = await readLog(root);
+    const lines = raw.trim().split("\n");
+    const events = await queryEvidenceEvents(root);
+    const memoryIds = new Set(events.map(event => event.memory?.memoryId));
+
+    assert.equal(lines.length, count);
+    assert.equal(events.length, count);
+    for (let index = 0; index < count; index += 1) {
+      assert.equal(memoryIds.has(`concurrent-${index}`), true);
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("queryEvidenceEvents filters by type outcome and memory id", async () => {
   const root = await tempRoot();
   try {

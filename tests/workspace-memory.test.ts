@@ -46,6 +46,8 @@ test("default prompt budgets use calibrated conservative character caps", () => 
 });
 
 test("retention type caps use v1.6 decision headroom without changing other caps", () => {
+  // Policy-contract characterization: these caps are intentionally brittle so
+  // retention policy changes must update the expected values deliberately.
   assert.equal(RETENTION_TYPE_MAX.feedback, 10);
   assert.equal(RETENTION_TYPE_MAX.decision, 12);
   assert.equal(RETENTION_TYPE_MAX.project, 8);
@@ -177,6 +179,41 @@ test("renderWorkspaceMemory returns empty for no entries", () => {
 
   const rendered = renderWorkspaceMemory(store);
   assert.equal(rendered, "");
+});
+
+test("renderWorkspaceMemory groups active entries in current prompt order", () => {
+  // Wave 2 characterization: lock the externally visible prompt grouping before
+  // any future memory-kind policy extraction or render-order refactor.
+  const now = "2026-05-15T12:00:00.000Z";
+  const store: WorkspaceMemoryStore = {
+    version: 1,
+    workspace: { root: "/repo", key: "abc" },
+    limits: { maxRenderedChars: LONG_TERM_LIMITS.maxRenderedChars, maxEntries: LONG_TERM_LIMITS.maxEntries },
+    entries: [
+      { ...entry("mem-reference", "Docs live under docs/.", "reference"), createdAt: now, updatedAt: now },
+      { ...entry("mem-decision", "Keep health waves behavior-preserving.", "decision"), createdAt: now, updatedAt: now },
+      { ...entry("mem-project", "This repository uses Node's built-in test runner.", "project"), createdAt: now, updatedAt: now },
+      { ...entry("mem-feedback", "Prefer concise verification summaries.", "feedback"), createdAt: now, updatedAt: now },
+      { ...entry("mem-superseded", "Superseded entries stay out of prompts.", "feedback"), createdAt: now, updatedAt: now, status: "superseded" as const },
+    ],
+    updatedAt: now,
+    lastActivityAt: now,
+  };
+
+  const rendered = renderWorkspaceMemory(store);
+
+  assert.equal(rendered, [
+    "Workspace memory (cross-session, verify if stale):",
+    "feedback:",
+    "- Prefer concise verification summaries.",
+    "project:",
+    "- This repository uses Node's built-in test runner.",
+    "decision:",
+    "- Keep health waves behavior-preserving.",
+    "reference:",
+    "- Docs live under docs/.",
+  ].join("\n"));
+  assert.equal(rendered.includes("Superseded entries stay out of prompts."), false);
 });
 
 test("accountWorkspaceMemoryCompactionRefs returns empty prompt and refs for no entries", () => {

@@ -15,6 +15,7 @@ import {
 } from "./retention.ts";
 import type { EvidenceEventInput, MemoryEvidenceRef } from "./evidence-log.ts";
 import { appendEvidenceEvents } from "./evidence-log.ts";
+import { MEMORY_TYPE_ORDER } from "./memory-kind-policy.ts";
 
 // Minimum length for workspace_memory envelope: <workspace_memory>\n...\n</workspace_memory>
 const MIN_ENVELOPE_LENGTH = 80;
@@ -933,15 +934,6 @@ function compareLongTermMemoryForRetention(
   return a.id.localeCompare(b.id);
 }
 
-function wouldFit(
-  lines: string[],
-  nextLine: string,
-  closingLine: string,
-  maxChars: number
-): boolean {
-  return [...lines, nextLine, closingLine].join("\n").length <= maxChars;
-}
-
 export function renderWorkspaceMemory(store: WorkspaceMemoryStore): string {
   return accountWorkspaceMemoryRender(store).prompt;
 }
@@ -993,7 +985,7 @@ export function accountWorkspaceMemoryRender(store: WorkspaceMemoryStore): Works
   ];
   const rendered: LongTermMemoryEntry[] = [];
 
-  for (const type of ["feedback", "project", "decision", "reference"] as const) {
+  for (const type of MEMORY_TYPE_ORDER) {
     const items = active.filter(entry => entry.type === type);
     if (items.length === 0) continue;
 
@@ -1037,7 +1029,7 @@ export function accountWorkspaceMemoryCompactionRefs(store: WorkspaceMemoryStore
   const refs: CompactionMemoryRef[] = [];
   const capturedAt = Date.now();
 
-  for (const type of ["feedback", "project", "decision", "reference"] as const) {
+  for (const type of MEMORY_TYPE_ORDER) {
     const items = active.filter(entry => entry.type === type);
     if (items.length === 0) continue;
 

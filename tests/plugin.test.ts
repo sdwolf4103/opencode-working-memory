@@ -569,6 +569,8 @@ Next steps: continue development.
   assert.equal(candidates[1].type, "project");
 });
 
+// Compatibility-contract characterization: legacy compaction parser formats are
+// still supported intentionally and should not be removed as brittle fixtures.
 test("parseWorkspaceMemoryCandidates accepts legacy Workspace Memory Candidates section", async () => {
   const summary = `
 ## Summary

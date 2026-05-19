@@ -6,6 +6,7 @@ import { redactCredentials } from "./redaction.ts";
 import type { LongTermMemoryEntry, PendingMemoryJournalStore, SessionState, WorkspaceMemoryStore } from "./types.ts";
 import { LONG_TERM_LIMITS } from "./types.ts";
 import { accountWorkspaceMemoryCompactionRefs, accountWorkspaceMemoryRender } from "./workspace-memory.ts";
+import { MEMORY_TYPE_ORDER, emptyMemoryTypeGroups } from "./memory-kind-policy.ts";
 
 export type MemoryVisibilityCommand = "status" | "list" | "help";
 
@@ -33,7 +34,6 @@ export type MemoryListModel = {
 };
 
 const MAX_PREVIEW_CHARS = 120;
-const MEMORY_TYPE_ORDER = ["feedback", "project", "decision", "reference"] as const satisfies readonly LongTermMemoryEntry["type"][];
 
 function safePreview(text: string | undefined, maxChars = MAX_PREVIEW_CHARS): string {
   const clean = redactCredentials(text ?? "").replace(/\s+/g, " ").trim();
@@ -211,7 +211,7 @@ export function formatMemoryStatus(model: MemoryStatusModel): string {
 }
 
 function emptyMemoryListGroups(): MemoryListModel["groups"] {
-  return { feedback: [], project: [], decision: [], reference: [] };
+  return emptyMemoryTypeGroups<MemoryListItem>();
 }
 
 export async function getMemoryList(root: string): Promise<MemoryListModel> {

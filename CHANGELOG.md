@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.5] - 2026-05-19
+
+### Added
+
+- Added `check:package-integrity` to verify `package.json` and on-disk `package-lock.json` root versions stay aligned even though the lockfile remains ignored by git.
+- Added `tsconfig.unused.json` as a strict unused-symbol audit gate for development and release checks.
+- Added package-integrity tests covering matching versions, mismatch reporting, and missing-lockfile guidance.
+- Added storage/evidence contract tests for full-state JSON overwrites and concurrent evidence JSONL appends.
+- Added workspace-memory render-order characterization and memory-visibility order coverage for the shared memory type order.
+
+### Changed
+
+- Centralized the current memory type ordering (`feedback`, `project`, `decision`, `reference`) in a narrow `memory-kind-policy` seam used by workspace rendering, TUI grouping, and memory visibility.
+- Extracted diagnostics producer-version grouping and inference helpers from `memory-diag quality` into a pure diagnostics-only module while preserving the existing JSON and human output contracts.
+- Documented storage write-path contracts in code: `updateJSON` is the locked read-modify-write path, `atomicWriteJSON` is the full-state overwrite primitive, and evidence logs remain append-only JSONL with bounded pruning.
+- Marked legacy parser fixtures and retention caps as intentional compatibility/policy-contract test coverage.
+- Updated developer docs to reference `evaluateWorkspaceMemoryCandidate` instead of the removed private acceptance wrapper.
+
+### Deprecated
+
+- Marked `REINFORCEMENT_MIN_INTERVAL_MS` with JSDoc `@deprecated`; the rolling reinforcement policy uses `REINFORCEMENT_MIN_ELAPSED_MS`.
+
+### Removed
+
+- Removed unused imports and private unused helpers discovered by the new unused-symbol audit, including the private `shouldAcceptWorkspaceMemoryCandidate` wrapper.
+
+### Fixed
+
+- Fixed release hygiene drift detection for the ignored lockfile by adding an explicit package integrity check.
+- Reduced future diagnostics and memory-kind change risk by extracting small behavior-preserving seams without changing runtime memory behavior.
+
 ## [1.6.4] - 2026-05-15
 
 ### Changed
