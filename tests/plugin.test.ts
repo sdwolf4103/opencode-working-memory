@@ -8,7 +8,7 @@ import { loadSessionState, saveSessionState } from "../src/session-state.ts";
 import { parseWorkspaceMemoryCandidates } from "../src/extractors.ts";
 import type { CompactionMemoryRef, LongTermMemoryEntry, OpenError } from "../src/types.ts";
 import { PROMOTION_RETRY_LIMITS, WORKSPACE_MEMORY_CACHE_LIMITS } from "../src/types.ts";
-import { sessionStatePath, workspaceMemoryPath, workspacePendingJournalPath } from "../src/paths.ts";
+import { sessionStatePath, workspaceKey, workspaceMemoryPath, workspacePendingJournalPath } from "../src/paths.ts";
 import { loadPendingJournal, savePendingJournal, memoryKey } from "../src/pending-journal.ts";
 import { loadWorkspaceMemory, updateWorkspaceMemory, workspaceMemoryExactKey, workspaceMemoryIdentityKey } from "../src/workspace-memory.ts";
 import { queryEvidenceEvents } from "../src/evidence-log.ts";
@@ -758,6 +758,46 @@ test("explicit memory appended from user message is owned by session and not pro
   }
 });
 
+test("explicit memory before first cache miss appears in frozen hot snapshot", async () => {
+  const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-test-"));
+
+  try {
+    let latestMessages: Array<Record<string, unknown>> = [{
+      info: { role: "user", id: "msg-before-cache-1" },
+      parts: [{ type: "text", text: "remember this: First epoch captures pending memory." }],
+    }];
+    const client = {
+      session: {
+        get: async () => ({ data: { parentID: null } }),
+        messages: async () => ({ data: latestMessages }),
+        todo: async () => ({ data: [] }),
+      },
+    };
+
+    const plugin = await MemoryV2Plugin({ directory: tmpDir, client });
+    const output = { system: ["base header"] };
+    await (plugin as Record<string, Function>)["experimental.chat.system.transform"](
+      { sessionID: "first-cache-explicit-session", model: {} },
+      output,
+    );
+
+    const joined = output.system.join("\n");
+    assert.match(joined, /Hot session state/);
+    assert.match(joined, /pending_memories:/);
+    assert.match(joined, /First epoch captures pending memory/);
+
+    const state = await loadSessionState(tmpDir, "first-cache-explicit-session");
+    assert.ok(
+      state.pendingMemories.some(memory => /First epoch captures pending memory/.test(memory.text)),
+      "first-turn explicit memory should remain durable in session pending state",
+    );
+
+    latestMessages = [];
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
 test("session promotion does not clear another session's same-key pending journal entry", async () => {
   const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-test-"));
 
@@ -880,12 +920,21 @@ test("session.deleted clears caches even when session state file is already gone
     });
 
     const plugin = await MemoryV2Plugin({ directory: tmpDir, client: mockRootClient() });
+    await (plugin as Record<string, Function>)["tool.execute.after"](
+      {
+        tool: "edit",
+        sessionID: "deleted-missing-state-session",
+        args: { filePath: join(tmpDir, "src/delete-before.ts") },
+      },
+      { output: "", exitCode: 0 },
+    );
     const beforeOutput = { system: ["base header"] };
     await (plugin as Record<string, Function>)["experimental.chat.system.transform"](
       { sessionID: "deleted-missing-state-session", model: {} },
       beforeOutput,
     );
     assert.match(beforeOutput.system.join("\n"), /Workspace memory before delete cleanup/);
+    assert.match(beforeOutput.system.join("\n"), /src\/delete-before\.ts/);
 
     const ownedPending = {
       id: "mem_delete_owned_journal",
@@ -917,6 +966,15 @@ test("session.deleted clears caches even when session state file is already gone
     assert.equal(pendingAfter.entries.length, 0,
       "clearable owned journal entry should be removed even when session state file is absent");
 
+    await (plugin as Record<string, Function>)["tool.execute.after"](
+      {
+        tool: "edit",
+        sessionID: "deleted-missing-state-session",
+        args: { filePath: join(tmpDir, "src/delete-after.ts") },
+      },
+      { output: "", exitCode: 0 },
+    );
+
     const afterOutput = { system: ["base header"] };
     await (plugin as Record<string, Function>)["experimental.chat.system.transform"](
       { sessionID: "deleted-missing-state-session", model: {} },
@@ -925,6 +983,11 @@ test("session.deleted clears caches even when session state file is already gone
     const workspacePrompt = afterOutput.system.find((part: string) => part.startsWith("Workspace memory"));
     assert.match(workspacePrompt ?? "", /Owned journal memory promotes during delete cleanup/,
       "session.deleted should clear frozen cache after successful promotion");
+    const afterJoined = afterOutput.system.join("\n");
+    assert.match(afterJoined, /src\/delete-after\.ts/,
+      "session.deleted should clear the paired frozen hot cache after successful promotion");
+    assert.equal(afterJoined.includes("src/delete-before.ts"), false,
+      "new epoch after session deletion should not reuse the deleted session's hot snapshot");
   } finally {
     await rm(tmpDir, { recursive: true, force: true });
   }
@@ -2352,7 +2415,64 @@ test("integration: next session promotes prior unowned journal and leaves journa
   }
 });
 
-test("same-session explicit memory does not mutate frozen system[1]", async () => {
+test("unowned pending promotion failure does not block epoch snapshot creation", async () => {
+  const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-test-"));
+  let lockPath: string | undefined;
+
+  try {
+    const now = new Date().toISOString();
+    await updateWorkspaceMemory(tmpDir, store => {
+      store.entries.push({
+        id: "mem_existing_promotion_failure",
+        type: "project",
+        text: "Existing stable workspace memory survives promotion failure.",
+        source: "compaction",
+        confidence: 0.9,
+        status: "active",
+        createdAt: now,
+        updatedAt: now,
+      });
+      return store;
+    });
+    await savePendingJournal(tmpDir, {
+      version: 1,
+      workspace: { root: tmpDir, key: await workspaceKey(tmpDir) },
+      updatedAt: now,
+      entries: [{
+        id: "mem_unowned_lock_failure",
+        type: "feedback",
+        text: "unowned pending memory text should not be treated as promoted after lock failure.",
+        source: "explicit",
+        confidence: 1,
+        status: "active",
+        createdAt: now,
+        updatedAt: now,
+      }],
+    });
+
+    const workspacePath = await workspaceMemoryPath(tmpDir);
+    lockPath = `${workspacePath}.lock`;
+    await mkdir(dirname(workspacePath), { recursive: true });
+    await writeFile(lockPath, `${process.pid}\n${Date.now()}\n`);
+
+    const plugin = await MemoryV2Plugin({ directory: tmpDir, client: mockRootClient() });
+    const output = { system: ["base header"] };
+    await (plugin as Record<string, Function>)["experimental.chat.system.transform"](
+      { sessionID: "promotion-failure-session", model: {} },
+      output,
+    );
+
+    const joined = output.system.join("\n");
+    assert.match(joined, /Existing stable workspace memory survives promotion failure|Hot session state/);
+    assert.equal(joined.includes("unowned pending memory text"), false,
+      "failed unowned backlog promotion should not be silently treated as promoted");
+  } finally {
+    if (lockPath) await rm(lockPath, { force: true });
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("same-session explicit memory after epoch creation persists without refreshing frozen prompts", async () => {
   const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-test-"));
 
   try {
@@ -2394,10 +2514,10 @@ test("same-session explicit memory does not mutate frozen system[1]", async () =
     assert.match(firstSystem1 ?? "", /Existing stable workspace memory/,
       "first transform should create a frozen workspace memory system[1]");
 
-    // 3. User says "remember X" in the same session.
+    // 3. User says "remember X" in the same session after the epoch exists.
     latestMessages = [{
       info: { role: "user", id: "msg-explicit-1" },
-      parts: [{ type: "text", text: "remember this: Same-session memory stays ephemeral." }],
+      parts: [{ type: "text", text: "remember this: Same-session memory stays durable but frozen prompt does not refresh." }],
     }];
 
     const output2 = { system: ["base header"] };
@@ -2406,25 +2526,28 @@ test("same-session explicit memory does not mutate frozen system[1]", async () =
       output2,
     );
 
-    // 4. Assert: workspace system[1] unchanged (frozen snapshot).
+    // 4. Assert: all plugin-added pre-history prompts are unchanged.
     const secondSystem1 = output2.system.find((part: string) => part.startsWith("Workspace memory"));
     assert.equal(secondSystem1, firstSystem1,
-      "frozen system[1] must not change after explicit memory in same session");
+      "frozen workspace prompt should remain unchanged after explicit memory in same session");
+    assert.deepEqual(output2.system, output1.system,
+      "same-session explicit memory after epoch creation must not mutate pre-history prompts");
 
-    // 5. Assert: hot state (system[2+]) contains the pending memory.
-    const hotState = output2.system.find((part: string) => part.includes("Hot session state"));
-    assert.ok(hotState, "hot session state should be rendered");
-    assert.match(hotState, /pending_memories:/,
-      "hot state should contain pending_memories section");
-    assert.match(hotState, /Same-session memory stays ephemeral/,
-      "hot state should contain the explicit memory text");
+    // 5. Assert: explicit memory remains durable without forcing prompt refresh.
+    const state = await loadSessionState(tmpDir, "frozen-cache-session");
+    assert.ok(
+      state.pendingMemories.some(memory => /Same-session memory stays durable/.test(memory.text)),
+      "explicit memory should remain durable in session pending state",
+    );
+    assert.equal(output2.system.join("\n").includes("Same-session memory stays durable"), false,
+      "new pending memory is already in conversation history and should not force system prompt refresh");
 
   } finally {
     await rm(tmpDir, { recursive: true, force: true });
   }
 });
 
-test("chat system transform reloads frozen workspace snapshot after cache TTL expires", async () => {
+test("chat system transform does not reload frozen epoch snapshots after TTL time passes", async () => {
   const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-test-"));
   const originalNow = Date.now;
   let now = originalNow();
@@ -2447,12 +2570,21 @@ test("chat system transform reloads frozen workspace snapshot after cache TTL ex
     });
 
     const plugin = await MemoryV2Plugin({ directory: tmpDir, client: mockRootClient() });
+    await (plugin as Record<string, Function>)["tool.execute.after"](
+      {
+        tool: "edit",
+        sessionID: "ttl-session",
+        args: { filePath: join(tmpDir, "src/before-ttl.ts") },
+      },
+      { output: "", exitCode: 0 },
+    );
     const output1 = { system: ["base header"] };
     await (plugin as Record<string, Function>)["experimental.chat.system.transform"](
       { sessionID: "ttl-session", model: {} },
       output1,
     );
     assert.match(output1.system.join("\n"), /Workspace memory before TTL expiry/);
+    assert.match(output1.system.join("\n"), /src\/before-ttl\.ts/);
 
     await updateWorkspaceMemory(tmpDir, store => {
       store.entries.push({
@@ -2470,13 +2602,228 @@ test("chat system transform reloads frozen workspace snapshot after cache TTL ex
 
     now += WORKSPACE_MEMORY_CACHE_LIMITS.frozenTtlMs + 1;
 
+    await (plugin as Record<string, Function>)["tool.execute.after"](
+      {
+        tool: "edit",
+        sessionID: "ttl-session",
+        args: { filePath: join(tmpDir, "src/after-ttl.ts") },
+      },
+      { output: "", exitCode: 0 },
+    );
+
     const output2 = { system: ["base header"] };
     await (plugin as Record<string, Function>)["experimental.chat.system.transform"](
       { sessionID: "ttl-session", model: {} },
       output2,
     );
 
-    assert.match(output2.system.join("\n"), /Workspace memory after TTL expiry/);
+    const joined = output2.system.join("\n");
+    assert.match(joined, /Workspace memory before TTL expiry/);
+    assert.equal(joined.includes("Workspace memory after TTL expiry"), false);
+    assert.deepEqual(output2.system, output1.system,
+      "TTL time passage and hot-state churn must not refresh active frozen epoch prompts");
+  } finally {
+    Date.now = originalNow;
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("chat system transform keeps frozen prompts stable across active file churn", async () => {
+  const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-test-"));
+
+  try {
+    const plugin = await MemoryV2Plugin({ directory: tmpDir, client: mockRootClient() });
+    await (plugin as Record<string, Function>)["tool.execute.after"](
+      {
+        tool: "edit",
+        sessionID: "active-file-churn-session",
+        args: { filePath: join(tmpDir, "src/test.ts") },
+      },
+      { output: "", exitCode: 0 },
+    );
+
+    const output1 = { system: ["base header"] };
+    await (plugin as Record<string, Function>)["experimental.chat.system.transform"](
+      { sessionID: "active-file-churn-session", model: {} },
+      output1,
+    );
+    assert.match(output1.system.join("\n"), /src\/test\.ts \(edit, 1x\)/);
+
+    await (plugin as Record<string, Function>)["tool.execute.after"](
+      {
+        tool: "edit",
+        sessionID: "active-file-churn-session",
+        args: { filePath: join(tmpDir, "src/test.ts") },
+      },
+      { output: "", exitCode: 0 },
+    );
+
+    const output2 = { system: ["base header"] };
+    await (plugin as Record<string, Function>)["experimental.chat.system.transform"](
+      { sessionID: "active-file-churn-session", model: {} },
+      output2,
+    );
+
+    assert.deepEqual(output2.system, output1.system,
+      "active-file churn must not mutate pre-history prompts during the active epoch");
+    assert.equal(output2.system.join("\n").includes("Hot state deltas"), false);
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("session compaction starts a new frozen prompt epoch including refreshed hot state", async () => {
+  const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-test-"));
+
+  try {
+    const plugin = await MemoryV2Plugin({ directory: tmpDir, client: mockRootClient() });
+    await (plugin as Record<string, Function>)["tool.execute.after"](
+      {
+        tool: "edit",
+        sessionID: "epoch-refresh-session",
+        args: { filePath: join(tmpDir, "src/before.ts") },
+      },
+      { output: "", exitCode: 0 },
+    );
+
+    const output1 = { system: ["base header"] };
+    await (plugin as Record<string, Function>)["experimental.chat.system.transform"](
+      { sessionID: "epoch-refresh-session", model: {} },
+      output1,
+    );
+    assert.match(output1.system.join("\n"), /src\/before\.ts/);
+
+    await (plugin as Record<string, Function>)["tool.execute.after"](
+      {
+        tool: "edit",
+        sessionID: "epoch-refresh-session",
+        args: { filePath: join(tmpDir, "src/after.ts") },
+      },
+      { output: "", exitCode: 0 },
+    );
+
+    const output2 = { system: ["base header"] };
+    await (plugin as Record<string, Function>)["experimental.chat.system.transform"](
+      { sessionID: "epoch-refresh-session", model: {} },
+      output2,
+    );
+    assert.equal(output2.system.join("\n").includes("src/after.ts"), false,
+      "normal turns should keep using the frozen hot prompt before compaction");
+
+    await (plugin as Record<string, Function>)["event"]({
+      event: { type: "session.compacted", properties: { sessionID: "epoch-refresh-session" } },
+    });
+
+    const output3 = { system: ["base header"] };
+    await (plugin as Record<string, Function>)["experimental.chat.system.transform"](
+      { sessionID: "epoch-refresh-session", model: {} },
+      output3,
+    );
+    assert.match(output3.system.join("\n"), /src\/after\.ts/,
+      "compaction should clear the frozen hot cache so the next epoch includes refreshed hot state");
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("chat system transform keeps recently accessed frozen epoch under cache pressure", async () => {
+  const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-test-"));
+  const originalNow = Date.now;
+  let now = originalNow();
+  Date.now = () => now;
+
+  try {
+    const timestamp = new Date(now).toISOString();
+    await updateWorkspaceMemory(tmpDir, store => {
+      store.entries.push({
+        id: "mem_recency_cache_before",
+        type: "project",
+        text: "Workspace memory before recency cache pressure.",
+        source: "compaction",
+        confidence: 0.9,
+        status: "active",
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      });
+      return store;
+    });
+
+    const plugin = await MemoryV2Plugin({ directory: tmpDir, client: mockRootClient() });
+    await (plugin as Record<string, Function>)["tool.execute.after"](
+      {
+        tool: "edit",
+        sessionID: "active-session-0",
+        args: { filePath: join(tmpDir, "src/recency-before.ts") },
+      },
+      { output: "", exitCode: 0 },
+    );
+
+    let activeOutput = { system: ["base header"] };
+    for (let i = 0; i < WORKSPACE_MEMORY_CACHE_LIMITS.maxFrozenSessions; i += 1) {
+      const sessionID = i === 0 ? "active-session-0" : `inactive-session-${i}`;
+      now += 1;
+      const output = { system: ["base header"] };
+      await (plugin as Record<string, Function>)["experimental.chat.system.transform"](
+        { sessionID, model: {} },
+        output,
+      );
+      if (sessionID === "active-session-0") activeOutput = output;
+    }
+
+    assert.match(activeOutput.system.join("\n"), /Workspace memory before recency cache pressure/);
+    assert.match(activeOutput.system.join("\n"), /src\/recency-before\.ts/);
+
+    now += 1;
+    const activeHitOutput = { system: ["base header"] };
+    await (plugin as Record<string, Function>)["experimental.chat.system.transform"](
+      { sessionID: "active-session-0", model: {} },
+      activeHitOutput,
+    );
+    assert.deepEqual(activeHitOutput.system, activeOutput.system,
+      "cache hit should update access recency without changing frozen prompt text");
+
+    now += 1;
+    await (plugin as Record<string, Function>)["experimental.chat.system.transform"](
+      { sessionID: "pressure-session-extra", model: {} },
+      { system: ["base header"] },
+    );
+
+    await updateWorkspaceMemory(tmpDir, store => {
+      store.entries.push({
+        id: "mem_recency_cache_after",
+        type: "project",
+        text: "Workspace memory after recency cache pressure.",
+        source: "compaction",
+        confidence: 0.9,
+        status: "active",
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      });
+      return store;
+    });
+    await (plugin as Record<string, Function>)["tool.execute.after"](
+      {
+        tool: "edit",
+        sessionID: "active-session-0",
+        args: { filePath: join(tmpDir, "src/recency-after.ts") },
+      },
+      { output: "", exitCode: 0 },
+    );
+
+    now += 1;
+    const outputAfterPressure = { system: ["base header"] };
+    await (plugin as Record<string, Function>)["experimental.chat.system.transform"](
+      { sessionID: "active-session-0", model: {} },
+      outputAfterPressure,
+    );
+
+    const joined = outputAfterPressure.system.join("\n");
+    assert.deepEqual(outputAfterPressure.system, activeOutput.system,
+      "recently accessed active session should keep its original frozen workspace and hot prompts under cache pressure");
+    assert.match(joined, /Workspace memory before recency cache pressure/);
+    assert.equal(joined.includes("Workspace memory after recency cache pressure"), false);
+    assert.match(joined, /src\/recency-before\.ts/);
+    assert.equal(joined.includes("src/recency-after.ts"), false);
   } finally {
     Date.now = originalNow;
     await rm(tmpDir, { recursive: true, force: true });
@@ -2503,6 +2850,14 @@ test("chat system transform evicts oldest frozen snapshots when cache exceeds se
     });
 
     const plugin = await MemoryV2Plugin({ directory: tmpDir, client: mockRootClient() });
+    await (plugin as Record<string, Function>)["tool.execute.after"](
+      {
+        tool: "edit",
+        sessionID: "cache-size-session-0",
+        args: { filePath: join(tmpDir, "src/cache-before.ts") },
+      },
+      { output: "", exitCode: 0 },
+    );
     for (let i = 0; i <= WORKSPACE_MEMORY_CACHE_LIMITS.maxFrozenSessions; i += 1) {
       await (plugin as Record<string, Function>)["experimental.chat.system.transform"](
         { sessionID: `cache-size-session-${i}`, model: {} },
@@ -2524,6 +2879,15 @@ test("chat system transform evicts oldest frozen snapshots when cache exceeds se
       return store;
     });
 
+    await (plugin as Record<string, Function>)["tool.execute.after"](
+      {
+        tool: "edit",
+        sessionID: "cache-size-session-0",
+        args: { filePath: join(tmpDir, "src/cache-after.ts") },
+      },
+      { output: "", exitCode: 0 },
+    );
+
     const output = { system: ["base header"] };
     await (plugin as Record<string, Function>)["experimental.chat.system.transform"](
       { sessionID: "cache-size-session-0", model: {} },
@@ -2531,6 +2895,8 @@ test("chat system transform evicts oldest frozen snapshots when cache exceeds se
     );
 
     assert.match(output.system.join("\n"), /Workspace memory after cache pressure/);
+    assert.match(output.system.join("\n"), /src\/cache-after\.ts/,
+      "cache pressure should evict the paired frozen hot snapshot for the oldest session");
   } finally {
     await rm(tmpDir, { recursive: true, force: true });
   }

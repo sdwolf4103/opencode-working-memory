@@ -258,7 +258,7 @@ type HotStateRenderSection = {
   items: HotStateRenderItem[];
 };
 
-const HOT_STATE_PREFIX = "Hot session state (current session):";
+const HOT_STATE_PREFIX = "Hot session state snapshot (epoch start; conversation history may be newer):";
 
 export function accountHotSessionStateRender(state: SessionState, workspaceRoot: string): HotSessionStateRenderAccounting {
   const maxRenderedChars = HOT_STATE_LIMITS.maxRenderedChars;

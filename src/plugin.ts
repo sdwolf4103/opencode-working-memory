@@ -3,21 +3,24 @@
  *
  * Architecture:
  * - Layer 1: Stable Workspace Memory (frozen per session cache epoch, refreshed at compaction)
- * - Layer 2: Hot Session State (active files, open errors, recent decisions, pending memories)
+ * - Layer 2: Frozen Hot Session State (active files, open errors, recent decisions, pending memories)
  * - Layer 3: Native OpenCode State (todos owned by OpenCode, read during compaction)
  *
  * Cache Epoch Model:
- * - Each session creates a frozen workspace memory snapshot on first transform.
- * - Normal turns reuse the exact rendered string (system[1] remains stable).
- * - Compaction starts a new cache epoch: pending memories are promoted, the cache is cleared,
- *   and the next transform re-renders workspace memory.
+ * - Each session creates frozen workspace memory and hot session snapshots on first transform.
+ * - Normal turns reuse the exact rendered strings (pre-history system prompts remain stable).
+ * - Normal tool/user churn updates session storage but does not mutate pre-history prompts
+ *   until compaction, session restart, or process restart starts a new epoch; conversation
+ *   and tool history are the source of truth for newer events after epoch start.
+ * - Compaction starts a new cache epoch: pending memories are promoted, caches are cleared,
+ *   and the next transform re-renders workspace memory and hot session state.
  * - Explicit memory ("remember X") goes to SessionState.pendingMemories + durable journal,
- *   visible in ephemeral system[2+] for the current epoch, promoted to system[1] after compaction.
+ *   visible in the hot snapshot only if processed before epoch creation, promoted after compaction.
  *
  * This plugin:
- * - Caches frozen workspace memory per sessionID
+ * - Caches frozen workspace memory and hot session state per sessionID epoch
  * - Processes explicit memory from latest user text once per message id
- * - Injects frozen workspace memory and dynamic hot session state into system prompt
+ * - Injects frozen workspace memory and frozen hot session state into system prompt
  * - Updates session state after tool execution
  * - Augments compaction context with numbered memory refs, todos, and instruction
  * - Parses compaction summaries for memory candidates and merges them
@@ -258,6 +261,18 @@ export const MemoryV2Plugin: Plugin = async (input) => {
       store: Awaited<ReturnType<typeof loadWorkspaceMemory>>;
       renderedPrompt: string;
       loadedAt: number;
+      lastAccessedAt: number;
+    }
+  >();
+
+  // Cache for frozen hot session state per session epoch.
+  // Lifecycle is unified with frozenWorkspaceMemoryCache; do not clear independently.
+  const frozenHotSessionStateCache = new Map<
+    string,
+    {
+      renderedPrompt: string;
+      loadedAt: number;
+      lastAccessedAt: number;
     }
   >();
 
@@ -539,18 +554,39 @@ export const MemoryV2Plugin: Plugin = async (input) => {
     })));
   }
 
-  function pruneFrozenWorkspaceMemoryCache(now = Date.now()): void {
+  function clearFrozenPromptEpoch(sessionID: string): void {
+    frozenWorkspaceMemoryCache.delete(sessionID);
+    frozenHotSessionStateCache.delete(sessionID);
+  }
+
+  function pruneFrozenPromptEpochCaches(): void {
+    const lastAccessedAtBySession = new Map<string, number>();
     for (const [sessionID, cached] of frozenWorkspaceMemoryCache) {
-      if (now - cached.loadedAt > WORKSPACE_MEMORY_CACHE_LIMITS.frozenTtlMs) {
-        frozenWorkspaceMemoryCache.delete(sessionID);
-      }
+      lastAccessedAtBySession.set(
+        sessionID,
+        Math.max(lastAccessedAtBySession.get(sessionID) ?? cached.lastAccessedAt, cached.lastAccessedAt),
+      );
+    }
+    for (const [sessionID, cached] of frozenHotSessionStateCache) {
+      lastAccessedAtBySession.set(
+        sessionID,
+        Math.max(lastAccessedAtBySession.get(sessionID) ?? cached.lastAccessedAt, cached.lastAccessedAt),
+      );
     }
 
-    while (frozenWorkspaceMemoryCache.size > WORKSPACE_MEMORY_CACHE_LIMITS.maxFrozenSessions) {
-      const oldest = [...frozenWorkspaceMemoryCache.entries()]
-        .sort((a, b) => a[1].loadedAt - b[1].loadedAt)[0]?.[0];
-      if (!oldest) break;
-      frozenWorkspaceMemoryCache.delete(oldest);
+    const sorted = [...lastAccessedAtBySession.entries()].sort((a, b) => a[1] - b[1]);
+    while (lastAccessedAtBySession.size > WORKSPACE_MEMORY_CACHE_LIMITS.maxFrozenSessions) {
+      const [oldestSessionID] = sorted.shift() ?? [];
+      if (!oldestSessionID) break;
+      lastAccessedAtBySession.delete(oldestSessionID);
+      clearFrozenPromptEpoch(oldestSessionID);
+    }
+
+    for (const sessionID of frozenWorkspaceMemoryCache.keys()) {
+      if (!lastAccessedAtBySession.has(sessionID)) frozenWorkspaceMemoryCache.delete(sessionID);
+    }
+    for (const sessionID of frozenHotSessionStateCache.keys()) {
+      if (!lastAccessedAtBySession.has(sessionID)) frozenHotSessionStateCache.delete(sessionID);
     }
   }
 
@@ -766,7 +802,7 @@ export const MemoryV2Plugin: Plugin = async (input) => {
         });
         return state;
       });
-      clearFrozenWorkspaceMemoryCache(sessionID);
+      clearFrozenPromptEpoch(sessionID);
     }
 
     if (accounting.clearableKeys.size > 0) {
@@ -811,13 +847,13 @@ export const MemoryV2Plugin: Plugin = async (input) => {
     renderedPrompt: string;
   }> {
     const now = Date.now();
-    pruneFrozenWorkspaceMemoryCache(now);
     const cached = frozenWorkspaceMemoryCache.get(sessionID);
 
     // Cache is valid for the current session cache epoch.
     // It is intentionally invalidated after compaction so promoted memories
     // become visible in the next compacted context (new epoch starts).
     if (cached) {
+      cached.lastAccessedAt = now;
       return { store: cached.store, renderedPrompt: cached.renderedPrompt };
     }
 
@@ -828,16 +864,42 @@ export const MemoryV2Plugin: Plugin = async (input) => {
       ...event,
       sessionHash: sessionID,
     })));
-    frozenWorkspaceMemoryCache.set(sessionID, { store, renderedPrompt, loadedAt: now });
-    pruneFrozenWorkspaceMemoryCache(now);
+    frozenWorkspaceMemoryCache.set(sessionID, { store, renderedPrompt, loadedAt: now, lastAccessedAt: now });
+    pruneFrozenPromptEpochCaches();
     return { store, renderedPrompt };
   }
 
   /**
-   * Clear frozen workspace memory cache (e.g., after compaction).
+   * Get frozen hot session state snapshot for a session.
+   * Loads and renders from disk once per prompt epoch, then reuses the exact rendered string.
    */
-  function clearFrozenWorkspaceMemoryCache(sessionID: string): void {
-    frozenWorkspaceMemoryCache.delete(sessionID);
+  async function getFrozenHotSessionStateSnapshot(
+    root: string,
+    sessionID: string,
+  ): Promise<{ renderedPrompt: string }> {
+    const now = Date.now();
+    const cached = frozenHotSessionStateCache.get(sessionID);
+    if (cached) {
+      cached.lastAccessedAt = now;
+      return { renderedPrompt: cached.renderedPrompt };
+    }
+
+    const sessionState = await loadSessionState(root, sessionID);
+    const renderedPrompt = renderHotSessionState(sessionState, root);
+    frozenHotSessionStateCache.set(sessionID, { renderedPrompt, loadedAt: now, lastAccessedAt: now });
+    pruneFrozenPromptEpochCaches();
+    return { renderedPrompt };
+  }
+
+  async function promoteUnownedBacklogForEpochSnapshot(sessionID: string): Promise<void> {
+    if (frozenWorkspaceMemoryCache.has(sessionID) || frozenHotSessionStateCache.has(sessionID)) return;
+    if (!await hasPendingJournalEntries(directory)) return;
+
+    try {
+      await promotePendingMemories(undefined, { includeUnownedJournal: true, includeOwnedJournal: false });
+    } catch (error) {
+      await warnMemoryHook("chat.system.transform.promote_unowned", error, directory);
+    }
   }
 
   function sessionIDFromEventProperties(properties: unknown): string | undefined {
@@ -853,13 +915,13 @@ export const MemoryV2Plugin: Plugin = async (input) => {
   }
 
   return {
-    // Inject workspace memory and hot session state into system prompt
+    // Inject frozen workspace memory and frozen hot session state into system prompt
     "experimental.chat.system.transform": async (hookInput, output) => {
       const { sessionID } = hookInput;
       if (!sessionID) return;
 
       try {
-        pruneFrozenWorkspaceMemoryCache();
+        pruneFrozenPromptEpochCaches();
         pruneProcessedUserMessagesCache();
 
         // Sub-agents are short-lived - skip memory system
@@ -869,28 +931,33 @@ export const MemoryV2Plugin: Plugin = async (input) => {
         // sub-agent guard so child sessions never append to the parent journal.
         await processLatestUserMessage(sessionID);
 
-        // Before first snapshot in this session, promote durable unowned backlog from
-        // prior sessions. Current-turn owned explicit memory remains pending and only
-        // appears in hot state for this transform.
-        if (!frozenWorkspaceMemoryCache.has(sessionID) && await hasPendingJournalEntries(directory)) {
-          await promotePendingMemories(undefined, { includeUnownedJournal: true, includeOwnedJournal: false });
+        // Before first snapshot in this session, best-effort promote durable
+        // unowned backlog from prior sessions. Current-turn owned explicit memory
+        // remains pending and appears in hot state only if the epoch snapshot is new.
+        await promoteUnownedBacklogForEpochSnapshot(sessionID);
+
+        let workspaceSnapshot: Awaited<ReturnType<typeof getFrozenWorkspaceMemorySnapshot>> | undefined;
+        try {
+          workspaceSnapshot = await getFrozenWorkspaceMemorySnapshot(directory, sessionID);
+        } catch (error) {
+          await warnMemoryHook("chat.system.transform.workspace_snapshot", error, directory);
         }
 
-        // Get frozen workspace memory snapshot (loaded and rendered once per session)
-        const workspaceSnapshot = await getFrozenWorkspaceMemorySnapshot(directory, sessionID);
-
-        // Get current hot session state
-        const sessionState = await loadSessionState(directory, sessionID);
+        let hotSnapshot: Awaited<ReturnType<typeof getFrozenHotSessionStateSnapshot>> | undefined;
+        try {
+          hotSnapshot = await getFrozenHotSessionStateSnapshot(directory, sessionID);
+        } catch (error) {
+          await warnMemoryHook("chat.system.transform.hot_snapshot", error, directory);
+        }
 
         // Inject frozen workspace memory snapshot
-        if (workspaceSnapshot.renderedPrompt) {
+        if (workspaceSnapshot?.renderedPrompt) {
           output.system.push(workspaceSnapshot.renderedPrompt);
         }
 
-        // Render and inject hot session state
-        const hotPrompt = renderHotSessionState(sessionState, directory);
-        if (hotPrompt) {
-          output.system.push(hotPrompt);
+        // Inject frozen hot session state snapshot
+        if (hotSnapshot?.renderedPrompt) {
+          output.system.push(hotSnapshot.renderedPrompt);
         }
       } catch (error) {
         await warnMemoryHook("chat.system.transform", error, directory);
@@ -1060,6 +1127,7 @@ export const MemoryV2Plugin: Plugin = async (input) => {
             await promotePendingMemories(sessionID, { includeUnownedJournal: true });
           } finally {
             await clearCompactionMemoryRefs(sessionID);
+            clearFrozenPromptEpoch(sessionID);
           }
         } catch (error) {
           // Keep pending memories in session/journal for retry on next event/session.
@@ -1077,7 +1145,7 @@ export const MemoryV2Plugin: Plugin = async (input) => {
             await promotePendingMemories(sessionID, { includeOwnedJournal: true, includeUnownedJournal: false });
             promoted = true;
             if (promoted) {
-              frozenWorkspaceMemoryCache.delete(sessionID);
+              clearFrozenPromptEpoch(sessionID);
               processedUserMessages.delete(sessionID);
               sessionParentCache.delete(sessionID);
             }

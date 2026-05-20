@@ -19,6 +19,7 @@ const accountHotSessionStateRender = (
 const { createEmptySessionState, loadSessionState, renderHotSessionState, saveSessionState } = sessionStateModule;
 
 const root = "/repo";
+const HOT_STATE_PREFIX = "Hot session state snapshot (epoch start; conversation history may be newer):";
 
 function state(overrides: Partial<SessionState> = {}): SessionState {
   return {
@@ -113,7 +114,7 @@ test("accountHotSessionStateRender renders hot-state sections in stable order", 
     pendingMemories: [memory("mem-1", "Promote useful fact")],
   }), root);
 
-  assert.ok(accounting.prompt.startsWith("Hot session state (current session):"));
+  assert.ok(accounting.prompt.startsWith(HOT_STATE_PREFIX));
   assert.ok(accounting.prompt.indexOf("active_files:") < accounting.prompt.indexOf("open_errors:"));
   assert.ok(accounting.prompt.indexOf("open_errors:") < accounting.prompt.indexOf("recent_decisions:"));
   assert.ok(accounting.prompt.indexOf("recent_decisions:") < accounting.prompt.indexOf("pending_memories:"));
@@ -165,7 +166,7 @@ test("accountHotSessionStateRender omits over-budget entries without cutting ren
   }), root);
 
   assert.equal(accounting.prompt, [
-    "Hot session state (current session):",
+    HOT_STATE_PREFIX,
     "active_files:",
     "- src/short.ts (read, 1x)",
   ].join("\n"));
@@ -177,7 +178,7 @@ test("accountHotSessionStateRender omits over-budget entries without cutting ren
 
 test("accountHotSessionStateRender includes exact 700-char prompt but omits one additional character", () => {
   const fixedPrompt = [
-    "Hot session state (current session):",
+    HOT_STATE_PREFIX,
     "pending_memories:",
     "- [decision] ",
   ].join("\n");
@@ -223,7 +224,7 @@ test("renderHotSessionState delegates to accounted renderer prompt for empty and
 
 test("accountHotSessionStateRender counts newline separators in the 700-char budget", () => {
   const fixedPrompt = [
-    "Hot session state (current session):",
+    HOT_STATE_PREFIX,
     "recent_decisions:",
     "- ",
   ].join("\n");

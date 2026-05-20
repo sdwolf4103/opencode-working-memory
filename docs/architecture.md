@@ -18,7 +18,8 @@ OpenCode Working Memory implements a **three-layer memory architecture** designe
 │  LAYER 2: HOT SESSION STATE (Short-term, per-session)        │
 │  • Session-scoped tracking: active files, open errors       │
 │  • Storage: sessions/{sessionID}.json                       │
-│  • Auto-extracted from tool usage patterns                  │
+│  • Frozen prompt snapshot shares the workspace epoch        │
+│  • Auto-extracted from tool usage and explicit remembers    │
 │  • Cleared: on new session start                             │
 └─────────────────────────────────────────────────────────────┘
                               ↓
@@ -182,6 +183,9 @@ Track current session context automatically:
 - What files are you working on?
 - What errors are currently open?
 - What decisions were made recently?
+- Which explicit memories are pending promotion?
+
+Hot session state is stored continuously during a session, but it is not rendered as a per-turn dynamic prompt. The prompt layer uses a frozen hot snapshot created or refreshed at the same epoch boundary as frozen workspace memory. Active files and open errors are current at epoch boundaries, not on every normal turn. After epoch start, the conversation/tool transcript is the source of truth for newer events.
 
 ### Storage
 
@@ -195,7 +199,8 @@ Track current session context automatically:
     updatedAt: string,
     activeFiles: ActiveFile[],
     openErrors: OpenError[],
-    recentDecisions: SessionDecision[]
+    recentDecisions: SessionDecision[],
+    pendingMemories: LongTermMemoryEntry[]
   }
   ```
 
@@ -242,12 +247,17 @@ Short-term decisions made this session. Candidates for promotion to workspace me
 
 ### System Prompt Injection
 
-Hot session state is injected after workspace memory:
+Workspace memory and hot session state are separate cached prompt layers that share a prompt epoch lifecycle:
+
+```text
+system[1]*: frozen workspace memory
+system[2+]*: frozen hot snapshot
+```
+
+The hot state example below is included in a frozen hot snapshot when the epoch is created or refreshed, not rendered again on every normal turn. Active files and open errors are current at epoch boundaries, not on every normal turn; the plugin intentionally does not invalidate the hot snapshot on active-file or open-error changes because doing so would defeat prefix KV-cache reuse. Explicit pending memories persist in session state and the pending journal, then promote safely at compaction; once the current epoch caches exist, new pending memories do not force pre-history prompt refresh. After epoch start, the conversation/tool transcript is the source of truth for newer events.
 
 ```
----
-
-Hot session state (current session):
+Hot session state snapshot (epoch start; conversation history may be newer):
 
 active_files:
 - src/plugin.ts (edit, 18x)
@@ -280,7 +290,7 @@ OpenCode Working Memory hooks into OpenCode lifecycle events:
 
 ### `experimental.chat.system.transform`
 
-Injects workspace memory and hot session state into system prompt.
+Injects cached frozen workspace memory and cached frozen hot snapshot prompts into the system prompt. Normal tool/user churn updates storage but does not mutate these pre-history prompts until a new epoch starts.
 
 ### `tool.execute.after`
 

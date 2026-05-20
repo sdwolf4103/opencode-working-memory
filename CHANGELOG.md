@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.6] - 2026-05-20
+
+### Changed
+
+- Froze hot session state with the existing prompt-epoch model to reduce pre-history prompt churn for better prefix KV-cache reuse.
+- Switched frozen prompt cache pressure eviction to recency-aware tracking.
+- Updated README and architecture docs for the new frozen hot snapshot behavior.
+
+### Fixed
+
+- Fixed KV prefix-cache instability caused by per-turn hot session prompt changes.
+
+### Thanks
+
+- Thanks to @nilo85 for opening PR #5 and surfacing the local-LLM KV cache hit-rate issue that led to this release.
+
 ## [1.6.5] - 2026-05-19
 
 ### Added

@@ -1,5 +1,33 @@
 # Release Notes
 
+## 1.6.6 (2026-05-20)
+
+### KV Cache Stability
+
+This patch release reduces pre-history prompt churn by freezing hot session state with the existing prompt-epoch model, improving prefix KV-cache reuse for local LLMs.
+
+Thanks to @nilo85 for opening PR #5 and surfacing the cache hit-rate issue.
+
+### What Changed
+
+- Hot session state now uses a frozen epoch snapshot instead of changing on every normal turn.
+- Frozen prompt caches use recency-aware cache pressure eviction.
+- The hot-state prompt now labels itself as an epoch snapshot so conversation/tool history remains the source of truth for newer events.
+
+### Upgrade Notes
+
+- No configuration changes are required.
+- Existing workspace memory files, session state files, and evidence logs remain compatible.
+
+### Validation
+
+- `node --import ./tests/setup-xdg-data-home.ts --test --experimental-strip-types tests/session-state.test.ts` — 14 tests passing
+- `node --import ./tests/setup-xdg-data-home.ts --test --experimental-strip-types tests/plugin.test.ts` — 67 tests passing
+- `npm run typecheck` — `TYPECHECK_PASS`
+- `npm test` — 509 tests passing, `TEST_PASS`
+
+---
+
 ## 1.6.5 (2026-05-19)
 
 ### Code Health and Release Hygiene

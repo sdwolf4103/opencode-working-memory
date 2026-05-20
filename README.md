@@ -132,22 +132,22 @@ OpenCode Working Memory adds durable memory without making extra LLM/API calls.
 ┌──────────────────────────────────────┐
 │ ⚡ Prompt Context                     │
 │ system[1]*: frozen workspace memory  │
-│ system[2+]*: hot session state       │
+│ system[2+]*: frozen hot snapshot     │
 └──────────────────────────────────────┘
 ```
 
-\* Conceptually, workspace memory is pushed first when it is non-empty, and hot session state is pushed after workspace memory. If workspace memory is empty, hot state may be the first plugin-added system message. Actual `system[]` indices also depend on OpenCode and other plugins, so `system[1]` / `system[2+]` is a simplified model.
+\* Conceptually, frozen workspace memory is pushed first when it is non-empty, and the frozen hot snapshot is pushed after workspace memory. If workspace memory is empty, the hot snapshot may be the first plugin-added system message. Actual `system[]` indices also depend on OpenCode and other plugins, so `system[1]` / `system[2+]` is a simplified model.
 
 **Zero extra API calls:** OpenCode Working Memory does not call the model on its own. Memory extraction is folded into OpenCode's built-in compaction request.
 
-**Cache-friendly layout:** durable workspace memory is rendered as a stable frozen snapshot for the session, while fast-changing hot session state is appended separately. Compaction starts a new cache epoch, refreshing the workspace snapshot after pending memories are promoted.
+**Cache-friendly layout:** durable workspace memory and hot session state are rendered as separate frozen prompts that share the same epoch lifecycle. Hot state is an epoch-start snapshot: active files and open errors can change after it is created, and the conversation/tool transcript is the source of truth for newer events. The plugin intentionally does not invalidate the hot snapshot on active-file, open-error, recent-decision, or pending-memory changes because doing so would defeat prefix KV-cache reuse. Explicit pending memories remain durable and promote safely at compaction, but after the current epoch caches exist they do not force a prompt refresh.
 
 The runtime context has three layers:
 
 | Layer | Purpose | Lifetime |
 |---|---|---|
 | Workspace Memory | Durable decisions, preferences, project facts, references | Cross-session |
-| Hot Session State | Active files, open errors, recent context | Current session |
+| Hot Session State | Active files, open errors, recent context, pending memories | Current session storage; frozen prompt refreshes at epoch boundaries |
 | Native OpenCode State | Todos and built-in state | OpenCode-managed |
 
 ## Workspace Memory
@@ -261,7 +261,7 @@ Default behavior:
 
 - Workspace memory budget: 3600 characters (~900 tokens)
 - Workspace memory limit: 28 entries
-- Hot session state budget: 700 characters (~175 tokens)
+- Hot session state budget: 700 characters (~175 tokens) per frozen hot snapshot
 - Active files shown: 8
 - Open errors shown: 3
 
