@@ -1,13 +1,13 @@
 {
   "name": "opencode-working-memory",
-  "version": "1.6.6",
+  "version": "1.6.7",
   "description": "Three-layer memory architecture for OpenCode with workspace memory and hot session state",
   "type": "module",
-  "main": "index.ts",
+  "main": "dist/index.js",
   "exports": {
-    ".": "./index.ts",
-    "./server": "./index.ts",
-    "./tui": "./src/tui-plugin.ts"
+    ".": "./dist/index.js",
+    "./server": "./dist/index.js",
+    "./tui": "./dist/src/tui-plugin.js"
   },
   "bin": {
     "memory-diag": "./scripts/memory-diag-bin.cjs"
@@ -24,8 +24,9 @@
   ],
   "scripts": {
     "clean:dist": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
-    "build:memory-diag": "npm run clean:dist && tsc -p tsconfig.memory-diag.json",
-    "build": "npm run build:memory-diag && node -e \"console.log('BUILD_PASS')\"",
+    "build:dist": "npm run clean:dist && tsc -p tsconfig.memory-diag.json",
+    "build:memory-diag": "npm run build:dist",
+    "build": "npm run build:dist && node -e \"console.log('BUILD_PASS')\"",
     "prepack": "npm run build",
     "diag": "npm run --silent build:memory-diag && node ./scripts/memory-diag-bin.cjs",
     "test:pack:memory-diag": "node --test --experimental-strip-types tests/smoke/memory-diag-packaging.test.ts",
