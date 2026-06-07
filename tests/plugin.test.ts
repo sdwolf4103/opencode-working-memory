@@ -110,6 +110,58 @@ async function withMockedDateNow<T>(now: number, fn: () => Promise<T>): Promise<
   }
 }
 
+type MemoryPluginFactoryWithOptions = (
+  input: any,
+  options?: { mergeSystemMessages?: boolean },
+) => ReturnType<typeof MemoryV2Plugin>;
+
+const createMemoryPluginWithOptions = MemoryV2Plugin as unknown as MemoryPluginFactoryWithOptions;
+
+async function withMergeSystemMessagesEnv<T>(value: string | undefined, fn: () => Promise<T>): Promise<T> {
+  const previous = process.env.OPENCODE_WM_MERGE_SYSTEM_MESSAGES;
+  if (value === undefined) {
+    delete process.env.OPENCODE_WM_MERGE_SYSTEM_MESSAGES;
+  } else {
+    process.env.OPENCODE_WM_MERGE_SYSTEM_MESSAGES = value;
+  }
+  try {
+    return await fn();
+  } finally {
+    if (previous === undefined) {
+      delete process.env.OPENCODE_WM_MERGE_SYSTEM_MESSAGES;
+    } else {
+      process.env.OPENCODE_WM_MERGE_SYSTEM_MESSAGES = previous;
+    }
+  }
+}
+
+async function seedSystemMergeScenario(root: string, sessionID: string): Promise<void> {
+  const now = new Date().toISOString();
+  await updateWorkspaceMemory(root, store => {
+    store.entries.push({
+      id: `mem_system_merge_${sessionID}`,
+      type: "project",
+      text: `Workspace memory for ${sessionID}.`,
+      source: "compaction",
+      confidence: 0.9,
+      status: "active",
+      createdAt: now,
+      updatedAt: now,
+    });
+    return store;
+  });
+  await saveSessionState(root, {
+    version: 1,
+    sessionID,
+    turn: 1,
+    updatedAt: now,
+    activeFiles: [{ path: join(root, `src/${sessionID}.ts`), action: "edit", count: 1, lastSeen: Date.now() }],
+    openErrors: [],
+    recentDecisions: [],
+    pendingMemories: [],
+  });
+}
+
 async function withNumberedReinforceScenario(
   options: { sessionID: string; nowMs: number; existing: LongTermMemoryEntry; summary?: string },
   assertions: (context: {
@@ -660,6 +712,124 @@ test("chat system transform degrades gracefully when workspace memory JSON is co
     });
 
     assert.deepEqual(output.system, ["base header"]);
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("chat system transform keeps separate memory system entries by default", async () => {
+  const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-test-"));
+  const sessionID = "system-merge-default-session";
+
+  try {
+    await seedSystemMergeScenario(tmpDir, sessionID);
+
+    await withMergeSystemMessagesEnv(undefined, async () => {
+      const plugin = await MemoryV2Plugin({ directory: tmpDir, client: mockRootClient() });
+      const output = { system: ["base header"] };
+
+      await (plugin as Record<string, Function>)["experimental.chat.system.transform"](
+        { sessionID, model: {} },
+        output,
+      );
+
+      assert.equal(output.system.length, 3);
+      assert.equal(output.system[0], "base header");
+      assert.match(output.system[1], /Workspace memory/);
+      assert.match(output.system[1], /Workspace memory for system-merge-default-session/);
+      assert.match(output.system[2], /Hot session state/);
+      assert.match(output.system[2], /src\/system-merge-default-session\.ts/);
+    });
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("chat system transform merges memory prompts into the first system entry when tuple option is true", async () => {
+  const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-test-"));
+  const sessionID = "system-merge-option-session";
+
+  try {
+    await seedSystemMergeScenario(tmpDir, sessionID);
+
+    await withMergeSystemMessagesEnv(undefined, async () => {
+      const plugin = await createMemoryPluginWithOptions(
+        { directory: tmpDir, client: mockRootClient() },
+        { mergeSystemMessages: true },
+      );
+      const output = { system: ["base header"] };
+
+      await (plugin as Record<string, Function>)["experimental.chat.system.transform"](
+        { sessionID, model: {} },
+        output,
+      );
+
+      assert.equal(output.system.length, 1);
+      assert.match(output.system[0], /^base header/);
+      assert.match(output.system[0], /Workspace memory/);
+      assert.match(output.system[0], /Workspace memory for system-merge-option-session/);
+      assert.match(output.system[0], /Hot session state/);
+      assert.match(output.system[0], /src\/system-merge-option-session\.ts/);
+      assert.ok(
+        output.system[0].indexOf("Workspace memory") < output.system[0].indexOf("Hot session state"),
+        "workspace memory should precede hot session state in merged system prompt",
+      );
+    });
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("chat system transform tuple false overrides merge system env fallback", async () => {
+  const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-test-"));
+  const sessionID = "system-merge-option-false-session";
+
+  try {
+    await seedSystemMergeScenario(tmpDir, sessionID);
+
+    await withMergeSystemMessagesEnv("true", async () => {
+      const plugin = await createMemoryPluginWithOptions(
+        { directory: tmpDir, client: mockRootClient() },
+        { mergeSystemMessages: false },
+      );
+      const output = { system: ["base header"] };
+
+      await (plugin as Record<string, Function>)["experimental.chat.system.transform"](
+        { sessionID, model: {} },
+        output,
+      );
+
+      assert.equal(output.system.length, 3);
+      assert.match(output.system[1], /Workspace memory/);
+      assert.match(output.system[2], /Hot session state/);
+    });
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("chat system transform merges memory prompts when env fallback is true", async () => {
+  const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-test-"));
+  const sessionID = "system-merge-env-session";
+
+  try {
+    await seedSystemMergeScenario(tmpDir, sessionID);
+
+    await withMergeSystemMessagesEnv("true", async () => {
+      const plugin = await MemoryV2Plugin({ directory: tmpDir, client: mockRootClient() });
+      const output = { system: ["base header"] };
+
+      await (plugin as Record<string, Function>)["experimental.chat.system.transform"](
+        { sessionID, model: {} },
+        output,
+      );
+
+      assert.equal(output.system.length, 1);
+      assert.match(output.system[0], /^base header/);
+      assert.match(output.system[0], /Workspace memory for system-merge-env-session/);
+      assert.match(output.system[0], /Hot session state/);
+      assert.match(output.system[0], /src\/system-merge-env-session\.ts/);
+    });
   } finally {
     await rm(tmpDir, { recursive: true, force: true });
   }

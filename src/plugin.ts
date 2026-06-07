@@ -231,8 +231,41 @@ function compactionIdFromSummary(summary: string): string | undefined {
   return summary.match(/Memory ref snapshot id:\s*([a-zA-Z0-9_-]+)/i)?.[1];
 }
 
-export const MemoryV2Plugin: Plugin = async (input) => {
+type MemoryPluginOptions = {
+  mergeSystemMessages?: boolean;
+};
+
+function resolveMergeSystemMessagesOption(options: unknown): boolean {
+  const value = (options as { mergeSystemMessages?: unknown } | undefined)?.mergeSystemMessages;
+  if (value === true) return true;
+  if (value === false) return false;
+  return process.env.OPENCODE_WM_MERGE_SYSTEM_MESSAGES === "true";
+}
+
+function appendMemorySystemPrompts(
+  output: { system: string[] },
+  parts: string[],
+  mergeSystemMessages: boolean,
+): void {
+  if (parts.length === 0) return;
+
+  if (!mergeSystemMessages) {
+    output.system.push(...parts);
+    return;
+  }
+
+  const block = parts.join("\n\n---\n\n");
+  if (output.system.length === 0) {
+    output.system.push(block);
+    return;
+  }
+
+  output.system[0] = `${output.system[0]}\n\n---\n\n${block}`;
+}
+
+export const MemoryV2Plugin: Plugin = async (input, options?: MemoryPluginOptions) => {
   const { directory, client } = input;
+  const mergeSystemMessages = resolveMergeSystemMessagesOption(options);
 
   // Cache for sub-agent detection — avoids repeated API calls per session.
   // Maps sessionID → parentID (string) or null (root session).
@@ -950,15 +983,19 @@ export const MemoryV2Plugin: Plugin = async (input) => {
           await warnMemoryHook("chat.system.transform.hot_snapshot", error, directory);
         }
 
+        const memorySystemPromptParts: string[] = [];
+
         // Inject frozen workspace memory snapshot
         if (workspaceSnapshot?.renderedPrompt) {
-          output.system.push(workspaceSnapshot.renderedPrompt);
+          memorySystemPromptParts.push(workspaceSnapshot.renderedPrompt);
         }
 
         // Inject frozen hot session state snapshot
         if (hotSnapshot?.renderedPrompt) {
-          output.system.push(hotSnapshot.renderedPrompt);
+          memorySystemPromptParts.push(hotSnapshot.renderedPrompt);
         }
+
+        appendMemorySystemPrompts(output, memorySystemPromptParts, mergeSystemMessages);
       } catch (error) {
         await warnMemoryHook("chat.system.transform", error, directory);
       }

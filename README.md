@@ -66,6 +66,26 @@ Existing users: keep your current `.opencode/opencode.json` config and add only 
 
 Then restart OpenCode. Memory activates automatically, and `/memory` appears in the TUI slash command menu.
 
+### Strict OpenAI-Compatible Providers
+
+Some providers, including GWDG/Qwen endpoints, reject requests with multiple system messages. If your provider returns `System message must be at the beginning`, enable merged system prompts in `.opencode/opencode.json`:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugin": [["opencode-working-memory", { "mergeSystemMessages": true }]]
+}
+```
+
+This keeps memory context available by appending workspace memory and hot session state into the first system message. Leave this option off for providers that already accept multiple system messages; the default separated prompts are more cache-friendly.
+
+Fallback for older OpenCode/plugin hosts that do not pass plugin tuple options:
+
+```bash
+export OPENCODE_WM_MERGE_SYSTEM_MESSAGES=true
+opencode
+```
+
 ## Native TUI Memory Menu
 
 The TUI plugin adds one display-only local memory command:
