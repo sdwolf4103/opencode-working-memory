@@ -453,12 +453,11 @@ function parseCandidateLine(line: string): { type: LongTermType; body: string } 
     return { type: bracketed[1].toLowerCase() as LongTermType, body: bracketed[2] };
   }
 
-  const bracketless = line.trim().match(/^-\s*(feedback|project|decision|reference)\b\s+(.+)$/i);
-  if (bracketless) {
-    return { type: bracketless[1].toLowerCase() as LongTermType, body: bracketless[2] };
-  }
-
   return null;
+}
+
+function isUnsupportedBracketlessCandidateLine(line: string): boolean {
+  return /^\s*-\s*(feedback|project|decision|reference)\b\s+.+$/i.test(line.trim());
 }
 
 /**
@@ -584,6 +583,24 @@ function isCleanCandidateBlock(block: string): boolean {
   return block.split("\n").every(isAllowedCandidateBlockLine);
 }
 
+function unsupportedCandidateSyntaxEvidence(block: string): EvidenceEventInput[] {
+  const evidence: EvidenceEventInput[] = [];
+
+  for (const line of block.split("\n")) {
+    if (isAllowedCandidateBlockLine(line)) continue;
+    if (!isUnsupportedBracketlessCandidateLine(line)) return [];
+    evidence.push(extractionEvidence({
+      type: "extraction_candidate_rejected",
+      phase: "extraction",
+      outcome: "rejected",
+      reasonCodes: ["unsupported_candidate_syntax"],
+      textPreview: evidenceTextPreview(line, 80),
+    }));
+  }
+
+  return evidence;
+}
+
 export function parseWorkspaceMemoryCandidates(
   summary: string,
   options?: WorkspaceMemoryCandidateParseOptions,
@@ -597,7 +614,9 @@ export function parseWorkspaceMemoryCandidatesWithEvidence(
 ): WorkspaceMemoryParseResult {
   const block = extractCandidateBlock(summary);
   if (!block) return { entries: [], commands: [], evidence: [] };
-  if (!isCleanCandidateBlock(block)) return { entries: [], commands: [], evidence: [] };
+  if (!isCleanCandidateBlock(block)) {
+    return { entries: [], commands: [], evidence: unsupportedCandidateSyntaxEvidence(block) };
+  }
 
   const nowMs = Date.now();
   const now = new Date(nowMs).toISOString();
@@ -615,7 +634,7 @@ export function parseWorkspaceMemoryCandidatesWithEvidence(
       continue;
     }
 
-    // Accept both "- [type] text" (bracketed) and "- type text" (bracketless)
+    // Accept strict bracketed candidate syntax: "- [type] text" or "[type] text".
     const item = parseCandidateLine(line);
     if (!item) {
       if (isCommandAttempt(line)) {
