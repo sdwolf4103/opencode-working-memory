@@ -750,6 +750,572 @@ Expected: PASS. If there is an unrelated pre-existing failure, capture the exact
 
 ---
 
+# Wave 3 Detailed Plan — Compaction Parser Boundary and Command Provenance
+
+## Wave 3 Goal
+
+Reduce accidental or attacker-shaped memory changes from compaction summaries while preserving practical tolerance for imperfect AI formatting.
+
+## Wave 3 User Decision
+
+The user agreed that AI often does **not** reliably print `Memory ref snapshot id`, so Wave 3 must not require a snapshot id for every new memory candidate. The user also requested that when `REINFORCE` or `REPLACE` commands are rejected because an id is missing, the plugin must record evidence so later diagnostics can count how often this happens.
+
+## Wave 3 Scope
+
+**In scope:**
+- Require matching compaction snapshot provenance for destructive commands: `REINFORCE [M#]` and `REPLACE [M#] ...`.
+- Record evidence events when destructive commands are rejected because the summary has no compaction id or has a mismatched id.
+- Keep new `- [type] ...` candidates usable without a compaction id, because observed AI output may omit the id.
+- Tighten candidate block extraction so new candidates are parsed only from an intentional terminal candidate block, not from examples, quoted text, or fenced code.
+- Preserve existing quality gate behavior for all accepted new candidates.
+- Keep legacy candidate formats temporarily, but define tests that bound their behavior.
+- Execute Wave 3A and Wave 3B as separate batches. The user approved the combined strategy, but each batch has its own verification gate so parser-boundary work can be paused if command provenance needs follow-up.
+
+**Out of scope:**
+- Requiring id for new memory candidates.
+- Removing `## Memory Candidates`, `## Workspace Memory Candidates`, or XML legacy support in this wave.
+- Introducing cryptographic tokens or changing the workspace memory schema.
+- Changing bracketless candidate grammar; that remains Wave 4 unless the user explicitly merges it.
+- Changing stale-memory retention policy; that remains Wave 5.
+- Adding a new diagnostics CLI command. Wave 3 only needs structured evidence; aggregation/reporting can be a later diagnostic wave.
+
+## Wave 3 Current-State Analysis
+
+### Gap 1: Missing compaction id can still allow destructive commands
+
+Current code in `src/plugin.ts`:
+
+```ts
+function compactionSnapshotStatus(
+  refs: CompactionMemoryRef[],
+  expectedCompactionId: string | undefined,
+): { ok: true } | { ok: false; storedCompactionId: string } {
+  if (refs.length === 0) return { ok: false, storedCompactionId: "none" };
+
+  const ids = new Set(refs.map(ref => ref.compactionId).filter((id): id is string => typeof id === "string" && id.length > 0));
+  if (!expectedCompactionId) return { ok: true };
+  if (ids.size === 1 && ids.has(expectedCompactionId)) return { ok: true };
+  if (ids.size === 0) return { ok: false, storedCompactionId: "none" };
+  if (ids.size === 1) return { ok: false, storedCompactionId: [...ids][0] };
+  return { ok: false, storedCompactionId: "mixed" };
+}
+```
+
+Risk: if the summary omits `Memory ref snapshot id`, `expectedCompactionId` is `undefined` and the function returns `{ ok: true }`. This means `REINFORCE [M#]` and eligible `REPLACE [M#] ...` commands can still operate on the current numbered ref snapshot without provenance proof. These commands are destructive or stateful: they can increase reinforcement state or supersede an existing memory.
+
+Target behavior: missing id must fail closed for commands, not pass through. The rejection must be observable in evidence with a reason code that can be counted later.
+
+Important implementation detail: command rejection for missing or mismatched id must happen **before** `resolveCompactionMemoryRef()` is called. The existing false-snapshot path clears `refs` to `[]`; if commands then flow into `resolveCompactionMemoryRef()`, evidence can be mislabeled as `missing_memory_ref_snapshot` instead of the more precise `missing_compaction_snapshot_id` or `compaction_snapshot_mismatch`.
+
+### Gap 2: New candidates cannot depend on id because AI output is unreliable
+
+The compaction prompt currently asks for `Memory ref snapshot id` only when emitting `REINFORCE` or `REPLACE`:
+
+```ts
+? `- If you emit any REINFORCE or REPLACE command, include \`Memory ref snapshot id: ${compactionId}\` as the first line under "Memory candidates:" so numbered refs match the correct compaction snapshot.`
+```
+
+User observation: AI often does not display the id. Therefore, making id mandatory for every new candidate would silently drop legitimate extraction too often.
+
+Target behavior: new `- [feedback|decision|project|reference] ...` entries may still be accepted without id, but only when they appear in a bounded, intentional candidate block and pass the existing quality gate.
+
+### Gap 3: Candidate block extraction has weak text boundaries
+
+Current code in `src/extractors.ts`:
+
+```ts
+const plainMatch = summary.match(/Memory candidates:\s*\n([\s\S]*?)(?:\n[A-Z][a-z]+ [a-z]+:|\n##\s|$)/i);
+```
+
+Risk: this accepts the first natural-language `Memory candidates:` label and stops using a heuristic title-like line or markdown heading. It can parse examples, quoted blocks, code fences, or earlier explanatory sections if they contain candidate-like bullets.
+
+Target behavior: candidate extraction should prefer the final intentional candidate block, ignore fenced code and blockquote contexts, and require the block body to consist only of allowed candidate syntax, command syntax, optional snapshot id, `(none)`, and blank lines.
+
+Current behavior note: the existing regex captures the first matching block and can stop at a later `Memory candidates:` line because that line resembles the title-like boundary pattern. Wave 3B must scan for the final valid non-code, non-quote block instead of relying on the first regex match.
+
+## Wave 3 Architecture
+
+### Components and responsibilities
+
+- `src/plugin.ts`
+  - `compactionIdFromSummary()` reads the id from summary text.
+  - `compactionSnapshotStatus()` should distinguish missing id from mismatched id and must fail closed for command execution.
+  - `applyCompactionMemoryCommands()` should record rejection evidence for each rejected command attempt, including missing-id rejections.
+- `src/extractors.ts`
+  - `extractCandidateBlock()` should return only a trusted-enough terminal block from model text.
+  - `parseWorkspaceMemoryCandidatesWithEvidence()` should keep new candidate acceptance independent from compaction id, but reject candidate blocks containing non-allowlist lines before line parsing.
+- `src/evidence-log.ts`
+  - Reuse existing event shapes and reason-code storage if possible. Add only the smallest type union change if TypeScript requires it.
+- `tests/plugin.test.ts`
+  - Integration coverage for command provenance and evidence.
+- `tests/extractors.test.ts`
+  - Unit coverage for parser boundary behavior and AI format drift.
+
+### Data flow after Wave 3
+
+```text
+session.compacted event
+  -> latestCompactionSummary()
+  -> compactionIdFromSummary(summary)
+  -> parseWorkspaceMemoryCandidatesWithEvidence(summary, workspaceIdentity)
+     -> entries: new candidates from terminal clean block, id optional
+     -> commands: REINFORCE/REPLACE attempts from terminal clean block
+     -> evidence: candidate acceptance/rejection evidence
+  -> append parser evidence
+  -> applyCompactionMemoryCommands(sessionID, commands, compactionId)
+     -> if compactionId missing/mismatched: reject each command and append evidence
+     -> if compactionId matches current refs: apply commands using existing exact-key checks
+  -> appendPendingMemories(entries)
+  -> promotePendingMemories()
+```
+
+### Error flow
+
+- Missing id for a command must not throw. It should leave workspace memory unchanged and append evidence with `reasonCodes: ["missing_compaction_snapshot_id"]`.
+- Mismatched id for a command must not throw. It should leave workspace memory unchanged and append evidence with `reasonCodes: ["compaction_snapshot_mismatch"]`.
+- Malformed candidate blocks should return no entries/commands. They must not silently skip non-allowlist lines and then accept later candidates from the same block.
+
+### Security and permissions
+
+- Treat compaction summaries as untrusted model output.
+- Treat `REINFORCE` and `REPLACE` as destructive command attempts requiring provenance.
+- Treat new candidates as less destructive but still untrusted; they must pass syntax boundary checks and the existing quality gate.
+- Do not rely on AI always printing the id.
+
+### Performance
+
+- Parser boundary checks are linear in summary length and run only on compaction.
+- Evidence additions are one event per rejected command attempt; compaction command count is naturally small because commands must appear as candidate block lines.
+
+### Production failure scenarios
+
+- **AI omits id but emits `REINFORCE [M2]`:** Command is rejected, memory remains unchanged, evidence records `missing_compaction_snapshot_id` so diagnostics can later count occurrences.
+- **AI omits id but emits a valid new candidate:** Candidate can still be accepted if it is in the final clean candidate block and passes quality gates.
+- **Summary includes a quoted example with `Memory candidates:`:** Parser ignores quote/code context or chooses the later final block, preventing example text from becoming memory.
+- **Summary includes both an earlier fake candidate block and a final `(none)`:** Parser uses the final block and returns no entries/commands.
+
+## Wave 3 File Plan
+
+- Modify: `src/plugin.ts:230-231` — keep or adjust `compactionIdFromSummary()` only if tests prove current extraction is insufficient for the expected id line.
+- Modify: `src/plugin.ts:415-427` — change snapshot status semantics so missing `expectedCompactionId` is not ok for commands.
+- Modify: `src/plugin.ts:457-560` — append command rejection evidence for missing/mismatched compaction id before or during command processing; ensure one evidence event per command attempt.
+- Modify: `src/plugin.ts:90-93` — update prompt wording so all command attempts clearly require `Memory ref snapshot id`, without requiring id for new candidates.
+- Modify: `src/extractors.ts:468-486` — replace first-match weak extraction with terminal clean block extraction while preserving accepted formats.
+- Modify: `src/extractors.ts:508-600` — skip `Memory ref snapshot id:` lines before candidate/command parsing and reject non-allowlist lines inside blocks.
+- Test: `tests/plugin.test.ts` — command provenance and evidence behavior.
+- Test: `tests/extractors.test.ts` — parser boundary, final-block behavior, code/quote exclusion, and legacy compatibility bounds.
+- Test only if needed: `tests/evidence-log.test.ts` — only if evidence event type/normalization changes require direct coverage beyond plugin integration.
+
+## Wave 3 Test Strategy
+
+- **Framework:** Existing Node TypeScript test suite.
+- **TDD approach:** Add failing tests first for missing-id command rejection/evidence and parser false-positive cases, then implement the minimal code changes.
+- **Unit coverage:** `extractors.test.ts` for block extraction and line filtering.
+- **Integration coverage:** `plugin.test.ts` for `session.compacted` command application and evidence persistence.
+- **Regression coverage:** Full `npm test` after each batch.
+- **Observability coverage:** Tests must assert serialized evidence includes the missing-id reason code and does not rely only on console warnings.
+
+---
+
+## Wave 3A — Destructive Command Provenance and Evidence
+
+**Purpose:** Prevent `REINFORCE` and `REPLACE` from modifying existing memories unless the compaction summary includes a matching snapshot id, and record rejected missing-id attempts for later counting.
+
+**Covers findings:** Resolved finding snapshot bypass hardening; Finding 6 impact reduction for destructive commands.
+
+**End state:** Missing or mismatched compaction id rejects all parsed commands with evidence, while valid id commands still work. New candidates are not blocked by id policy.
+
+### Task 1: Add failing tests for missing-id command rejection
+
+**Purpose:** Prove current behavior is too permissive before changing `plugin.ts`.
+
+**Files:**
+- Test: `tests/plugin.test.ts`
+
+**Scenarios:**
+- Seed an active memory with a current compaction ref snapshot.
+- Provide a compaction summary containing `Memory candidates:` and `REINFORCE [M1]` without `Memory ref snapshot id`.
+- Provide a separate summary containing `REPLACE [M1] [decision] corrected durable fact` without `Memory ref snapshot id`.
+
+**Expected after implementation:**
+- `REINFORCE` does not increment reinforcement metadata or strength-relevant fields.
+- `REPLACE` does not supersede the old memory and does not add the replacement memory.
+- Evidence contains `missing_compaction_snapshot_id` for each rejected command attempt.
+- Evidence details identify at least `commandKind` and `ref` so later diagnostics can aggregate by command type and ref.
+
+- [ ] Add the tests and run them before implementation.
+
+Run:
+
+```bash
+npm test -- tests/plugin.test.ts
+```
+
+Expected before implementation: FAIL because missing-id commands are currently accepted or do not emit the required evidence.
+
+### Task 2: Add failing tests for mismatched-id command evidence
+
+**Purpose:** Ensure mismatch rejection remains explicit and countable.
+
+**Files:**
+- Test: `tests/plugin.test.ts`
+
+**Scenario:**
+- Seed current refs with one `compactionId`.
+- Summary includes a different `Memory ref snapshot id` and a `REINFORCE` or `REPLACE` command.
+
+**Expected after implementation:**
+- Command does not mutate memory.
+- Evidence contains `compaction_snapshot_mismatch`.
+- Evidence details include `compactionId` and `storedCompactionId` when available.
+
+- [ ] Add the test and run it before implementation.
+
+Run:
+
+```bash
+npm test -- tests/plugin.test.ts
+```
+
+Expected before implementation: existing mismatch may already reject, but the test may fail if evidence reason/details are not explicit enough.
+
+### Task 3: Preserve valid-id command behavior
+
+**Purpose:** Avoid breaking legitimate reinforcement/replacement when AI does include the id correctly.
+
+**Files:**
+- Test: `tests/plugin.test.ts`
+
+**Scenario:**
+- Summary includes:
+
+```text
+Memory candidates:
+Memory ref snapshot id: <current-id>
+REINFORCE [M1]
+```
+
+and existing REPLACE success coverage remains green.
+
+**Expected:**
+- Matching-id `REINFORCE` still applies.
+- Matching-id eligible `REPLACE` still applies subject to existing exact-key, quality, and reinforcement rules.
+- No rejection evidence is emitted for successful commands.
+
+- [ ] Required action: audit every existing plugin test that expects a `REINFORCE` or `REPLACE` command to succeed. Verify each compaction summary fixture includes `Memory ref snapshot id: <current-id>`. If a success fixture omits the id, add it; this is mandatory after missing-id fail-closed behavior.
+- [ ] Add a combined scenario: a terminal `Memory candidates:` block contains one `REINFORCE [M1]` command and one `- [decision] New durable fact.` candidate. With matching id, the command applies and the new candidate is accepted. Without id, the command is rejected with `missing_compaction_snapshot_id` evidence while the new candidate is still accepted.
+
+### Task 4: Implement command snapshot status fail-closed behavior
+
+**Purpose:** Make missing id unsafe for commands, not implicitly trusted.
+
+**Files:**
+- Modify: `src/plugin.ts:415-427`
+- Modify: `src/plugin.ts:457-560`
+
+**Implementation constraints:**
+- Treat `Memory ref snapshot id:` with no value or only whitespace as missing id; `compactionIdFromSummary()` should return `undefined` for that input.
+- Do not let missing-id or mismatched-id commands reach `resolveCompactionMemoryRef()`. That path would convert the failure into `missing_memory_ref_snapshot`, losing the reason-code distinction required for diagnostics.
+- Replace the current missing-id pass-through:
+
+```ts
+if (!expectedCompactionId) return { ok: true };
+```
+
+with an explicit failure state for command application, such as:
+
+```ts
+if (!expectedCompactionId) return { ok: false, storedCompactionId: ids.size === 1 ? [...ids][0] : ids.size === 0 ? "none" : "mixed", reason: "missing_compaction_snapshot_id" };
+```
+
+- If changing the return type, update all local handling in `applyCompactionMemoryCommands()`.
+- Do not apply this id requirement to `parseResult.entries`; only command application is affected.
+- Implementation path for missing id: in `applyCompactionMemoryCommands()`, before entering `updateWorkspaceMemoryWithAccounting()`, check whether `compactionId` is absent. If absent, iterate `commands`, append one rejection evidence event per command, and return early without calling `updateWorkspaceMemoryWithAccounting()`.
+- Reuse existing command evidence helpers and event types. For rejected `REINFORCE`, use `memoryReinforcedEvidence(..., "rejected", ["missing_compaction_snapshot_id"], details)` so the event type remains `memory_reinforced`. For rejected `REPLACE`, use `memoryReplacedEvidence(..., "rejected", ["missing_compaction_snapshot_id"], details)` so the event type remains `memory_replaced_numbered_ref`. Do not introduce a new event type.
+- Implementation path for mismatched id: if `compactionId` is present but `compactionSnapshotStatus()` is not ok, keep the real `sessionState.compactionMemoryRefs` available for details but do not call `resolveCompactionMemoryRef()`. Emit one rejection event per command with `reasonCodes: ["compaction_snapshot_mismatch"]`, include `compactionId` and `storedCompactionId` in details when available, and skip mutation.
+- If `compactionSnapshotStatus()` return type gains a `reason` field, update the single call site in `applyCompactionMemoryCommands()` and keep the existing true/false narrowing clear for TypeScript.
+- Ensure one rejected command produces one evidence event. If a summary has three command lines and no id, evidence count should be three.
+
+- [ ] Implement the minimal code change.
+
+### Task 5: Update compaction prompt wording for commands only
+
+**Purpose:** Improve future AI compliance without depending on it for new candidates.
+
+**Files:**
+- Modify: `src/plugin.ts:90-93`
+
+**Required wording behavior:**
+- Current state: the prompt already restricts the id requirement to `REINFORCE` and `REPLACE` and does not require it for new candidates.
+- Required change: strengthen the wording to say `REINFORCE` and `REPLACE` commands without this id will be ignored.
+- Continue to say that `Memory ref snapshot id: <id>` is required for `REINFORCE` or `REPLACE` commands.
+- Do **not** say new `- [type] ...` candidates require the id.
+- Prefer concise wording that tells the model missing id will cause commands to be ignored.
+
+- [ ] Update prompt text and adjust prompt snapshot/string tests if present.
+
+### Wave 3A Verification Gate
+
+Run focused tests:
+
+```bash
+npm test -- tests/plugin.test.ts
+```
+
+Expected: PASS.
+
+Then run full suite:
+
+```bash
+npm test
+```
+
+Expected: PASS.
+
+### Wave 3A Done Criteria
+
+- [ ] Missing-id `REINFORCE` is rejected and leaves memory unchanged.
+- [ ] Missing-id `REPLACE` is rejected and leaves memory unchanged.
+- [ ] Missing-id command rejection writes countable evidence with `missing_compaction_snapshot_id`.
+- [ ] Mismatched-id command rejection writes countable evidence with `compaction_snapshot_mismatch`.
+- [ ] Matching-id command behavior still passes existing success tests.
+- [ ] New memory candidates without id are still accepted when parser syntax and quality gates pass.
+- [ ] Focused and full tests pass.
+- [ ] Fresh phase verifier reviews Wave 3A before Wave 3B starts.
+
+---
+
+## Wave 3B — Terminal Clean Candidate Block Extraction
+
+**Purpose:** Reduce false-positive new memory extraction from examples, code blocks, quotes, or earlier prose while preserving practical AI format tolerance.
+
+**Covers findings:** 6 and 7, without removing legacy compatibility yet.
+
+**End state:** Parser accepts normal final candidate blocks, ignores code/quote/example blocks, and keeps legacy formats bounded by tests.
+
+**Regression risk:** Current `parseWorkspaceMemoryCandidatesWithEvidence()` silently skips unrecognized lines and can still accept later candidate lines in the same block. Before implementation, audit existing `tests/extractors.test.ts` fixtures. Any fixture that interleaves non-allowlist prose/comments between candidates and expects later candidates to be accepted must either be cleaned or updated to expect block rejection. Document impacted tests in the implementation handoff.
+
+### Task 1: Add failing tests for code block and blockquote exclusion
+
+**Purpose:** Prove parser does not treat quoted examples as authoritative memory candidates.
+
+**Files:**
+- Test: `tests/extractors.test.ts`
+
+**Inputs:**
+
+````markdown
+## Discoveries
+
+Example only:
+
+```text
+Memory candidates:
+- [decision] Fake memory from code block.
+```
+````
+
+and:
+
+```markdown
+> Memory candidates:
+> - [decision] Fake memory from quote.
+```
+
+and an inline-code mention that is not a block label:
+
+```markdown
+The summary mentions `Memory candidates:` as an inline example but does not emit a candidate block.
+```
+
+**Expected after implementation:**
+- `entries.length === 0`.
+- `commands.length === 0`.
+
+- [ ] Add the tests and run them before implementation.
+
+Run:
+
+```bash
+npm test -- tests/extractors.test.ts
+```
+
+Expected before implementation: FAIL if current parser accepts these blocks.
+
+### Task 2: Add tests for final-block preference
+
+**Purpose:** Ensure parser uses the intended terminal memory section, not an earlier mention.
+
+**Files:**
+- Test: `tests/extractors.test.ts`
+
+**Input:**
+
+```text
+## Discoveries
+Earlier example:
+Memory candidates:
+- [decision] Fake earlier memory.
+
+## Next Steps
+Continue work.
+
+Memory candidates:
+- [decision] Real final durable decision.
+```
+
+**Expected:**
+- Only `Real final durable decision.` is accepted.
+- Earlier fake memory is not accepted.
+
+- [ ] Add the test and run it before implementation.
+
+### Task 3: Add tests for clean block rule and `(none)`
+
+**Purpose:** Bound what can appear inside a candidate block.
+
+**Files:**
+- Test: `tests/extractors.test.ts`
+
+**Valid input:**
+
+```text
+Memory candidates:
+Memory ref snapshot id: abc123
+- [decision] Keep parser tolerant but bounded.
+REINFORCE [M1]
+```
+
+Expected:
+- One entry.
+- One command.
+- The id line is ignored by line parser and does not create rejection evidence.
+
+**None input:**
+
+```text
+Memory candidates:
+(none)
+```
+
+Expected:
+- No entries.
+- No commands.
+
+**Non-allowlist prose input:**
+
+```text
+Memory candidates:
+Here are some examples:
+- [decision] Do not accept this after prose.
+```
+
+Expected:
+- Fail closed: no entries and no commands.
+- Do not silently accept candidates following ordinary prose.
+
+- [ ] Add tests and run them before implementation.
+
+### Task 4: Bound legacy format compatibility
+
+**Purpose:** Keep compatibility intentionally rather than accidentally.
+
+**Files:**
+- Test: `tests/extractors.test.ts`
+
+**Cases:**
+- `## Memory Candidates` final section with `- [project] ...` still parses.
+- `## Workspace Memory Candidates` final section with `- [reference] ...` still parses.
+- `<workspace_memory_candidates>...</workspace_memory_candidates>` still parses a clean block.
+- Legacy blocks inside fenced code do not parse.
+- Legacy blocks with non-allowlist prose fail closed and return no entries/commands.
+
+- [ ] Add tests and run them before implementation.
+
+### Task 5: Implement terminal clean block extraction
+
+**Purpose:** Replace weak first-match extraction with bounded extraction.
+
+**Files:**
+- Modify: `src/extractors.ts:468-486`
+- Modify: `src/extractors.ts:508-600` for id-line skipping and block invalidation
+
+**Implementation constraints:**
+- Prefer existing regex/string scanning; do not add dependencies.
+- Track fenced code state for triple backtick and triple tilde fences. Candidate labels inside active fences must be ignored.
+- Ignore candidate labels on blockquote lines beginning with optional whitespace then `>`.
+- Choose the last valid non-code, non-quote candidate block among supported formats.
+- The plain `Memory candidates:` label remains accepted case-insensitively.
+- For plain/markdown blocks, candidate body ends at the next markdown heading, the next supported candidate label, or end of summary.
+- Clean-block allowlist, exact: a line inside a candidate block is valid only if it is one of:
+  1. Blank line containing only whitespace.
+  2. `(none)`, case-insensitive, with optional surrounding whitespace.
+  3. `Memory ref snapshot id: <alphanumeric-id>`, using the same id character class accepted by `compactionIdFromSummary()`.
+  4. `REINFORCE [M#]`, using existing command syntax.
+  5. `REPLACE [M#] [feedback|decision|project|reference] text`, using existing command syntax.
+  6. `- [feedback|decision|project|reference] text`, using existing bracketed candidate syntax.
+  7. `- feedback|decision|project|reference text`, using existing bracketless candidate syntax only until Wave 4 changes that policy.
+- Any other non-blank line makes the entire candidate block invalid. Implementation must fail closed: return no entries and no commands for that block. Do not silently skip the invalid line and continue parsing later lines in the same block.
+- Apply clean-block validation to plain, markdown legacy, workspace-markdown legacy, and XML legacy extracted text.
+- If the final candidate block fails clean validation, return no entries and no commands. Do not search earlier blocks. This is the fail-closed position: the final intentional section is authoritative, and if it is malformed, the summary does not produce memory changes.
+
+- [ ] Implement minimal code to satisfy tests.
+
+### Task 6: Preserve normal AI format drift
+
+**Purpose:** Avoid overfitting to a single exact output format.
+
+**Files:**
+- Test: `tests/extractors.test.ts`
+
+**Cases:**
+- `Memory candidates:` with blank line before candidate still parses.
+- Case variation such as `memory candidates:` still parses if existing behavior allowed it.
+- Leading/trailing spaces around the label still parse if low-risk.
+- `(none)` remains accepted as empty.
+
+- [ ] Add or confirm tests for these tolerated variants.
+
+### Wave 3B Verification Gate
+
+Run focused tests:
+
+```bash
+npm test -- tests/extractors.test.ts tests/plugin.test.ts
+```
+
+Expected: PASS.
+
+Then run full suite:
+
+```bash
+npm test
+```
+
+Expected: PASS.
+
+### Wave 3B Done Criteria
+
+- [ ] Parser ignores candidate labels inside fenced code blocks.
+- [ ] Parser ignores candidate labels inside blockquotes.
+- [ ] Parser prefers the final intentional candidate block over earlier examples.
+- [ ] Suspicious prose inside a candidate block cannot lead to later candidates being accepted.
+- [ ] Normal final `Memory candidates:` output still parses.
+- [ ] `(none)` still produces no entries/commands.
+- [ ] Legacy formats remain intentionally supported and bounded by tests.
+- [ ] Missing id for new candidates does not block valid new candidate extraction.
+- [ ] Focused and full tests pass.
+- [ ] Fresh phase verifier reviews Wave 3B before Wave 4 planning begins.
+
+## Wave 3 Review Gate
+
+- [ ] Delivery lead reviews Wave 3A and Wave 3B diffs separately.
+- [ ] Fresh phase verifier reviews each batch before acceptance.
+- [ ] Reviewer performs a completed Wave 3 diff review after both batches pass.
+- [ ] User reviews evidence counts/fields for missing-id command rejection before any later diagnostics aggregation work.
+
+---
+
 ## Final Verification After All Waves
 
 - [ ] Run: `npm test`

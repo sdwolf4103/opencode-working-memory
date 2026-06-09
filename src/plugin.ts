@@ -89,7 +89,7 @@ import { type CompactionMemoryRef, type LongTermMemoryEntry, LONG_TERM_LIMITS, W
  */
 function buildCompactionPrompt(privateContext: string, compactionId?: string): string {
   const snapshotInstruction = compactionId
-    ? `- If you emit any REINFORCE or REPLACE command, include \`Memory ref snapshot id: ${compactionId}\` as the first line under \"Memory candidates:\" so numbered refs match the correct compaction snapshot.`
+    ? `- If you emit any REINFORCE or REPLACE command, include \`Memory ref snapshot id: ${compactionId}\` as the first line under \"Memory candidates:\" so numbered refs match the correct compaction snapshot. REINFORCE/REPLACE commands without this id will be ignored.`
     : "";
   return [
     "Provide a detailed summary for continuing our conversation above.",
@@ -228,7 +228,7 @@ async function workspaceIdentity(root: string): Promise<{ workspaceKey: string; 
 }
 
 function compactionIdFromSummary(summary: string): string | undefined {
-  return summary.match(/Memory ref snapshot id:\s*([a-zA-Z0-9_-]+)/i)?.[1];
+  return summary.match(/^\s*Memory ref snapshot id:[ \t]*([a-zA-Z0-9_-]+)[ \t]*$/im)?.[1];
 }
 
 type MemoryPluginOptions = {
@@ -412,18 +412,49 @@ export const MemoryV2Plugin: Plugin = async (input, options?: MemoryPluginOption
     return new Map(refs.map(ref => [ref.ref.toUpperCase(), ref]));
   }
 
+  function storedCompactionIdForRefs(refs: CompactionMemoryRef[]): string {
+    const ids = new Set(refs.map(ref => ref.compactionId).filter((id): id is string => typeof id === "string" && id.length > 0));
+    if (ids.size === 0) return "none";
+    if (ids.size === 1) return [...ids][0];
+    return "mixed";
+  }
+
   function compactionSnapshotStatus(
     refs: CompactionMemoryRef[],
     expectedCompactionId: string | undefined,
-  ): { ok: true } | { ok: false; storedCompactionId: string } {
-    if (refs.length === 0) return { ok: false, storedCompactionId: "none" };
+  ): { ok: true } | { ok: false; storedCompactionId: string; reason: "missing_compaction_snapshot_id" | "compaction_snapshot_mismatch" } {
+    if (!expectedCompactionId) {
+      return { ok: false, storedCompactionId: storedCompactionIdForRefs(refs), reason: "missing_compaction_snapshot_id" };
+    }
+
+    if (refs.length === 0) return { ok: false, storedCompactionId: "none", reason: "compaction_snapshot_mismatch" };
 
     const ids = new Set(refs.map(ref => ref.compactionId).filter((id): id is string => typeof id === "string" && id.length > 0));
-    if (!expectedCompactionId) return { ok: true };
     if (ids.size === 1 && ids.has(expectedCompactionId)) return { ok: true };
-    if (ids.size === 0) return { ok: false, storedCompactionId: "none" };
-    if (ids.size === 1) return { ok: false, storedCompactionId: [...ids][0] };
-    return { ok: false, storedCompactionId: "mixed" };
+    if (ids.size === 0) return { ok: false, storedCompactionId: "none", reason: "compaction_snapshot_mismatch" };
+    if (ids.size === 1) return { ok: false, storedCompactionId: [...ids][0], reason: "compaction_snapshot_mismatch" };
+    return { ok: false, storedCompactionId: "mixed", reason: "compaction_snapshot_mismatch" };
+  }
+
+  function commandProvenanceRejectedEvidence(
+    command: WorkspaceMemoryCommand,
+    refsByLabel: Map<string, CompactionMemoryRef>,
+    reason: "missing_compaction_snapshot_id" | "compaction_snapshot_mismatch",
+    details: EvidenceEventInput["details"] = {},
+  ): EvidenceEventInput {
+    const refSnapshot = refsByLabel.get(command.ref.toUpperCase());
+    const commandDetails: EvidenceEventInput["details"] = {
+      commandKind: command.kind,
+      ...(refSnapshot?.memoryId ? { memoryId: refSnapshot.memoryId } : {}),
+      ...(command.kind === "REPLACE" ? { replacementType: command.type } : {}),
+      ...details,
+    };
+
+    if (command.kind === "REINFORCE") {
+      return memoryReinforcedEvidence(undefined, command.ref, "rejected", [reason], commandDetails);
+    }
+
+    return memoryReplacedEvidence(undefined, undefined, command.ref, "rejected", [reason], commandDetails);
   }
 
   function resolveCompactionMemoryRef(
@@ -463,16 +494,21 @@ export const MemoryV2Plugin: Plugin = async (input, options?: MemoryPluginOption
 
     const sessionState = await loadSessionState(directory, sessionID);
     const snapshotStatus = compactionSnapshotStatus(sessionState.compactionMemoryRefs, compactionId);
-    const refs = snapshotStatus.ok ? sessionState.compactionMemoryRefs : [];
+    const refs = sessionState.compactionMemoryRefs;
     const refsByLabel = compactionRefByLabel(refs);
     const evidence: EvidenceEventInput[] = [];
     const now = Date.now();
-    let snapshotMismatchDetails: EvidenceEventInput["details"] = {};
-    if ("storedCompactionId" in snapshotStatus) {
-      snapshotMismatchDetails = {
+
+    if (snapshotStatus.ok === false) {
+      const details: EvidenceEventInput["details"] = {
         ...(compactionId ? { compactionId } : {}),
         storedCompactionId: snapshotStatus.storedCompactionId,
       };
+      await appendEvidenceEvents(directory, commands.map(command => ({
+        ...commandProvenanceRejectedEvidence(command, refsByLabel, snapshotStatus.reason, details),
+        sessionHash: sessionID,
+      })));
+      return;
     }
 
     const updateResult = await updateWorkspaceMemoryWithAccounting(directory, workspaceMemory => {
@@ -480,7 +516,7 @@ export const MemoryV2Plugin: Plugin = async (input, options?: MemoryPluginOption
         const resolution = resolveCompactionMemoryRef(refs, refsByLabel, workspaceMemory.entries, command.ref);
         if (resolution.ok === false) {
           const memoryId = resolution.refSnapshot?.memoryId;
-          const details = memoryId ? { ...snapshotMismatchDetails, memoryId } : snapshotMismatchDetails;
+          const details = memoryId ? { memoryId } : {};
           if (command.kind === "REINFORCE") {
             evidence.push(memoryReinforcedEvidence(resolution.target, command.ref, "rejected", [resolution.reason], details));
           } else {
