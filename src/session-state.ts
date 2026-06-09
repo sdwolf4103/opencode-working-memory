@@ -130,6 +130,21 @@ function dedupePendingMemories(memories: LongTermMemoryEntry[]): LongTermMemoryE
   return deduped;
 }
 
+function dedupePendingMemoriesForRender(memories: LongTermMemoryEntry[]): LongTermMemoryEntry[] {
+  const seen = new Set<string>();
+  const deduped: LongTermMemoryEntry[] = [];
+  for (const memory of memories) {
+    const redactedText = redactCredentials(memory.text);
+    const key = redactedText.includes("[REDACTED]")
+      ? `${memoryKey({ ...memory, text: redactedText })}\u0000${memory.id}`
+      : memoryKey(memory);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(memory);
+  }
+  return deduped;
+}
+
 export function touchActiveFile(state: SessionState, filePath: string, action: ActiveFile["action"]): void {
   const now = Date.now();
   const existing = state.activeFiles.find(item => item.path === filePath);
@@ -336,7 +351,7 @@ function buildHotStateRenderSections(
     section: "recent_decisions" as const,
     line: `- ${item.text}`,
   }));
-  const pendingMemories = dedupePendingMemories(state.pendingMemories).map(item => ({
+  const pendingMemories = dedupePendingMemoriesForRender(state.pendingMemories).map(item => ({
     section: "pending_memories" as const,
     line: `- [${item.type}] ${redactCredentials(item.text)}`,
     memoryId: item.id,

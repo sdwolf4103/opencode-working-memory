@@ -1838,6 +1838,59 @@ test("session.compacted replaces unreinforced compaction memory with same-type n
   }
 });
 
+test("session.compacted redacts replacement text in evidence", async () => {
+  const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-test-"));
+
+  try {
+    const now = new Date().toISOString();
+    const existing: LongTermMemoryEntry = {
+      id: "replace-evidence-redaction-target",
+      type: "decision",
+      text: "Use old replacement wording for evidence redaction.",
+      source: "compaction",
+      confidence: 0.9,
+      status: "active",
+      createdAt: now,
+      updatedAt: now,
+    };
+    await updateWorkspaceMemory(tmpDir, store => {
+      store.entries.push(existing);
+      return store;
+    });
+    await saveSessionState(tmpDir, {
+      version: 1,
+      sessionID: "replace-evidence-redaction-session",
+      turn: 0,
+      updatedAt: now,
+      activeFiles: [],
+      openErrors: [],
+      recentDecisions: [],
+      pendingMemories: [],
+      compactionMemoryRefs: [compactionRefFor(existing)],
+    });
+
+    const rawSecret = "test-token-replace-evidence";
+    const replacementText = `Use replacement token: ${rawSecret} only in fake fixtures.`;
+    const plugin = await MemoryV2Plugin({
+      directory: tmpDir,
+      client: mockClientWithCompactionSummary(`Memory candidates:\nREPLACE [M1] [decision] ${replacementText}`),
+    });
+    await (plugin as Record<string, Function>)["event"]({
+      event: { type: "session.compacted", properties: { sessionID: "replace-evidence-redaction-session" } },
+    });
+
+    const events = await queryEvidenceEvents(tmpDir, { types: ["memory_replaced_numbered_ref"] });
+    const serializedEvents = JSON.stringify(events);
+    const workspace = await loadWorkspaceMemory(tmpDir);
+
+    assert.equal(serializedEvents.includes(rawSecret), false);
+    assert.ok(events.some(event => event.outcome === "superseded" && /\[REDACTED\]/.test(event.textPreview ?? "")));
+    assert.equal(JSON.stringify(workspace.entries).includes(rawSecret), false);
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
 test("session.compacted applies cross-type numbered REPLACE for eligible compaction target", async () => {
   const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-test-"));
 

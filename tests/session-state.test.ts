@@ -275,6 +275,17 @@ test("renderHotSessionState redacts pending memory text and preserves non-secret
   assert.match(rendered, /User prefers concise implementation handoffs\./);
 });
 
+test("renderHotSessionState preserves distinct redacted pending memories", () => {
+  const rendered = renderHotSessionState(state({
+    pendingMemories: [
+      memory("mem-token-alpha", "Service token: [REDACTED]", "reference"),
+      memory("mem-token-beta", "Service token: [REDACTED]", "reference"),
+    ],
+  }), root);
+
+  assert.equal((rendered.match(/Service token: \[REDACTED\]/g) ?? []).length, 2);
+});
+
 test("accountHotSessionStateRender counts newline separators in the 700-char budget", () => {
   const fixedPrompt = [
     HOT_STATE_PREFIX,

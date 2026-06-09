@@ -154,6 +154,13 @@ test("reviewer current-28 fixture keeps durable memories and rejects pseudo memo
       expectedAcceptedFixtureIds.has(entry.id),
       `${entry.id}: ${entry.text} -> ${result.reasons.join(",")}`,
     );
+    if (expectedAcceptedFixtureIds.has(entry.id)) {
+      assert.equal(
+        result.reasons.includes("prompt_injection"),
+        false,
+        `${entry.id}: accepted fixture must not carry prompt_injection -> ${result.reasons.join(",")}`,
+      );
+    }
   }
 });
 
