@@ -6,9 +6,9 @@
 
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert";
-import { mkdir, mkdtemp as fsMkdtemp, rm } from "fs/promises";
+import { mkdir, mkdtemp as fsMkdtemp, rm, writeFile } from "fs/promises";
 import { tmpdir } from "os";
-import { join } from "path";
+import { dirname, join } from "path";
 import {
   loadPendingJournal,
   savePendingJournal,
@@ -18,6 +18,7 @@ import {
   memoryKey,
   PENDING_JOURNAL_LIMITS,
 } from "../src/pending-journal.ts";
+import { workspacePendingJournalPath } from "../src/paths.ts";
 import type { LongTermMemoryEntry } from "../src/types.ts";
 import { PROMOTION_RETRY_LIMITS } from "../src/types.ts";
 
@@ -195,6 +196,96 @@ describe("pending journal retention", () => {
       PENDING_JOURNAL_LIMITS.maxEntries,
       `Should have ${PENDING_JOURNAL_LIMITS.maxEntries} entries after appending`
     );
+  });
+
+  it("appendPendingMemories redacts pending journal text on load", async () => {
+    const now = new Date().toISOString();
+    await appendPendingMemories(testDir, [{
+      id: "append-redacts-token",
+      type: "reference",
+      text: "Service token: test-token-123",
+      source: "explicit",
+      confidence: 1,
+      status: "active",
+      createdAt: now,
+      updatedAt: now,
+    }]);
+
+    const loaded = await loadPendingJournal(testDir);
+
+    assert.strictEqual(loaded.entries.length, 1);
+    assert.strictEqual(loaded.entries[0].text.includes("test-token-123"), false);
+    assert.match(loaded.entries[0].text, /\[REDACTED\]/);
+  });
+
+  it("loadPendingJournal redacts raw stored pending entry text and rationale", async () => {
+    const now = new Date().toISOString();
+    const path = await workspacePendingJournalPath(testDir);
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, JSON.stringify({
+      version: 1,
+      workspace: { root: testDir, key: "test" },
+      updatedAt: now,
+      entries: [{
+        id: "raw-stored-token",
+        type: "reference",
+        text: "Service token: test-token-123",
+        rationale: "Retry credential: test-token-123",
+        source: "explicit",
+        confidence: 1,
+        status: "active",
+        createdAt: now,
+        updatedAt: now,
+      }],
+    }), "utf8");
+
+    const loaded = await loadPendingJournal(testDir);
+
+    assert.strictEqual(loaded.entries.length, 1);
+    assert.strictEqual(loaded.entries[0].text.includes("test-token-123"), false);
+    assert.strictEqual(loaded.entries[0].rationale?.includes("test-token-123"), false);
+    assert.match(loaded.entries[0].text, /\[REDACTED\]/);
+    assert.match(loaded.entries[0].rationale ?? "", /\[REDACTED\]/);
+  });
+
+  it("normalizes retention before redaction so distinct secret-valued entries are preserved", async () => {
+    const now = new Date().toISOString();
+    const path = await workspacePendingJournalPath(testDir);
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, JSON.stringify({
+      version: 1,
+      workspace: { root: testDir, key: "test" },
+      updatedAt: now,
+      entries: [
+        {
+          id: "token-alpha",
+          type: "reference",
+          text: "Service token: test-token-alpha",
+          source: "explicit",
+          confidence: 1,
+          status: "active",
+          createdAt: now,
+          updatedAt: now,
+        },
+        {
+          id: "token-beta",
+          type: "reference",
+          text: "Service token: test-token-beta",
+          source: "explicit",
+          confidence: 1,
+          status: "active",
+          createdAt: now,
+          updatedAt: now,
+        },
+      ],
+    }), "utf8");
+
+    const loaded = await loadPendingJournal(testDir);
+
+    assert.deepStrictEqual(loaded.entries.map(entry => entry.id), ["token-alpha", "token-beta"]);
+    assert.strictEqual(JSON.stringify(loaded.entries).includes("test-token-alpha"), false);
+    assert.strictEqual(JSON.stringify(loaded.entries).includes("test-token-beta"), false);
+    assert.strictEqual(loaded.entries.every(entry => entry.text.includes("[REDACTED]")), true);
   });
 
   it("retains old explicit and manual pending entries while under cap", async () => {

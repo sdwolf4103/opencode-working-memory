@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { MemoryV2Plugin } from "../src/plugin.ts";
-import { loadSessionState, saveSessionState } from "../src/session-state.ts";
+import { loadSessionState, renderHotSessionState, saveSessionState } from "../src/session-state.ts";
 import { parseWorkspaceMemoryCandidates } from "../src/extractors.ts";
 import type { CompactionMemoryRef, LongTermMemoryEntry, OpenError } from "../src/types.ts";
 import { PROMOTION_RETRY_LIMITS, WORKSPACE_MEMORY_CACHE_LIMITS } from "../src/types.ts";
@@ -923,6 +923,44 @@ test("explicit memory appended from user message is owned by session and not pro
     );
     assert.match(output.system.join("\n"), /Prefer Traditional Chinese/,
       "current-turn explicit memory should still appear in hot session state");
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("explicit memory with fake api key is redacted in pending session journal and hot state", async () => {
+  const tmpDir = await mkdtemp(join(tmpdir(), "memory-plugin-test-"));
+
+  try {
+    const rawSecret = "sk-test-redaction-example";
+    const plugin = await MemoryV2Plugin({
+      directory: tmpDir,
+      client: mockClientWithLatestUser(`remember api key: ${rawSecret}`, "msg-redaction-1"),
+    });
+    const output = { system: ["base header"] };
+
+    await (plugin as Record<string, Function>)["experimental.chat.system.transform"](
+      { sessionID: "redaction-session", model: {} },
+      output,
+    );
+
+    const session = await loadSessionState(tmpDir, "redaction-session");
+    const journal = await loadPendingJournal(tmpDir);
+    const rendered = renderHotSessionState(session, tmpDir);
+    const outputText = output.system.join("\n");
+    const workspace = await loadWorkspaceMemory(tmpDir);
+
+    assert.equal(session.pendingMemories.length, 1);
+    assert.equal(journal.entries.length, 1);
+    assert.equal(JSON.stringify(session.pendingMemories).includes(rawSecret), false);
+    assert.equal(JSON.stringify(journal.entries).includes(rawSecret), false);
+    assert.equal(rendered.includes(rawSecret), false);
+    assert.equal(outputText.includes(rawSecret), false);
+    assert.match(JSON.stringify(session.pendingMemories), /\[REDACTED\]/);
+    assert.match(JSON.stringify(journal.entries), /\[REDACTED\]/);
+    assert.match(rendered, /\[REDACTED\]/);
+    assert.match(outputText, /\[REDACTED\]/);
+    assert.equal(workspace.entries.some(entry => entry.text.includes(rawSecret)), false);
   } finally {
     await rm(tmpDir, { recursive: true, force: true });
   }

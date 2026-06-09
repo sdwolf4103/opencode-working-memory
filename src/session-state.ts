@@ -4,6 +4,7 @@ import { atomicWriteJSON, readJSON, updateJSON } from "./storage.ts";
 import type { ActiveFile, CompactionMemoryRef, LongTermMemoryEntry, OpenError, SessionDecision, SessionState } from "./types.ts";
 import { HOT_STATE_LIMITS, LONG_TERM_LIMITS } from "./types.ts";
 import { memoryKey } from "./pending-journal.ts";
+import { redactCredentials } from "./redaction.ts";
 
 type SessionStateInput = Omit<SessionState, "compactionMemoryRefs"> & {
   compactionMemoryRefs?: unknown;
@@ -68,11 +69,21 @@ function normalizeSessionState(state: SessionState | SessionStateInput): Session
   state.activeFiles = state.activeFiles.slice(0, HOT_STATE_LIMITS.maxActiveFilesStored);
   state.openErrors = state.openErrors.slice(0, HOT_STATE_LIMITS.maxOpenErrorsStored);
   state.recentDecisions = state.recentDecisions.slice(0, HOT_STATE_LIMITS.maxRecentDecisionsStored);
-  state.pendingMemories = dedupePendingMemories(Array.isArray(state.pendingMemories) ? state.pendingMemories : [])
-    .slice(-HOT_STATE_LIMITS.maxPendingMemoriesStored);
+  const pendingMemories = dedupePendingMemories(Array.isArray(state.pendingMemories) ? state.pendingMemories : [])
+    .slice(-HOT_STATE_LIMITS.maxPendingMemoriesStored)
+    .map(redactPendingMemoryEntry);
   return {
     ...state,
+    pendingMemories,
     compactionMemoryRefs: normalizeCompactionMemoryRefs(state.compactionMemoryRefs),
+  };
+}
+
+function redactPendingMemoryEntry(entry: LongTermMemoryEntry): LongTermMemoryEntry {
+  return {
+    ...entry,
+    text: redactCredentials(entry.text),
+    ...(entry.rationale !== undefined ? { rationale: redactCredentials(entry.rationale) } : {}),
   };
 }
 
@@ -327,7 +338,7 @@ function buildHotStateRenderSections(
   }));
   const pendingMemories = dedupePendingMemories(state.pendingMemories).map(item => ({
     section: "pending_memories" as const,
-    line: `- [${item.type}] ${item.text}`,
+    line: `- [${item.type}] ${redactCredentials(item.text)}`,
     memoryId: item.id,
   }));
 

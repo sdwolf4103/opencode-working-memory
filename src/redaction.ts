@@ -10,7 +10,7 @@ const PASSWORD_LABELS = /password|passwd|pwd|密碼|密码|パスワード|비�
 const USERNAME_LABELS = /username|user name|用戶名|用户名|ユーザー名|사용자명|usuario|utilisateur|benutzer/i;
 
 // Sensitive key labels
-const SENSITIVE_LABELS = /api[_-]?key|token|bearer|secret|credential|auth|auth[_-]?key|private[_-]?key/i;
+const SENSITIVE_LABELS = /api(?:[_\s-]?key)|token|bearer|secret|credential|auth|auth[_-]?key|private[_-]?key/i;
 
 // Secret value pattern (excludes common delimiters and brackets)
 const SECRET_VALUE = String.raw`[^` + "`" + String.raw`'",，,\s\[]+`;

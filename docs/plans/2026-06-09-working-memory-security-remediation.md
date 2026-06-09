@@ -470,6 +470,286 @@ Expected: PASS. If there is an unrelated pre-existing failure, capture the exact
 
 ---
 
+# Wave 2 Detailed Plan — Pending / Session / Journal Secret Redaction
+
+## Wave 2 Goal
+
+Prevent explicit and pending memory text from storing or rendering raw credentials before workspace-memory normalization runs. Secrets such as passwords, API keys, bearer tokens, auth tokens, private keys, and PINs should be redacted at pending/session/journal boundaries and in hot-state prompt rendering.
+
+## Wave 2 Scope
+
+**In scope:**
+- Redact pending memory entries before they are saved to per-session state.
+- Redact pending memory entries before they are saved to the durable pending journal.
+- Redact pending memory text during hot session state rendering as defense-in-depth.
+- Preserve existing workspace-memory redaction behavior.
+- Add tests proving raw secrets do not appear in session pending state, pending journal, or rendered hot state.
+
+**Out of scope:**
+- Parser sentinel changes from Wave 3.
+- Bracketless candidate grammar changes from Wave 4.
+- Stale compaction policy changes from Wave 5.
+- New secret-detection product scope beyond the existing `redactCredentials()` patterns unless tests prove the existing utility is insufficient.
+- TUI memory visibility UX changes.
+
+## Wave 2 Current-State Analysis
+
+### Call chain 1: Explicit memory to session pending and hot prompt
+
+Current flow:
+
+```text
+extractExplicitMemoriesWithEvidence(text)
+  -> body stored directly as LongTermMemoryEntry.text
+  -> processLatestUserMessage(sessionID)
+  -> state.pendingMemories.push(...memories)
+  -> renderHotSessionState(state, workspaceRoot)
+  -> buildHotStateRenderSections()
+  -> line: `- [${item.type}] ${item.text}`
+```
+
+Current risk:
+- `extractExplicitMemoriesWithEvidence()` creates explicit memory entries from raw `body` text.
+- `processLatestUserMessage()` writes those raw entries into `state.pendingMemories`.
+- `renderHotSessionState()` renders pending memory text directly into the hot prompt.
+- Workspace-memory normalization redacts later, but the raw secret can already exist in session state and prompt context.
+
+Wave 2 target behavior:
+- Pending memories in session state must contain redacted text.
+- `renderHotSessionState()` must also call `redactCredentials()` or otherwise guarantee rendered pending memory text is redacted.
+- A test must prove raw secret text does not appear in rendered hot state.
+
+### Call chain 2: Explicit/compaction pending memory to durable pending journal
+
+Current flow:
+
+```text
+appendPendingMemories(root, memories)
+  -> updatePendingJournal(root, updater)
+  -> normalizeJournal(root, current)
+  -> store.entries.push(...memories)
+  -> normalizeJournal(root, updatedStore)
+  -> applyRetention(entries)
+```
+
+Current risk:
+- `appendPendingMemories()` pushes incoming entries without redacting text or rationale.
+- `normalizeJournal()` applies dedupe, stale filtering, sorting, and caps only.
+- If promotion fails or is retried, raw credentials can remain in the durable pending journal.
+
+Wave 2 target behavior:
+- Journal normalization must be an always-on redaction boundary so both new writes and previously stored pending entries are sanitized.
+- `appendPendingMemories()` may also redact before push as defense-in-depth, but `normalizeJournal()` must be the durable invariant.
+- A test must prove `loadPendingJournal()` returns redacted pending entries even if a raw entry exists in storage input.
+
+### Call chain 3: Visibility / diagnostics rendering
+
+Current flow:
+
+```text
+memory-visibility.ts
+  -> safePreview(text)
+  -> redactCredentials(text)
+```
+
+Current state:
+- The memory visibility/diagnostic path already uses `redactCredentials()` for previews.
+- This does not protect `renderHotSessionState()` because hot state rendering builds pending memory lines directly in `session-state.ts`.
+
+Wave 2 target behavior:
+- Keep `memory-visibility.ts` unchanged unless tests reveal a gap.
+- Add session-state tests for hot prompt rendering because that is the missing surface.
+
+## Wave 2 Design Choice: Reuse `redactCredentials()` As-Is
+
+Wave 2 should reuse the existing shared redaction utility first:
+
+```ts
+redactCredentials(text)
+```
+
+Reason:
+- `redactCredentials()` already covers PINs, username/password pairs, standalone password labels, bearer tokens, and sensitive key labels such as `api_key`, `api key`, `token`, `secret`, `credential`, `auth`, `auth_key`, and `private_key`.
+- Wave 2 is a boundary-placement fix, not a new redaction taxonomy project.
+
+If tests expose a concrete missing pattern, add a separate narrow Task 0 inside Wave 2 to extend `src/redaction.ts` with focused tests. Do not mix redaction pattern expansion into session/journal boundary tasks without explicit review.
+
+## Wave 2 Files
+
+- Modify: `src/session-state.ts` — redact pending memory entries during normalization and redact rendered pending memory lines.
+- Modify: `src/pending-journal.ts` — redact entries during journal normalization; optionally redact before append as defense-in-depth.
+- Test: `tests/session-state.test.ts` — session pending normalization and hot prompt rendering redaction.
+- Test: `tests/pending-journal.test.ts` — journal append/load normalization redaction and retention compatibility.
+- Test: `tests/plugin.test.ts` — explicit memory integration path from user message through pending session/journal does not persist raw secret.
+- Read-only check: `src/memory-visibility.ts` — confirm existing `safePreview()` redaction remains sufficient; no edit unless a test identifies a gap.
+
+## Wave 2 Tasks
+
+### Task 1: Add shared pending-entry redaction helper at the session/journal boundary
+
+**Purpose:** Avoid duplicating ad hoc redaction object spreads in multiple files.
+
+**Files:**
+- Modify: `src/session-state.ts` or `src/pending-journal.ts` only if helper stays local.
+- Alternative if both modules need it: create/export a small helper from an existing appropriate module only after confirming no circular dependency.
+
+**Preferred minimal design:**
+- **Default:** Call `redactCredentials(entry.text)` and `redactCredentials(entry.rationale)` inline inside `normalizeSessionState()` and `normalizeJournal()`.
+- Only extract a shared helper if both modules end up duplicating identical logic beyond simple string redaction and the import boundary does not introduce a circular dependency.
+- Redact at least `entry.text` and `entry.rationale` if rationale exists.
+- Prefer shallow-copying the entry object when applying redaction, for example `{ ...entry, text: redactCredentials(entry.text) }`, to avoid mutating an input reference held by the caller.
+- Preserve all metadata fields including `id`, `type`, `source`, `pendingOwnerSessionID`, `pendingMessageID`, retry counters, timestamps, confidence, status, and retention fields.
+- Redaction must be idempotent.
+
+**Behavior:**
+- Given a pending memory with `text: "User api key: sk-test-example"`, normalized entry text must not include `sk-test-example` and must include `[REDACTED]`.
+- Given a pending memory with no secret, normalized entry must remain semantically unchanged.
+
+### Task 2: Redact session pending memories and hot-state rendering
+
+**Purpose:** Prevent raw secrets from living in per-session pending state or being rendered into hot prompts.
+
+**Files:**
+- Modify: `src/session-state.ts`
+- Test: `tests/session-state.test.ts`
+
+**Implementation requirements:**
+- In `normalizeSessionState()`, redact `state.pendingMemories` after `dedupePendingMemories()` and after the cap slice, but before the state object is returned.
+- Do not change `dedupePendingMemories()` or `memoryKey()` to use redacted text; preserve raw-text dedupe behavior so two entries that differ only by secret value are not collapsed before redaction.
+- In `buildHotStateRenderSections()`, render pending memory line text through `redactCredentials()` as defense-in-depth even if normalization already redacts.
+- Do not redact active file paths, open error summaries, or recent decisions in this task unless an existing redaction utility already does so and tests demand it. Wave 2 target is pending memory secret exposure.
+
+**Tests:**
+- [ ] Session state save/update with pending memory containing `api key: sk-test-example` stores redacted pending memory text.
+- [ ] `renderHotSessionState()` output does not contain `sk-test-example` and does contain `[REDACTED]`.
+- [ ] Non-secret pending memory still renders normally.
+
+**Focused verification:**
+
+```bash
+npm test -- tests/session-state.test.ts
+```
+
+Expected: PASS.
+
+### Task 3: Redact durable pending journal normalization
+
+**Purpose:** Make the pending journal safe even when entries stay there after promotion failures or retries.
+
+**Files:**
+- Modify: `src/pending-journal.ts`
+- Test: `tests/pending-journal.test.ts`
+
+**Implementation requirements:**
+- `normalizeJournal()` must redact credentials for all entries after `applyRetention()` finishes, meaning after dedupe-by-text, stale filtering, sorting, and capping, but before returning the normalized store.
+- `appendPendingMemories()` may redact before `store.entries.push(...memories)` as defense-in-depth, but this cannot replace normalize-time redaction.
+- Retention behavior must remain unchanged: dedupe by original entry text before redaction, compaction TTL, explicit/manual age preservation, sorting, caps, and owner-session key behavior must still pass existing tests.
+- Redaction must preserve pending owner/session/message metadata and retry metadata.
+
+**Tests:**
+- [ ] `appendPendingMemories()` with `token: test-token-123` writes a journal whose loaded entry does not include `test-token-123` and includes `[REDACTED]`.
+- [ ] `loadPendingJournal()` redacts a raw stored entry during normalization.
+- [ ] Two pending journal entries whose text differs only in secret values, for example `token: test-token-alpha` and `token: test-token-beta`, are both preserved by dedupe/retention and after normalization each contains `[REDACTED]`.
+- [ ] Existing retention/dedupe tests still pass.
+
+**Focused verification:**
+
+```bash
+npm test -- tests/pending-journal.test.ts
+```
+
+Expected: PASS.
+
+### Task 4: Add plugin-level explicit memory integration regression
+
+**Purpose:** Prove the real user-message path no longer leaks raw explicit-memory secrets into session pending state or pending journal.
+
+**Files:**
+- Test: `tests/plugin.test.ts`
+
+**Scenario:**
+- Simulate latest user message containing an explicit memory request with a non-realistic test credential, for example:
+
+```text
+remember api key: sk-test-redaction-example
+```
+
+**Expected:**
+- [ ] Session pending memory text does not contain `sk-test-redaction-example`.
+- [ ] Pending journal entry text does not contain `sk-test-redaction-example`.
+- [ ] Rendered hot session state does not contain `sk-test-redaction-example`.
+- [ ] Workspace memory entry text, if the memory is promoted or direct promotion is triggered in the test setup, does not contain `sk-test-redaction-example`.
+- [ ] Relevant text contains `[REDACTED]`.
+- [ ] Test fixture is clearly fake and not a realistic secret.
+
+**Focused verification:**
+
+```bash
+npm test -- tests/plugin.test.ts
+```
+
+Expected: PASS.
+
+### Task 5: Confirm visibility/diagnostic path remains safe
+
+**Purpose:** Avoid missing a separate preview surface while keeping scope tight.
+
+**Files:**
+- Read-only: `src/memory-visibility.ts`
+- Test only if needed: `tests/memory-visibility.test.ts`
+
+**Behavior:**
+- Confirm `safePreview()` still calls `redactCredentials()` for memory visibility previews.
+- If existing tests already cover this, cite them in handoff rather than adding duplicate tests.
+- Do not edit `memory-visibility.ts` unless a concrete gap is found.
+
+## Wave 2 Verification Gate
+
+Run focused tests:
+
+```bash
+npm test -- tests/session-state.test.ts tests/pending-journal.test.ts tests/plugin.test.ts
+```
+
+Expected: PASS.
+
+If Wave 2 touches `memory-visibility.ts` or adds visibility tests, also run:
+
+```bash
+npm test -- tests/memory-visibility.test.ts
+```
+
+Expected: PASS.
+
+Then run full suite:
+
+```bash
+npm test
+```
+
+Expected: PASS. If there is an unrelated pre-existing failure, capture the exact failing test name and output before moving on.
+
+## Wave 2 Done Criteria
+
+- [ ] Pending memories in session state are redacted before storage.
+- [ ] Rendered hot session state never contains the raw test secret and includes `[REDACTED]` where appropriate.
+- [ ] Pending journal append/load normalization returns redacted entries.
+- [ ] Plugin explicit-memory integration path does not leave raw test secret in session pending state or pending journal.
+- [ ] Existing workspace-memory redaction tests still pass.
+- [ ] Existing pending journal retention/dedupe behavior still passes.
+- [ ] Existing tests asserting exact pending memory text have been updated to expect redacted values where the fixture contains a secret pattern.
+- [ ] New test fixtures do not contain realistic secrets, tokens, passwords, or private keys.
+- [ ] `recentDecisions` from explicit memories may still contain raw secrets and are intentionally out of scope for Wave 2 unless the user expands scope.
+- [ ] No Wave 3 parser sentinel, Wave 4 grammar, or Wave 5 stale-policy implementation is included.
+
+## Wave 2 Review Gate
+
+- [ ] Delivery lead reviews the diff and test output.
+- [ ] Fresh phase verifier reviews the file-backed Wave 2 artifact before accepting the wave.
+- [ ] User feedback is applied before Wave 3 detailed planning begins.
+
+---
+
 ## Final Verification After All Waves
 
 - [ ] Run: `npm test`

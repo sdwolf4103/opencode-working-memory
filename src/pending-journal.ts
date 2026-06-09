@@ -2,6 +2,7 @@ import type { LongTermMemoryEntry, PendingMemoryJournalStore } from "./types.ts"
 import { PROMOTION_RETRY_LIMITS } from "./types.ts";
 import { workspaceKey, workspacePendingJournalPath } from "./paths.ts";
 import { atomicWriteJSON, readJSON, updateJSON } from "./storage.ts";
+import { redactCredentials } from "./redaction.ts";
 
 /**
  * Retention limits for the pending memory journal.
@@ -99,6 +100,14 @@ function applyRetention(
   });
 }
 
+function redactPendingJournalEntry(entry: LongTermMemoryEntry): LongTermMemoryEntry {
+  return {
+    ...entry,
+    text: redactCredentials(entry.text),
+    ...(entry.rationale !== undefined ? { rationale: redactCredentials(entry.rationale) } : {}),
+  };
+}
+
 function normalizeJournal(
   root: string,
   store: PendingMemoryJournalStore,
@@ -110,7 +119,7 @@ function normalizeJournal(
       Array.isArray(store.entries) ? store.entries : [],
       PENDING_JOURNAL_LIMITS.maxEntries,
       PENDING_JOURNAL_LIMITS.maxAgeDays,
-    ),
+    ).map(redactPendingJournalEntry),
     updatedAt: new Date().toISOString(),
   }));
 }

@@ -16,7 +16,7 @@ const accountHotSessionStateRender = (
   sessionStateModule as typeof sessionStateModule & { accountHotSessionStateRender: AccountHotSessionStateRender }
 ).accountHotSessionStateRender;
 
-const { createEmptySessionState, loadSessionState, renderHotSessionState, saveSessionState } = sessionStateModule;
+const { createEmptySessionState, loadSessionState, renderHotSessionState, saveSessionState, updateSessionState } = sessionStateModule;
 
 const root = "/repo";
 const HOT_STATE_PREFIX = "Hot session state snapshot (epoch start; conversation history may be newer):";
@@ -220,6 +220,59 @@ test("renderHotSessionState delegates to accounted renderer prompt for empty and
 
   assert.equal(renderHotSessionState(empty, root), accountHotSessionStateRender(empty, root).prompt);
   assert.equal(renderHotSessionState(seeded, root), accountHotSessionStateRender(seeded, root).prompt);
+});
+
+test("save and update session state redact pending memory text and rationale after dedupe", async () => {
+  const tmpDir = await mkdtemp(join(tmpdir(), "memory-session-state-"));
+
+  try {
+    const rawSecret = "sk-test-session-secret";
+    await saveSessionState(tmpDir, state({
+      sessionID: "pending-redaction-save-session",
+      pendingMemories: [{
+        ...memory("mem-pending-secret", `User api key: ${rawSecret}.`, "feedback"),
+        source: "explicit",
+        confidence: 1,
+        rationale: `Captured token: ${rawSecret}`,
+      }],
+    }));
+
+    const saved = await loadSessionState(tmpDir, "pending-redaction-save-session");
+    assert.equal(saved.pendingMemories.length, 1);
+    assert.equal(saved.pendingMemories[0].text.includes(rawSecret), false);
+    assert.equal(saved.pendingMemories[0].rationale?.includes(rawSecret), false);
+    assert.match(saved.pendingMemories[0].text, /\[REDACTED\]/);
+    assert.match(saved.pendingMemories[0].rationale ?? "", /\[REDACTED\]/);
+
+    await updateSessionState(tmpDir, "pending-redaction-update-session", current => {
+      current.pendingMemories.push({
+        ...memory("mem-pending-update-secret", `User api key: ${rawSecret}.`, "feedback"),
+        source: "explicit",
+        confidence: 1,
+      });
+      return current;
+    });
+    const updated = await loadSessionState(tmpDir, "pending-redaction-update-session");
+    assert.equal(updated.pendingMemories[0].text.includes(rawSecret), false);
+    assert.match(updated.pendingMemories[0].text, /\[REDACTED\]/);
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("renderHotSessionState redacts pending memory text and preserves non-secret pending memory", () => {
+  const rawSecret = "sk-test-session-secret";
+  const rendered = renderHotSessionState(state({
+    pendingMemories: [
+      memory("mem-render-secret", `User api key: ${rawSecret}.`, "feedback"),
+      memory("mem-render-normal", "User prefers concise implementation handoffs.", "feedback"),
+    ],
+  }), root);
+
+  assert.match(rendered, /pending_memories:/);
+  assert.equal(rendered.includes(rawSecret), false);
+  assert.match(rendered, /\[REDACTED\]/);
+  assert.match(rendered, /User prefers concise implementation handoffs\./);
 });
 
 test("accountHotSessionStateRender counts newline separators in the 700-char budget", () => {
