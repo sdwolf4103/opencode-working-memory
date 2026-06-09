@@ -62,11 +62,11 @@
 
 ### Finding 4: Stale compaction memory is not hard-pruned by age
 
-**Status:** Present as current design, but requires product decision.
+**Status:** Accepted as intentional soft-stale design; no Wave 5 code implementation planned.
 
-**Evidence:** `src/workspace-memory.ts` says retention removal is by strength/cap competition, not hard stale pruning. Existing tests assert stale entries remain eligible for cap competition.
+**Evidence:** `src/workspace-memory.ts` says retention removal is by strength/cap competition, not hard stale pruning. Existing tests assert stale entries remain eligible for cap competition. `renderEntry()` appends `[<age>d old, verify]` once `staleAfterDays` is exceeded.
 
-**Risk path:** Old compaction-sourced facts can remain in workspace memory if caps/strength allow them.
+**Accepted behavior:** `staleAfterDays` is a soft-stale verification/ranking signal, not a deletion TTL. Old compaction-sourced facts can remain in workspace memory if caps/strength allow them, but they are labeled for verification, decay in retention strength, and lose cap competition before stronger memories. Hard pruning was evaluated and rejected because dormant-but-still-correct repo knowledge should not disappear solely because the repo was not opened for a long time.
 
 ### Finding 5: Embedded memory trigger stripping is not a complete safety boundary
 
@@ -177,7 +177,7 @@ Compaction summary
 - **Secret explicit memory:** User says `remember api key: abc123`. Expected after Wave 2: pending/session/journal contain `[REDACTED]`, not raw value.
 - **Malformed compaction block:** Summary contains a Markdown heading that looks like memory candidates. Expected after Wave 3: parser ignores it unless exact sentinel is present.
 - **Legacy bracketless bullet:** Summary contains `- feedback users like X`. Expected after Wave 4: parser ignores it.
-- **Old compaction fact:** Old entry exceeds stale age. Expected after Wave 5: either hard-pruned by policy or documented/verified as ranking-only.
+- **Old compaction fact:** Old entry exceeds stale age. Accepted behavior: it remains eligible for cap competition and renders with `[verify]`; this is the intentional soft-stale policy rather than a hard-expiration bug.
 
 ---
 
@@ -188,13 +188,13 @@ Compaction summary
 - Modify: `src/plugin.ts` — later update compaction prompt sentinel and ensure REPLACE relies on shared quality gate.
 - Modify: `src/session-state.ts` — later redact pending memory during normalization/rendering.
 - Modify: `src/pending-journal.ts` — later redact pending entries during append/normalization.
-- Modify: `src/workspace-memory.ts` — only if Wave 5 chooses hard prune; otherwise comments/tests/docs only.
+- Modify: `src/workspace-memory.ts` — no Wave 5 hard-prune changes; stale behavior remains soft-stale by design.
 - Test: `tests/memory-quality-eval.test.ts` — shared gate behavior and hard reason coverage.
 - Test: `tests/extractors.test.ts` — candidate rejection and parser strictness.
 - Test: `tests/plugin.test.ts` — REPLACE bypass regression and compaction sentinel behavior.
 - Test: `tests/session-state.test.ts` — hot state redaction.
 - Test: `tests/pending-journal.test.ts` — journal redaction.
-- Test: `tests/workspace-memory.test.ts` — stale policy change or explicit policy preservation.
+- Test: `tests/workspace-memory.test.ts` — existing stale retention/cap-competition tests preserve the accepted soft-stale policy.
 
 ---
 
@@ -245,11 +245,11 @@ Compaction summary
 
 ### Wave 5 — Stale Compaction Policy Decision
 
-**Purpose:** Decide and implement/document whether stale compaction memory should be hard-pruned.
+**Purpose:** Document that stale compaction memory remains soft-stale by design and is not hard-pruned.
 
 **Covers finding:** 4.
 
-**End state:** Either hard-prune stale compaction entries with updated tests, or explicitly document/test `staleAfterDays` as ranking-only and mark the finding as accepted design risk.
+**End state:** `staleAfterDays` is documented as a soft-stale verification/ranking signal, existing stale retention tests remain valid, and finding 4 is marked accepted-by-design with no runtime implementation.
 
 ---
 
@@ -488,7 +488,7 @@ Prevent explicit and pending memory text from storing or rendering raw credentia
 **Out of scope:**
 - Parser sentinel changes from Wave 3.
 - Bracketless candidate grammar changes from Wave 4.
-- Stale compaction policy changes from Wave 5.
+- Stale compaction hard-pruning changes; Wave 5 records the accepted soft-stale policy instead of changing runtime behavior.
 - New secret-detection product scope beyond the existing `redactCredentials()` patterns unless tests prove the existing utility is insufficient.
 - TUI memory visibility UX changes.
 
@@ -740,7 +740,7 @@ Expected: PASS. If there is an unrelated pre-existing failure, capture the exact
 - [ ] Existing tests asserting exact pending memory text have been updated to expect redacted values where the fixture contains a secret pattern.
 - [ ] New test fixtures do not contain realistic secrets, tokens, passwords, or private keys.
 - [ ] `recentDecisions` from explicit memories may still contain raw secrets and are intentionally out of scope for Wave 2 unless the user expands scope.
-- [ ] No Wave 3 parser sentinel, Wave 4 grammar, or Wave 5 stale-policy implementation is included.
+- [ ] No Wave 3 parser sentinel, Wave 4 grammar, or stale hard-pruning implementation is included.
 
 ## Wave 2 Review Gate
 
@@ -776,7 +776,7 @@ The user agreed that AI often does **not** reliably print `Memory ref snapshot i
 - Removing `## Memory Candidates`, `## Workspace Memory Candidates`, or XML legacy support in this wave.
 - Introducing cryptographic tokens or changing the workspace memory schema.
 - Changing bracketless candidate grammar; that remains Wave 4 unless the user explicitly merges it.
-- Changing stale-memory retention policy; that remains Wave 5.
+- Changing stale-memory retention behavior; Wave 5 records the accepted soft-stale policy instead of changing runtime behavior.
 - Adding a new diagnostics CLI command. Wave 3 only needs structured evidence; aggregation/reporting can be a later diagnostic wave.
 
 ## Wave 3 Current-State Analysis
@@ -1313,6 +1313,70 @@ Expected: PASS.
 - [ ] Fresh phase verifier reviews each batch before acceptance.
 - [ ] Reviewer performs a completed Wave 3 diff review after both batches pass.
 - [ ] User reviews evidence counts/fields for missing-id command rejection before any later diagnostics aggregation work.
+
+---
+
+# Wave 5 Decision Record — Do Not Implement Hard Stale Pruning
+
+## Wave 5 Decision
+
+Wave 5 is **not implemented** as a code change. `staleAfterDays` remains an intentional soft-stale signal rather than a hard-expiration TTL.
+
+## Why No Code Change
+
+The security finding correctly observes the current behavior:
+
+```text
+compaction memory
+  -> receives staleAfterDays
+  -> remains eligible for retention if caps/strength allow it
+  -> renders with [<age>d old, verify] after the stale threshold
+```
+
+That observation is accepted, but it is not treated as a defect requiring hard pruning. This project uses workspace memory as long-lived repo knowledge, not a short-lived cache. A repo can be dormant for weeks or months while its decisions, paths, and architecture facts remain correct. Hard deleting those entries solely because wall-clock time passed would make the memory system forget dormant-but-valid workspace knowledge.
+
+## Accepted Soft-Stale Policy
+
+`staleAfterDays` means:
+
+- add an explicit `[verify]` label when rendering stale entries;
+- reduce retention strength through the existing decay model;
+- let stale entries lose capacity/type-cap competition before stronger or fresher memories;
+- allow REINFORCE to refresh useful memories through the existing retention clock path;
+- preserve dormant repo knowledge instead of deleting it simply because the repo was not opened.
+
+`staleAfterDays` does **not** mean:
+
+- automatic deletion from `workspace-memory.json`;
+- render-time omission from prompts;
+- new `rejected_stale`, `memory_removed_stale`, or `promotion_rejected_stale` accounting;
+- pending-journal retry/clear behavior changes.
+
+## Security Rationale
+
+The stale-compaction finding models stale prompt text as durable prompt-poisoning risk. The chosen mitigation is soft distrust plus retention pressure, not hard deletion:
+
+- The `[verify]` suffix is the explicit prompt-facing distrust signal.
+- `calculateRetentionStrength()` decays old memories so stale entries are weaker during cap competition.
+- Per-type and global caps eventually remove weaker stale memories as better memories accumulate.
+- Reinforcement is gated and explicit; stale memories do not self-refresh without being re-referenced by compaction.
+- Dormant-aware decay avoids punishing a workspace just because the user has not opened it recently.
+
+This leaves an accepted residual risk: stale compaction entries may remain prompt-eligible if they survive cap competition. That risk is accepted because the alternative hard-prune behavior would damage the core product goal of durable workspace memory.
+
+## Anti-Drift Guidance
+
+- Do not re-open stale hard-pruning as part of this security remediation without explicit product direction.
+- Existing tests that assert stale entries remain eligible for cap competition are intentional policy guards, not failing security tests.
+- Future work may add more tests proving stale entries lose cap competition to stronger memories, but it should not change runtime behavior unless the product policy changes.
+- If product intent changes later, write a new plan rather than reviving the discarded hard-prune design; source/type/grace/reinforcement semantics must be reconsidered from scratch.
+
+## Wave 5 Done Criteria
+
+- [x] Finding 4 is documented as accepted soft-stale design rather than pending implementation.
+- [x] No Wave 5 runtime changes are planned for `workspace-memory.ts`, `evidence-log.ts`, or `promotion-accounting.ts`.
+- [x] Existing stale retention/cap-competition tests remain valid policy coverage.
+- [x] The residual risk is explicitly documented: stale compaction entries can remain prompt-eligible if they survive cap competition.
 
 ---
 
