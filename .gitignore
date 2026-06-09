@@ -53,6 +53,10 @@ pnpm-lock.yaml
 docs/superpowers/plans/
 docs/plans/
 docs/disruptions/
+docs/plan-codex-hook-multiline-rendering.md
+
+# Local code intelligence cache
+.codegraph/
 
 # Local dev/admin script inputs
 scripts/dev/run-migration-roots.local.txt
