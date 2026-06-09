@@ -618,7 +618,8 @@ Progress made on testing.
 - [decision] Use Markdown sections for candidates
 - [project] This repo uses Markdown for docs
 
-Next steps: continue development.
+## Next Steps
+Continue development.
 `;
 
   const candidates = parseWorkspaceMemoryCandidates(summary);

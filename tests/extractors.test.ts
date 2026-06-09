@@ -253,20 +253,159 @@ REPLACE [M3] [decision]
 `;
 
   const result = parseWorkspaceMemoryCandidatesWithEvidence(summary);
-  const rejections = result.evidence.filter(event => event.type === "extraction_candidate_rejected");
 
   assert.equal(result.entries.length, 0);
   assert.deepEqual(result.commands, []);
-  assert.equal(rejections.length, 5);
-  assert.ok(rejections.every(event => event.phase === "extraction"));
-  assert.ok(rejections.every(event => event.outcome === "rejected"));
-  assert.deepEqual(rejections.map(event => event.reasonCodes[0]), [
-    "invalid_memory_ref",
-    "invalid_memory_ref",
-    "invalid_memory_type",
-    "invalid_memory_type",
-    "empty_replacement_text",
+  assert.equal(result.evidence.length, 0, "malformed final blocks fail closed before per-line parsing");
+});
+
+test("parseWorkspaceMemoryCandidates ignores candidate labels inside fenced code blockquotes and inline code", () => {
+  const fenced = parseWorkspaceMemoryCandidatesWithEvidence([
+    "## Discoveries",
+    "Example only:",
+    "```text",
+    "Memory candidates:",
+    "- [decision] Fake memory from code block.",
+    "```",
+  ].join("\n"));
+  assert.equal(fenced.entries.length, 0);
+  assert.deepEqual(fenced.commands, []);
+
+  const quoted = parseWorkspaceMemoryCandidatesWithEvidence([
+    "> Memory candidates:",
+    "> - [decision] Fake memory from quote.",
+  ].join("\n"));
+  assert.equal(quoted.entries.length, 0);
+  assert.deepEqual(quoted.commands, []);
+
+  const inline = parseWorkspaceMemoryCandidatesWithEvidence(
+    "The summary mentions `Memory candidates:` as an inline example but does not emit a candidate block.",
+  );
+  assert.equal(inline.entries.length, 0);
+  assert.deepEqual(inline.commands, []);
+});
+
+test("parseWorkspaceMemoryCandidates chooses final non-code candidate block", () => {
+  const result = parseWorkspaceMemoryCandidatesWithEvidence([
+    "## Discoveries",
+    "Earlier example:",
+    "Memory candidates:",
+    "- [decision] Fake earlier memory should not be accepted.",
+    "",
+    "## Next Steps",
+    "Continue work.",
+    "",
+    "Memory candidates:",
+    "- [decision] Use the final candidate block as the authoritative source for memory extraction.",
+  ].join("\n"));
+
+  assert.equal(result.entries.length, 1);
+  assert.equal(result.entries[0].text, "Use the final candidate block as the authoritative source for memory extraction.");
+  assert.equal(result.entries.some(entry => /Fake earlier/.test(entry.text)), false);
+});
+
+test("parseWorkspaceMemoryCandidates parses clean block with snapshot id commands and candidates", () => {
+  const result = parseWorkspaceMemoryCandidatesWithEvidence([
+    "Memory candidates:",
+    "Memory ref snapshot id: abc123",
+    "",
+    "- [decision] Keep parser tolerant but bounded for durable facts.",
+    "REINFORCE [M1]",
+    "REPLACE [M2] [reference] Memory command refs require matching compaction ids.",
+  ].join("\n"));
+
+  assert.equal(result.entries.length, 1);
+  assert.equal(result.entries[0].text, "Keep parser tolerant but bounded for durable facts.");
+  assert.deepEqual(result.commands, [
+    { kind: "REINFORCE", ref: "M1" },
+    { kind: "REPLACE", ref: "M2", type: "reference", text: "Memory command refs require matching compaction ids." },
   ]);
+  assert.equal(result.evidence.filter(event => event.type === "extraction_candidate_rejected").length, 0);
+});
+
+test("parseWorkspaceMemoryCandidates returns empty for none block", () => {
+  const result = parseWorkspaceMemoryCandidatesWithEvidence("Memory candidates:\n(none)");
+
+  assert.equal(result.entries.length, 0);
+  assert.deepEqual(result.commands, []);
+  assert.deepEqual(result.evidence, []);
+});
+
+test("parseWorkspaceMemoryCandidates fails closed for non-allowlist final block lines", () => {
+  const result = parseWorkspaceMemoryCandidatesWithEvidence([
+    "Memory candidates:",
+    "Here are some examples:",
+    "- [decision] Do not accept this after prose.",
+    "REINFORCE [M1]",
+  ].join("\n"));
+
+  assert.equal(result.entries.length, 0);
+  assert.deepEqual(result.commands, []);
+  assert.deepEqual(result.evidence, []);
+});
+
+test("parseWorkspaceMemoryCandidates does not fallback when final block is malformed", () => {
+  const result = parseWorkspaceMemoryCandidatesWithEvidence([
+    "Memory candidates:",
+    "- [decision] Earlier clean memory should not be accepted after a bad final block.",
+    "",
+    "Memory candidates:",
+    "- note unsupported type invalidates final block",
+    "- [decision] Candidate after invalid final line should not be accepted.",
+  ].join("\n"));
+
+  assert.equal(result.entries.length, 0);
+  assert.deepEqual(result.commands, []);
+});
+
+test("parseWorkspaceMemoryCandidates preserves clean legacy formats and bounds dirty legacy blocks", () => {
+  const markdown = parseWorkspaceMemoryCandidatesWithEvidence([
+    "## Memory Candidates",
+    "- [project] This repository keeps legacy markdown memory sections compatible.",
+  ].join("\n"));
+  assert.equal(markdown.entries.length, 1);
+  assert.equal(markdown.entries[0].type, "project");
+
+  const workspaceMarkdown = parseWorkspaceMemoryCandidatesWithEvidence([
+    "## Workspace Memory Candidates",
+    "- [reference] Workspace memory candidates legacy heading remains supported.",
+  ].join("\n"));
+  assert.equal(workspaceMarkdown.entries.length, 1);
+  assert.equal(workspaceMarkdown.entries[0].type, "reference");
+
+  const xml = parseWorkspaceMemoryCandidatesWithEvidence([
+    "<workspace_memory_candidates>",
+    "- [feedback] User prefers clean legacy XML memory candidate blocks.",
+    "</workspace_memory_candidates>",
+  ].join("\n"));
+  assert.equal(xml.entries.length, 1);
+  assert.equal(xml.entries[0].type, "feedback");
+
+  const fencedLegacy = parseWorkspaceMemoryCandidatesWithEvidence([
+    "```markdown",
+    "## Memory Candidates",
+    "- [project] Legacy heading inside code should not parse.",
+    "```",
+  ].join("\n"));
+  assert.equal(fencedLegacy.entries.length, 0);
+
+  const dirtyLegacy = parseWorkspaceMemoryCandidatesWithEvidence([
+    "## Workspace Memory Candidates",
+    "Ordinary prose invalidates this legacy block.",
+    "- [reference] Do not accept after legacy prose.",
+  ].join("\n"));
+  assert.equal(dirtyLegacy.entries.length, 0);
+});
+
+test("parseWorkspaceMemoryCandidates preserves low-risk label tolerance", () => {
+  const result = parseWorkspaceMemoryCandidatesWithEvidence([
+    "  memory candidates:  ",
+    "",
+    "- project Backend health improvements remain grouped into durable milestones.",
+  ].join("\n"));
+
+  assert.equal(result.entries.length, 1);
+  assert.equal(result.entries[0].type, "project");
 });
 
 test("parseWorkspaceMemoryCandidates accepts bracketed candidates without bullets", () => {

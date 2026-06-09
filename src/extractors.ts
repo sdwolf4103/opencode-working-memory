@@ -462,27 +462,126 @@ function parseCandidateLine(line: string): { type: LongTermType; body: string } 
 }
 
 /**
- * Extract candidate block from summary using multiple formats.
- * Supports: Plain text label, Markdown section, legacy XML.
+ * Extract the final candidate block from summary using supported formats.
+ * Supports: plain text label, Markdown sections, and legacy XML.
  */
+type SummaryLine = {
+  text: string;
+  inFence: boolean;
+  isQuote: boolean;
+};
+
+function summaryLines(summary: string): SummaryLine[] {
+  let inFence = false;
+  return summary.split("\n").map(line => {
+    const isFenceDelimiter = /^\s*(?:```|~~~)/.test(line);
+    const lineInFence = inFence || isFenceDelimiter;
+    const result = {
+      text: line,
+      inFence: lineInFence,
+      isQuote: /^\s*>/.test(line),
+    };
+    if (isFenceDelimiter) inFence = !inFence;
+    return result;
+  });
+}
+
+function isPlainCandidateLabel(line: string): boolean {
+  return /^\s*Memory candidates:\s*$/i.test(line);
+}
+
+function isMemoryCandidatesHeading(line: string): boolean {
+  return /^\s*##\s*Memory Candidates\s*$/i.test(line);
+}
+
+function isWorkspaceMemoryCandidatesHeading(line: string): boolean {
+  return /^\s*##\s*Workspace Memory Candidates\s*$/i.test(line);
+}
+
+function isMarkdownHeading(line: string): boolean {
+  return /^\s*##\s+/.test(line);
+}
+
+function isXmlCandidateOpen(line: string): boolean {
+  return /<workspace_memory_candidates>/i.test(line);
+}
+
+function isSupportedCandidateLabel(line: string): boolean {
+  return isPlainCandidateLabel(line)
+    || isMemoryCandidatesHeading(line)
+    || isWorkspaceMemoryCandidatesHeading(line)
+    || isXmlCandidateOpen(line);
+}
+
+function candidateBlockEnd(lines: SummaryLine[], startIndex: number): number {
+  for (let index = startIndex; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (line.inFence || line.isQuote) continue;
+    if (isSupportedCandidateLabel(line.text) || isMarkdownHeading(line.text)) return index;
+  }
+  return lines.length;
+}
+
 function extractCandidateBlock(summary: string): string | null {
-  // 1. Plain text label (primary format, no Markdown header)
-  const plainMatch = summary.match(/Memory candidates:\s*\n([\s\S]*?)(?:\n[A-Z][a-z]+ [a-z]+:|\n##\s|$)/i);
-  if (plainMatch) return plainMatch[1];
+  const lines = summaryLines(summary);
+  const blocks: string[] = [];
 
-  // 2. Markdown section (legacy)
-  const markdownMatch = summary.match(/##\s*Memory Candidates\s*\n([\s\S]*?)(?:\n##\s|$)/i);
-  if (markdownMatch) return markdownMatch[1];
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (line.inFence || line.isQuote) continue;
 
-  // 3. Legacy "Workspace Memory Candidates" section
-  const legacyMatch = summary.match(/##\s*Workspace Memory Candidates\s*\n([\s\S]*?)(?:\n##\s|$)/i);
-  if (legacyMatch) return legacyMatch[1];
+    if (isXmlCandidateOpen(line.text)) {
+      const afterOpen = line.text.replace(/^.*?<workspace_memory_candidates>/i, "");
+      const sameLineClose = afterOpen.match(/([\s\S]*?)<\/workspace_memory_candidates>/i);
+      if (sameLineClose) {
+        blocks.push(sameLineClose[1] ?? "");
+        continue;
+      }
 
-  // 4. Legacy XML block (backward compatible)
-  const xmlMatch = summary.match(/<workspace_memory_candidates>([\s\S]*?)<\/workspace_memory_candidates>/i);
-  if (xmlMatch) return xmlMatch[1];
+      const bodyLines: string[] = [];
+      if (afterOpen.trim()) bodyLines.push(afterOpen);
+      let closeIndex: number | undefined;
+      for (let bodyIndex = index + 1; bodyIndex < lines.length; bodyIndex += 1) {
+        const bodyLine = lines[bodyIndex];
+        if (!bodyLine.inFence && !bodyLine.isQuote && /<\/workspace_memory_candidates>/i.test(bodyLine.text)) {
+          bodyLines.push(bodyLine.text.replace(/<\/workspace_memory_candidates>.*$/i, ""));
+          closeIndex = bodyIndex;
+          break;
+        }
+        bodyLines.push(bodyLine.text);
+      }
+      if (closeIndex !== undefined) {
+        blocks.push(bodyLines.join("\n"));
+        index = closeIndex;
+      }
+      continue;
+    }
 
-  return null;
+    if (isPlainCandidateLabel(line.text) || isMemoryCandidatesHeading(line.text) || isWorkspaceMemoryCandidatesHeading(line.text)) {
+      const start = index + 1;
+      const end = candidateBlockEnd(lines, start);
+      blocks.push(lines.slice(start, end).map(summaryLine => summaryLine.text).join("\n"));
+    }
+  }
+
+  return blocks.at(-1) ?? null;
+}
+
+function isMemoryRefSnapshotIdLine(line: string): boolean {
+  return /^\s*Memory ref snapshot id:\s*(?:[a-zA-Z0-9_-]+)?\s*$/i.test(line);
+}
+
+function isAllowedCandidateBlockLine(line: string): boolean {
+  if (!line.trim()) return true;
+  if (/^\s*\(?none\)?\s*$/i.test(line)) return true;
+  if (isMemoryRefSnapshotIdLine(line)) return true;
+  if (parseWorkspaceMemoryCommand(line)) return true;
+  if (parseCandidateLine(line)) return true;
+  return false;
+}
+
+function isCleanCandidateBlock(block: string): boolean {
+  return block.split("\n").every(isAllowedCandidateBlockLine);
 }
 
 export function parseWorkspaceMemoryCandidates(
@@ -498,6 +597,7 @@ export function parseWorkspaceMemoryCandidatesWithEvidence(
 ): WorkspaceMemoryParseResult {
   const block = extractCandidateBlock(summary);
   if (!block) return { entries: [], commands: [], evidence: [] };
+  if (!isCleanCandidateBlock(block)) return { entries: [], commands: [], evidence: [] };
 
   const nowMs = Date.now();
   const now = new Date(nowMs).toISOString();
@@ -507,6 +607,7 @@ export function parseWorkspaceMemoryCandidatesWithEvidence(
 
   for (const line of block.split("\n")) {
     if (!line.trim() || /^\s*\(?none\)?\s*$/i.test(line)) continue;
+    if (isMemoryRefSnapshotIdLine(line)) continue;
 
     const command = parseWorkspaceMemoryCommand(line);
     if (command) {
