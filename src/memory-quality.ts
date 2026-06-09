@@ -19,6 +19,7 @@ export const HARD_QUALITY_REASONS: ReadonlySet<string> = new Set([
   "active_file_snapshot",
   "code_or_api_signature",
   "path_heavy",
+  "prompt_injection",
   "unresolved_question",
   "transient_bug_state",
   "deployment_snapshot",
@@ -37,6 +38,7 @@ export function assessMemoryQuality(entry: MemoryQualityInput): MemoryQualityRes
   if (isRawErrorViolation(text)) reasons.push("raw_error");
   if (isCommitOrCiViolation(text)) reasons.push("commit_or_ci_snapshot");
   if (isPathHeavyViolation(text)) reasons.push("path_heavy");
+  if (isPromptInjectionViolation(text)) reasons.push("prompt_injection");
   if (isTemporaryStatusViolation(text)) reasons.push("temporary_status");
   if (isActiveFileSnapshotViolation(text)) reasons.push("active_file_snapshot");
   if (isCodeOrApiSignatureViolation(text)) reasons.push("code_or_api_signature");
@@ -73,6 +75,27 @@ export function isProgressSnapshotViolation(text: string): boolean {
   }
   if (/(?:已完成|完成).{0,30}(?:phases?|waves?|sprints?|milestones?|tasks?)/i.test(text)) return true;
   if (/\b(?:currently|right now|latest change|previous session|last wave|next step)\b/i.test(text)) return true;
+  return false;
+}
+
+export function isPromptInjectionViolation(text: string): boolean {
+  const normalized = text.replace(/[’`]/g, "'").replace(/\s+/g, " ").trim();
+
+  if (/\b(?:ignore\s+all|ignore\s+previous|ignore\s+instructions?|overwrite\s+system|overwrite\s+rules|forget\s+all|delete\s+root)\b/i.test(normalized)) {
+    return true;
+  }
+
+  if (/\b(?:ignore|instructions?|overwrite)\b/i.test(normalized)
+    && /\b(?:previous|all|rules?|behaviou?r|prompts?|systems?)\b/i.test(normalized)) {
+    return true;
+  }
+
+  if (/\b(?:forget|delete)\b/i.test(normalized)
+    && /\b(?:all|root|previous)\b/i.test(normalized)
+    && /\b(?:memories|memory|rules?|instructions?|behaviou?r|prompts?|systems?)\b/i.test(normalized)) {
+    return true;
+  }
+
   return false;
 }
 

@@ -371,12 +371,6 @@ function evaluateWorkspaceMemoryCandidate(
     return { accepted: false, reasons: ["too_short"] };
   }
 
-  // Indirect Prompt Injection / Adversarial Instructions
-  // Rejects attempts to overwrite system behavior or "ignore" rules.
-  // comparative "instead of" is allowed.
-  if (/\b(ignore\s+all|ignore\s+previous|ignore\s+instruction|overwrite\s+system|overwrite\s+rules|forget\s+all|delete\s+root)\b/i.test(text)) return { accepted: false, reasons: ["prompt_injection"] };
-  if (/\b(ignore|instruction|overwrite)\b/i.test(text) && /\b(previous|all|rules|behavior|prompt|system)\b/i.test(text)) return { accepted: false, reasons: ["prompt_injection"] };
-
   const quality = assessMemoryQuality({ type: entry.type, text, source: "compaction" });
   if (!quality.accepted) {
     void logExtractionRejection({
