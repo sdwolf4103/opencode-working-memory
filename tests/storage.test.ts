@@ -199,6 +199,12 @@ test("updateJSON waits for a live cross-process lock and preserves both updates"
       { stdio: "inherit" },
     );
 
+    // Attach before the child can exit; a missed `exit` event would hang the test.
+    const childExit = new Promise<void>((resolve, reject) => {
+      child.on("exit", code => code === 0 ? resolve() : reject(new Error(`child exited ${code}`)));
+      child.on("error", reject);
+    });
+
     await new Promise(resolve => setTimeout(resolve, 50));
 
     await updateJSON(path, () => ({ count: 0, order: [] as string[] }), current => ({
@@ -206,10 +212,7 @@ test("updateJSON waits for a live cross-process lock and preserves both updates"
       order: [...current.order, "parent"],
     }));
 
-    await new Promise<void>((resolve, reject) => {
-      child.on("exit", code => code === 0 ? resolve() : reject(new Error(`child exited ${code}`)));
-      child.on("error", reject);
-    });
+    await childExit;
 
     const final = await updateJSON(path, () => ({ count: 0, order: [] as string[] }), current => current);
     assert.equal(final.count, 2);

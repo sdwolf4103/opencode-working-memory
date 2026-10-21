@@ -251,6 +251,81 @@ rm ~/.local/share/opencode-working-memory/workspaces/*/workspace-memory.json
 rm ~/.local/share/opencode-working-memory/workspaces/*/sessions/*.json
 ```
 
+## CodeBuddy Bridge Options
+
+The bridge is disabled unless `codeBuddyBridge` is present in the plugin options.
+
+```jsonc
+{
+  "plugins": [
+    {
+      "package": "opencode-working-memory",
+      "options": {
+        "codeBuddyBridge": {
+          "includeGlobal": true,
+          "includeSensitive": false,
+          "maxIndexEntries": 14,
+          "maxIndexChars": 1600,
+          "maxImportedShared": 12,
+          "syncIntervalMs": 3000
+        }
+      }
+    }
+  ]
+}
+```
+
+| Option | Default | Purpose |
+|---|---|---|
+| `enabled` | `true` when the object is present | Turn the bridge off without removing the object |
+| `homeDir` | `~/.codebuddy` | CodeBuddy home (tests/non-standard installs) |
+| `includeGlobal` | `false` | Index/import `~/.codebuddy/memories/global` |
+| `includeSensitive` | `false` | Include filenames/descriptions matching credential patterns |
+| `maxIndexEntries` | `14` | CodeBuddy topics listed in the OpenCode prompt |
+| `maxIndexChars` | `1600` | Character budget for that index |
+| `maxImportedShared` | `12` | CodeBuddy `shared: true` files imported into workspace JSON |
+| `syncIntervalMs` | `3000` | Minimum gap between full scans |
+
+To promote a CodeBuddy topic file into OpenCode's JSON store, add `shared: true` to its frontmatter. Files without that flag remain indexed and readable but are not injected into the 3600-character workspace memory budget.
+
+## oh-my-pi Bridge Options
+
+The bridge targets oh-my-pi's `local` memory backend (`memory.backend: local`). It is disabled unless `ohMyPiBridge` is present in the plugin options.
+
+```jsonc
+{
+  "plugins": [
+    {
+      "package": "opencode-working-memory",
+      "options": {
+        "ohMyPiBridge": {
+          "includeSensitive": false,
+          "maxExported": 12,
+          "maxImportedLessons": 12,
+          "maxIndexEntries": 14,
+          "maxIndexChars": 1600,
+          "syncIntervalMs": 3000
+        }
+      }
+    }
+  ]
+}
+```
+
+| Option | Default | Purpose |
+|---|---|---|
+| `enabled` | `true` when the object is present | Turn the bridge off without removing the object |
+| `homeDir` | `~/.omp` | oh-my-pi config root |
+| `agentDir` | `<homeDir>/agent` | Agent state directory (profiles/tests) |
+| `includeSensitive` | `false` | Include credential-looking lessons |
+| `maxExported` | `12` | OpenCode memories written to `learned.md` |
+| `maxImportedLessons` | `12` | oh-my-pi lessons imported into workspace JSON |
+| `maxIndexEntries` | `14` | oh-my-pi lessons listed in the OpenCode prompt |
+| `maxIndexChars` | `1600` | Character budget for that index |
+| `syncIntervalMs` | `3000` | Minimum gap between full scans |
+
+OpenCode-owned lines use the form `- [opencode:<id>] <text>` and live beside oh-my-pi's own `- <lesson>` lines. Editing one of those lines updates the matching JSON memory; deleting it supersedes the memory. The bridge never touches `memory_summary.md`, `MEMORY.md`, or `skills/`.
+
 ## Best Practices
 
 1. **Workspace Memory Hygiene**:

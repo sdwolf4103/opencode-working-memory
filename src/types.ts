@@ -95,6 +95,12 @@ export type SessionDecision = {
   promotedToLongTerm?: boolean;
 };
 
+export type SessionTodo = {
+  content: string;
+  status: string;
+  priority?: string;
+};
+
 export type SessionState = {
   version: 1;
   sessionID: string;
@@ -105,6 +111,8 @@ export type SessionState = {
   recentDecisions: SessionDecision[];
   pendingMemories: LongTermMemoryEntry[];
   compactionMemoryRefs: CompactionMemoryRef[];
+  /** Latest todo snapshot observed from the host, when the host exposes todos. */
+  todos?: SessionTodo[];
 };
 
 export const LONG_TERM_LIMITS = {
@@ -124,6 +132,7 @@ export const HOT_STATE_LIMITS = {
   maxRecentDecisionsStored: 8,
   maxPendingMemoriesStored: 12,
   maxPendingMemoriesRendered: 6,
+  maxTodosStored: 40,
 } as const;
 
 export const PROMOTION_RETRY_LIMITS = {

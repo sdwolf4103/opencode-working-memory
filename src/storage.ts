@@ -173,6 +173,13 @@ export async function atomicWriteJSON(path: string, data: unknown): Promise<void
   await rename(tmp, path);
 }
 
+export async function atomicWriteText(path: string, content: string, mode = 0o600): Promise<void> {
+  await mkdir(dirname(path), { recursive: true });
+  const tmp = `${path}.${process.pid}.${Date.now()}.${randomUUID()}.tmp`;
+  await writeFile(tmp, content, { encoding: "utf8", mode });
+  await rename(tmp, path);
+}
+
 export async function updateJSON<T>(
   path: string,
   fallback: () => T,

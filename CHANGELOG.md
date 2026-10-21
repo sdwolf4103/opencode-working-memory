@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.0] - 2026-10-21
+
+### Added
+
+- Added an optional two-way CodeBuddy memory bridge, an integration for sharing workspace memory with other local harness agents. OpenCode exports active workspace memories as `opencode-<id>.md` files into CodeBuddy's project memory directory and maintains a marked block in its `MEMORY.md`; CodeBuddy topic files are indexed in the OpenCode prompt and can be promoted with `shared: true`.
+- Added an optional two-way bridge for oh-my-pi's `local` memory backend. OpenCode exports memories as `[opencode:<id>]` lesson lines in `learned.md`, imports edits and deletions back, indexes oh-my-pi lessons, and imports recent ones as `omp`-tagged memories.
+- Added `tests/codebuddy-bridge.test.ts` for export, edit import, shared-file import, sensitivity filtering, idempotency, and deletion handling.
+- Added `tests/oh-my-pi-bridge.test.ts` for Markdown preservation, edit import, deletion handling, lesson import, sensitivity filtering, idempotency, and missing-file recovery.
+- Added `atomicWriteText` to the storage layer for generated Markdown mirrors.
+
+### Changed
+
+- CodeBuddy edits to `opencode-*.md` files are imported back into workspace memory; deleting one supersedes the memory.
+- The bridge is disabled by default and skips credential-looking files unless `includeSensitive` is enabled.
+
+## [1.7.0] - 2026-10-21
+
+### Added
+
+- Added an OpenCode V2 plugin adapter (`src/plugin-v2.ts`) using `Plugin.define`, `ctx.session.hook("context"|"compaction")`, `ctx.tool.hook("execute.after")`, and `ctx.event.subscribe()`.
+- Added a V2 TUI plugin that registers the `/memory` slash command through `ctx.keymap.layer` and native dialogs.
+- Added `tui.ts` beside `index.ts` so V2 discovers the TUI entrypoint for local directory plugins; published packages expose it through `exports["./tui"]`.
+- Added `tests/plugin-v2.test.ts` covering hook registration, system-part injection, shell error tracking, `todowrite` snapshots, compaction summaries, session cleanup, and the TUI command.
+
+### Changed
+
+- Extracted host-agnostic memory behavior into `src/runtime.ts`; `src/plugin.ts` is now the V1 adapter.
+- `index.ts` exports both shapes (`setup` for V2, `server` for V1) so one package works on both hosts.
+- V2 keeps OpenCode's own compaction prompt and appends memory rules and numbered refs as a system part instead of replacing the prompt.
+- V2 records todo snapshots from the `todowrite` tool because V2 has no session todo read API.
+- Workspace memory and session state paths are unchanged, so existing memory survives the upgrade.
+
 ## [1.6.7] - 2026-05-31
 
 ### Fixed

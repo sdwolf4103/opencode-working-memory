@@ -286,30 +286,90 @@ Delegate task tracking to OpenCode's native features.
 
 ## Plugin Hooks
 
-OpenCode Working Memory hooks into OpenCode lifecycle events:
+OpenCode Working Memory hooks into OpenCode lifecycle events. The shared
+behavior lives in `src/runtime.ts`; `src/plugin.ts` and `src/plugin-v2.ts` are
+thin host adapters.
 
-### `experimental.chat.system.transform`
+### `experimental.chat.system.transform` (V1) / `session.hook("context")` (V2)
 
-Injects cached frozen workspace memory and cached frozen hot snapshot prompts into the system prompt. Normal tool/user churn updates storage but does not mutate these pre-history prompts until a new epoch starts.
+Injects cached frozen workspace memory and cached frozen hot snapshot prompts into the system prompt. Normal tool/user churn updates storage but does not mutate these pre-history prompts until a new epoch starts. V2 pushes each block as its own text system part.
 
-### `tool.execute.after`
+### `tool.execute.after` (V1) / `tool.hook("execute.after")` (V2)
 
 - Tracks active files (read, grep, edit, write actions)
 - Tracks open errors from failed commands
 - Clears errors when commands succeed
 - Ignores `exitCode === undefined` (successful commands without explicit exit codes)
+- V2 reads the shell tool's `metadata.exit` and records `todowrite` snapshots in session state
 
-### `experimental.session.compacting`
+### `experimental.session.compacting` (V1) / `session.hook("compaction")` (V2)
 
 Extracts workspace memory candidates from conversation.
 Applies quality gate, redaction, migration, consolidation accounting, deduplication, and source priority.
 
-### `event` (session.compacted, session.deleted)
+V1 replaces the compaction prompt so it can remove `---` separators. V2 keeps
+OpenCode's own compaction prompt and appends the memory rules and numbered
+`[M#]` refs as a system part.
 
-- `session.compacted`: Promote session decisions to workspace memory
+### `event` (V1) / `ctx.event.subscribe()` (V2)
+
+- `session.compacted` (V1) / `session.compaction.ended` (V2): Promote session decisions to workspace memory
 - `session.deleted`: Clean up session state files
 
 Promotion uses accounting results from workspace memory normalization. Pending memories that are kept are promoted; duplicate memories are absorbed; exact decision replacements can be superseded; over-capacity compaction memories are rejected. Stale-marked memories are not hard-pruned by age; they lose rendered space through retention strength and cap competition.
+
+## CodeBuddy Bridge
+
+`src/codebuddy-bridge.ts` provides an optional two-way bridge to CodeBuddy's
+Markdown memory stores:
+
+- Project: `~/.codebuddy/projects/<compressed-workdir>/memory/`
+- Global: `~/.codebuddy/memories/global/`
+
+It is one of the integrations for sharing workspace memory with other local
+harness agents; further harness adapters can follow the same ownership model.
+
+Ownership is file-based:
+
+- OpenCode writes `opencode-<id>.md` topic files and one marked block in
+  CodeBuddy's `MEMORY.md`. CodeBuddy may edit those files; OpenCode imports the
+  new body text and treats deletion as supersede.
+- CodeBuddy's own topic files are never rewritten. They are indexed in the
+  OpenCode prompt (bounded by `maxIndexEntries` / `maxIndexChars`) and read on
+  demand. A file with `shared: true` is additionally imported into OpenCode's
+  JSON store.
+- Credential-looking files are skipped unless `includeSensitive` is enabled.
+- Per-workspace hashes live in `codebuddy-bridge.json` beside
+  `workspace-memory.json`, preventing write/read loops.
+- Sync runs from `buildContextParts` (throttled) and after compaction promotion.
+  No CodeBuddy hooks are required; CodeBuddy sees new files on its next session.
+
+## oh-my-pi Local Backend Bridge
+
+`src/oh-my-pi-bridge.ts` bridges the `local` oh-my-pi memory backend, which is
+plain Markdown:
+
+- Project: `~/.omp/agent/memories/<encoded-workdir>/learned.md`
+- Summary (owned by oh-my-pi): `memory_summary.md` in the same directory
+- Consolidation artifacts (owned by oh-my-pi): `MEMORY.md` and `skills/`
+
+Ownership is line-based:
+
+- OpenCode writes lesson lines prefixed `[opencode:<id>]`. oh-my-pi may edit
+  them; OpenCode imports the new text and treats deletion as supersede.
+- oh-my-pi's own `- <lesson>` lines are never rewritten. They are indexed in
+  the OpenCode prompt (bounded by `maxIndexEntries` / `maxIndexChars`) and the
+  most recent ones are imported as `omp`-tagged JSON memories. Deleting a
+  lesson supersedes its imported copy; re-adding the exact lesson reactivates it.
+- Exported lines count toward oh-my-pi's 100-lesson cap. The bridge places them
+  at the head of the lesson list and only treats a missing line as a deletion
+  below the cap, so retention eviction does not supersede JSON memory.
+- Credential-looking lessons are skipped unless `includeSensitive` is enabled.
+- Per-workspace hashes live in `oh-my-pi-bridge.json` beside
+  `workspace-memory.json`, preventing write/read loops.
+- Sync runs from `buildContextParts` (throttled) and after compaction promotion
+  or session cleanup. No oh-my-pi hooks are required; oh-my-pi reads memory
+  files when a session starts.
 
 ## Quality Guarantees
 
