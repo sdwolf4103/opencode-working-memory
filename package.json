@@ -1,6 +1,6 @@
 {
   "name": "opencode-working-memory",
-  "version": "1.6.9",
+  "version": "1.7.0",
   "description": "Three-layer memory architecture for OpenCode with workspace memory and hot session state",
   "type": "module",
   "main": "dist/index.js",
@@ -14,6 +14,7 @@
   },
   "files": [
     "index.ts",
+    "tui.ts",
     "src/",
     "scripts/memory-diag.ts",
     "scripts/memory-diag/",
@@ -54,9 +55,18 @@
   },
   "homepage": "https://github.com/sdwolf4103/opencode-working-memory#readme",
   "peerDependencies": {
-    "@opencode-ai/plugin": ">=1.2.0 <2.0.0"
+    "@opencode-ai/plugin": ">=1.18.29 <2.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@opencode-ai/plugin": {
+      "optional": true
+    }
+  },
+  "dependencies": {
+    "@opencode/plugin": "^2.1.1"
   },
   "devDependencies": {
+    "@opencode-ai/plugin": "^1.19.3",
     "@types/node": "^24.3.0",
     "bun-types": "^1.2.21",
     "typescript": "^5.9.2"

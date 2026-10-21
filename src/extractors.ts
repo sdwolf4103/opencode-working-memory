@@ -220,9 +220,16 @@ export function extractActiveFiles(
   args: Record<string, unknown>,
   output: string,
 ): Array<{ path: string; action: ActiveFile["action"] }> {
-  if (toolName === "read" && typeof args.filePath === "string") return [{ path: args.filePath, action: "read" }];
-  if (toolName === "edit" && typeof args.filePath === "string") return [{ path: args.filePath, action: "edit" }];
-  if (toolName === "write" && typeof args.filePath === "string") return [{ path: args.filePath, action: "write" }];
+  // V1 tool inputs use `filePath`; V2 uses `path`.
+  const filePath = typeof args.filePath === "string"
+    ? args.filePath
+    : typeof args.path === "string"
+      ? args.path
+      : undefined;
+
+  if (toolName === "read" && filePath) return [{ path: filePath, action: "read" }];
+  if (toolName === "edit" && filePath) return [{ path: filePath, action: "edit" }];
+  if (toolName === "write" && filePath) return [{ path: filePath, action: "write" }];
   if (toolName === "grep") return extractGrepPaths(output).map(path => ({ path, action: "grep" as const }));
   return [];
 }

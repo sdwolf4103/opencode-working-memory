@@ -51,18 +51,24 @@ Tests verify:
 ### File Structure
 ```
 opencode-working-memory/
-├── index.ts               # Plugin entry point (exports PluginModule)
+├── index.ts               # Dual V1/V2 server entry point
+├── tui.ts                 # TUI entry point discovered beside index.ts
 ├── src/
-│   ├── plugin.ts           # Main plugin implementation
+│   ├── runtime.ts          # Host-agnostic memory logic
+│   ├── plugin.ts           # V1 adapter
+│   ├── plugin-v2.ts        # V2 adapter
+│   ├── tui-plugin.ts       # V2 TUI + V1 TUI dual export
+│   ├── tui-plugin-v1.ts    # Legacy V1 TUI implementation
 │   ├── extractors.ts       # Memory extraction logic
 │   ├── workspace-memory.ts # Workspace memory management
 │   ├── session-state.ts    # Session state tracking
 │   ├── storage.ts          # File storage utilities
 │   ├── paths.ts            # Path utilities
-│   ├── opencode.ts         # OpenCode SDK types
+│   ├── opencode.ts         # V1 OpenCode SDK helpers
 │   └── types.ts            # Type definitions
 ├── tests/
-│   ├── plugin.test.ts      # Plugin hook tests
+│   ├── plugin.test.ts      # V1 adapter and runtime hook tests
+│   ├── plugin-v2.test.ts   # V2 adapter and TUI tests
 │   ├── extractors.test.ts  # Extractor tests
 │   └── workspace-memory.test.ts # Workspace memory tests
 ├── package.json            # Plugin manifest
@@ -221,15 +227,25 @@ const canonical = normalizeText(text);  // Lowercase, strip punctuation, collaps
 
 ### Plugin Entry Point
 
+`index.ts` exposes both host adapters from one default export:
+
 ```typescript
 // index.ts
+import { WorkingMemoryPlugin } from "./src/plugin-v2.ts";
 import { MemoryV2Plugin } from "./src/plugin.ts";
 
 export default {
-  id: "working-memory",
-  server: MemoryV2Plugin,
+  ...WorkingMemoryPlugin, // V2: { id, setup }
+  server: MemoryV2Plugin, // V1: server(input, options)
 };
 ```
+
+Shared behavior lives in `src/runtime.ts`. The adapters only translate host
+payloads:
+
+- `src/plugin.ts` — V1 string hooks and `client.session.*` calls.
+- `src/plugin-v2.ts` — `ctx.session.hook`, `ctx.tool.hook`, `ctx.event.subscribe`.
+- `src/tui-plugin.ts` — V2 keymap/slash command plus the V1 TUI export.
 
 ### Workspace Memory Files
 
@@ -261,25 +277,30 @@ export default {
 
 ## Plugin Hooks
 
-### `experimental.chat.system.transform`
+### `experimental.chat.system.transform` (V1) / `session.hook("context")` (V2)
 
-Injects workspace memory and hot session state into system prompt.
+Injects workspace memory and hot session state into the system prompt. V2 pushes
+one `{ type: "text", text }` part per memory block.
 
-### `tool.execute.after`
+### `tool.execute.after` (V1) / `tool.hook("execute.after")` (V2)
 
 - Tracks active files (read, grep, edit, write actions)
 - Tracks open errors from failed commands
 - Clears errors when commands succeed
 - Ignores `exitCode === undefined`
+- V2 reads `metadata.exit` and also records `todowrite` snapshots
 
-### `experimental.session.compacting`
+### `experimental.session.compacting` (V1) / `session.hook("compaction")` (V2)
 
-Extracts workspace memory candidates from conversation, applies quality gate and deduplication.
+V1 replaces the compaction prompt with a `---`-free template. V2 keeps
+OpenCode's own compaction prompt and appends the memory rules and numbered refs
+as a system part.
 
-### `event`
+### `event` (V1) / `ctx.event.subscribe()` (V2)
 
-- `session.compacted`: Promote session decisions to workspace memory
-- `session.deleted`: Clean up session state files
+- `session.compacted` (V1) / `session.compaction.ended` (V2): parse the summary
+  and promote memory candidates to workspace memory
+- `session.deleted`: promote owned pending memories, then clean up session state
 
 ## Debugging & Testing
 

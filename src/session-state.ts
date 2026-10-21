@@ -1,7 +1,7 @@
 import { relative } from "path";
 import { sessionStatePath } from "./paths.ts";
 import { atomicWriteJSON, readJSON, updateJSON } from "./storage.ts";
-import type { ActiveFile, CompactionMemoryRef, LongTermMemoryEntry, OpenError, SessionDecision, SessionState } from "./types.ts";
+import type { ActiveFile, CompactionMemoryRef, LongTermMemoryEntry, OpenError, SessionDecision, SessionState, SessionTodo } from "./types.ts";
 import { HOT_STATE_LIMITS, LONG_TERM_LIMITS } from "./types.ts";
 import { memoryKey } from "./pending-journal.ts";
 import { redactCredentials } from "./redaction.ts";
@@ -40,6 +40,7 @@ export async function loadSessionState(root: string, sessionID: string): Promise
   loaded.recentDecisions = Array.isArray(loaded.recentDecisions) ? loaded.recentDecisions : [];
   loaded.pendingMemories = Array.isArray(loaded.pendingMemories) ? loaded.pendingMemories : [];
   loaded.compactionMemoryRefs = normalizeCompactionMemoryRefs((loaded as SessionStateInput).compactionMemoryRefs);
+  loaded.todos = normalizeTodos(loaded.todos);
   return loaded;
 }
 
@@ -60,6 +61,7 @@ export async function updateSessionState(
     current.recentDecisions = Array.isArray(current.recentDecisions) ? current.recentDecisions : [];
     current.pendingMemories = Array.isArray(current.pendingMemories) ? current.pendingMemories : [];
     current.compactionMemoryRefs = normalizeCompactionMemoryRefs((current as SessionStateInput).compactionMemoryRefs);
+    current.todos = normalizeTodos(current.todos);
     return normalizeSessionState(await updater(current));
   });
 }
@@ -76,7 +78,21 @@ function normalizeSessionState(state: SessionState | SessionStateInput): Session
     ...state,
     pendingMemories,
     compactionMemoryRefs: normalizeCompactionMemoryRefs(state.compactionMemoryRefs),
+    ...(state.todos !== undefined ? { todos: normalizeTodos(state.todos) } : {}),
   };
+}
+
+function normalizeTodos(value: unknown): SessionTodo[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  return value
+    .filter((todo): todo is Record<string, unknown> => Boolean(todo) && typeof todo === "object")
+    .map(todo => ({
+      content: String(todo.content ?? ""),
+      status: String(todo.status ?? "pending"),
+      ...(todo.priority !== undefined ? { priority: String(todo.priority) } : {}),
+    }))
+    .filter(todo => todo.content.length > 0)
+    .slice(0, HOT_STATE_LIMITS.maxTodosStored);
 }
 
 function redactPendingMemoryEntry(entry: LongTermMemoryEntry): LongTermMemoryEntry {

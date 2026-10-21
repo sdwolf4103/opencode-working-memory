@@ -42,7 +42,33 @@ compaction ─────► reinforce / replace ──► selective prompt con
 
 ## Installation
 
-New users: add OpenCode Working Memory to both OpenCode plugin configs.
+### OpenCode V2 (recommended)
+
+Add the package to the `plugins` array in `opencode.json`:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": ["opencode-working-memory"]
+}
+```
+
+V2 discovers the CLI/TUI entrypoint from the package's `./tui` export automatically, so there is no separate `tui.json` step. Restart OpenCode after changing the config.
+
+To run a local checkout, point at the plugin directory (V2 requires a directory, not an `index.ts` file):
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": ["/home/mirro/coding/opencode-working-memory"]
+}
+```
+
+Local directory plugins keep the server and TUI entrypoints side by side: V2 discovers `tui.ts` next to `index.ts`. The published package exposes the same module through `exports["./tui"]`.
+
+### OpenCode V1
+
+V1 keeps the original two-file setup:
 
 `.opencode/opencode.json`:
 
@@ -62,13 +88,11 @@ New users: add OpenCode Working Memory to both OpenCode plugin configs.
 }
 ```
 
-Existing users: keep your current `.opencode/opencode.json` config and add only the `.opencode/tui.json` block above to enable the native `/memory` TUI menu.
+Both adapters share the same on-disk memory format, so switching between V1 and V2 keeps existing workspace memory.
 
-Then restart OpenCode. Memory activates automatically, and `/memory` appears in the TUI slash command menu.
+### Strict OpenAI-Compatible Providers (V1 only)
 
-### Strict OpenAI-Compatible Providers
-
-Some providers, including GWDG/Qwen endpoints, reject requests with multiple system messages. If your provider returns `System message must be at the beginning`, enable merged system prompts in `.opencode/opencode.json`:
+Some V1 providers, including GWDG/Qwen endpoints, reject requests with multiple system messages. If your provider returns `System message must be at the beginning`, enable merged system prompts in `.opencode/opencode.json`:
 
 ```json
 {
@@ -77,7 +101,7 @@ Some providers, including GWDG/Qwen endpoints, reject requests with multiple sys
 }
 ```
 
-This keeps memory context available by appending workspace memory and hot session state into the first system message. Leave this option off for providers that already accept multiple system messages; the default separated prompts are more cache-friendly.
+This keeps memory context available by appending workspace memory and hot session state into the first system message. Leave this option off for providers that already accept multiple system messages; the default separated prompts are more cache-friendly. V2 injects memory as separate system parts and ignores this option.
 
 Fallback for older OpenCode/plugin hosts that do not pass plugin tuple options:
 
