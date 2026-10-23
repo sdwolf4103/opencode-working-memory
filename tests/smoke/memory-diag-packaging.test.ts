@@ -109,7 +109,7 @@ test("packed plugin runtime imports from node_modules JavaScript entries", async
     assert.equal(packageJson.main, "dist/index.js");
     assert.equal(packageJson.exports?.["."], "./dist/index.js");
     assert.equal(packageJson.exports?.["./server"], "./dist/index.js");
-    assert.equal(packageJson.exports?.["./tui"], "./dist/src/tui-plugin.js");
+    assert.equal(packageJson.exports?.["./tui"], "./dist/tui.js");
 
     const importResult = await execFileAsync(process.execPath, [
       "-e",

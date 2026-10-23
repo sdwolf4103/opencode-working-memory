@@ -12,6 +12,7 @@ export function usage(): string {
   memory-diag commands [--workspace <path>] [--verbose] [--json] [--memory <id>]
   memory-diag quality [--workspace <path>] [--verbose] [--json] [--raw] [--no-emoji]
   memory-diag revert (--memory <replacement-id> | --event <event-id>) [--workspace <path>] [--apply]
+  memory-diag memory-review import <proposal-json-file> [--workspace <path>]
 
 Global options:
   --workspace <path>  Workspace path (default: current directory)
@@ -86,7 +87,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
       const value = rest[++i];
       if (!value) return error("--event requires an id");
       options.event = value;
-    } else if (!arg.startsWith("--") && command === "explain") {
+    } else if (!arg.startsWith("--") && (command === "explain" || command === "memory-review")) {
       options.positional?.push(arg);
     } else {
       return error(`Unknown option: ${arg}`);
@@ -98,13 +99,16 @@ export function parseArgs(argv: string[]): ParsedArgs {
     if (positional.length > 1) return error("explain accepts at most one memory id");
     if (positional.length === 1 && options.memory) return error("Use either explain <memory-id> or --memory, not both");
     if (positional.length === 1) options.memory = positional[0];
+  } else if (command === "memory-review") {
+    const positional = options.positional ?? [];
+    if (positional.length !== 2 || positional[0] !== "import") return error("memory-review supports only: import <proposal-json-file>");
   } else if ((options.positional ?? []).length > 0) {
     return error(`Unknown option: ${options.positional?.[0]}`);
   }
 
   if (command === "status") {
     if (options.all) return error(`${command} does not accept --all`);
-  } else if (command === "rejected" || command === "missing" || command === "coverage" || command === "explain" || command === "commands" || command === "quality" || command === "revert") {
+  } else if (command === "rejected" || command === "missing" || command === "coverage" || command === "explain" || command === "commands" || command === "quality" || command === "revert" || command === "memory-review") {
     if (options.all) return error(`${command} does not accept --all`);
   } else {
     if (options.all || options.workspace) return error(`${command} does not accept --all or --workspace`);

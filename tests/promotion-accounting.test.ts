@@ -283,3 +283,13 @@ test("promotionAccountingEvidenceEvents maps every promotion outcome with relati
   assert.ok(supersededEvent?.relations?.some(relation => relation.role === "superseded" && relation.memory?.memoryId === superseded.id));
   assert.ok(supersededEvent?.relations?.some(relation => relation.role === "superseded_by" && relation.memory?.memoryId === replacement.id));
 });
+
+
+test("pending facts sharing a resource are not absorbed or cleared without surviving", () => {
+  const existing = mem("existing-resource", "Config .opencode/opencode.json defines server plugins.", { type: "reference" });
+  const pending = mem("pending-resource", "Config .opencode/opencode.json defines provider settings.", { type: "reference", source: "explicit" });
+  const result = accountPendingPromotions({ pending: [pending], before: [existing], after: [existing] });
+  assert.equal(result.absorbedKeys.size, 0);
+  assert.equal(result.clearableKeys.size, 0);
+  assert.ok(result.retryableRejectedKeys.has(memoryKey(pending)));
+});

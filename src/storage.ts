@@ -67,12 +67,29 @@ export async function readJSON<T>(path: string, fallback: () => T): Promise<T> {
   }
 }
 
-async function readJSONStrict<T>(path: string, fallback: () => T): Promise<T> {
+async function readJSONForUpdate<T>(path: string, fallback: () => T, quarantineCorrupt: boolean): Promise<T> {
   if (!existsSync(path)) return fallback();
   try {
     return JSON.parse(await readFile(path, "utf8")) as T;
   } catch (error) {
-    throw new Error(`Invalid JSON in ${path}: ${(error as Error).message}`);
+    if (!quarantineCorrupt || !(error instanceof SyntaxError)) {
+      throw new Error(`Invalid JSON in ${path}: ${(error as Error).message}`);
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    const quarantinePath = await quarantineCorruptJSON(path);
+    if (quarantinePath) {
+      console.error(`[memory] invalid JSON in ${path}; quarantined to ${quarantinePath}: ${message}`);
+      await emitStorageEvidence(path, {
+        type: "storage_corrupt_json_quarantined",
+        phase: "storage",
+        outcome: "quarantined",
+        reasonCodes: ["invalid_json"],
+        details: { storeKind: storeKindFromPath(path), quarantined: true },
+      });
+    } else {
+      throw new Error(`Invalid JSON in ${path}; quarantine failed: ${message}`);
+    }
+    return fallback();
   }
 }
 
@@ -155,7 +172,7 @@ async function withFileLock<T>(path: string, fn: () => Promise<T>): Promise<T> {
             waitMs: LOCK_WAIT_TIMEOUT_MS,
           },
         });
-        throw new Error(`Timed out waiting for lock ${lockPath}`);
+        throw Object.assign(new Error(`Timed out waiting for lock ${lockPath}`), { code: "ELOCKTIMEOUT" });
       }
 
       await new Promise(resolve => setTimeout(resolve, 25));
@@ -177,6 +194,7 @@ export async function updateJSON<T>(
   path: string,
   fallback: () => T,
   updater: (current: T) => T | Promise<T>,
+  options: { quarantineCorruptJSON?: boolean } = {},
 ): Promise<T> {
   // Locked read-modify-write path: serializes in-process callers and uses a
   // filesystem lock for cross-process callers before reading, updating, and
@@ -192,7 +210,7 @@ export async function updateJSON<T>(
   try {
     await previous.catch(() => undefined);
     return await withFileLock(path, async () => {
-      const current = await readJSONStrict(path, fallback);
+      const current = await readJSONForUpdate(path, fallback, options.quarantineCorruptJSON === true);
       const updated = await updater(current);
       await atomicWriteJSON(path, updated);
       return updated;

@@ -16,6 +16,7 @@ const REQUIRED_PLUGIN_HOOKS = [
   "experimental.chat.system.transform",
   "tool.execute.after",
   "experimental.session.compacting",
+  "experimental.text.complete",
   "event",
 ] as const;
 

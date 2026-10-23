@@ -30,6 +30,15 @@ export type EvidenceEventType =
   | "storage_corrupt_json_quarantined"
   | "storage_stale_lock_recovered"
   | "storage_lock_timeout"
+  | "memory_review_proposal_detected"
+  | "memory_review_proposal_rejected"
+  | "memory_review_proposal_approved"
+  | "memory_review_proposal_edited"
+  | "memory_review_batch_apply_started"
+  | "memory_review_batch_apply_failed"
+  | "memory_review_batch_applied"
+  | "memory_review_proposal_applied"
+  | "memory_review_proposal_apply_failed"
   | "hook_failed";
 
 export type EvidencePhase =
@@ -40,6 +49,7 @@ export type EvidencePhase =
   | "reinforcement"
   | "render"
   | "storage"
+  | "memory_review"
   | "hook";
 
 export type EvidenceOutcome =
@@ -56,7 +66,11 @@ export type EvidenceOutcome =
   | "reinforced"
   | "quarantined"
   | "failed"
-  | "recovered";
+  | "recovered"
+  | "detected"
+  | "approved"
+  | "edited"
+  | "applied";
 
 export type MemoryEvidenceRef = {
   memoryId?: string;

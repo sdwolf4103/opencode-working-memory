@@ -121,8 +121,8 @@ Memory candidates:
 Memories are deduplicated and consolidated with accounting:
 
 1. Normalize exact text: lowercase, strip punctuation, collapse whitespace.
-2. Group project/reference entries by identity where possible.
-3. Keep decision and feedback entries on exact canonical matching to avoid broad semantic merges.
+2. Use canonical exact matching for every memory type, including project/reference.
+3. Preserve distinct facts that mention the same URL or path; consolidation requires an explicit review action.
 4. Keep the best surviving entry by source, confidence, specificity, and freshness tie-breakers.
 5. Emit accounting events so pending memories can be classified as promoted, absorbed, superseded, or rejected.
 
@@ -142,18 +142,19 @@ Rendered candidates are selected in this order:
 2. Compute current retention strength.
 3. Sort by strength descending.
 4. Apply per-type caps.
-5. Keep the top 28 rendered entries under the workspace memory character budget.
+5. Keep at most 28 candidates, then admit whole entries in global strength order while the complete prompt fits the character budget. Skip oversized entries and continue to smaller candidates.
+6. Present the selected entries in type groups. Normal and compaction prompts use the same admission policy, with their own formatted costs (headers, rationale/staleness annotations, and final numbered refs).
 
 Default type caps:
 
 | Type | Rendered cap |
 |------|--------------|
 | `feedback` | 10 |
-| `decision` | 10 |
+| `decision` | 12 |
 | `project` | 8 |
 | `reference` | 6 |
 
-The type-cap total is 34, intentionally above the global 28-entry cap. These are maximums, not quotas.
+The type-cap total is 36, intentionally above the global 28-entry cap. These are maximums, not quotas.
 
 Dormant workspaces age more slowly: after 14 inactive days, additional dormant time counts at 0.25x for retention decay. Repeated duplicate memories reinforce the surviving entry only after a rolling 7-day elapsed window. Below reinforcement count 6, an allowed recurrence increments the reinforcement count and refreshes retention timestamps; at count 6 or higher, an allowed recurrence refreshes retention timestamps without increasing the count. Same-session status is recorded as diagnostic evidence, not as a new-policy block reason.
 
@@ -338,6 +339,8 @@ exitCode === undefined → skip error tracking
 "remember this" → added to memory candidates
 ```
 
+Explicit extraction excludes fenced code, blockquotes, indented code, and inline-code triggers. A live instruction can still contain inline-code content such as a package-manager command.
+
 ### Canonical Deduplication
 
 ```typescript
@@ -383,7 +386,19 @@ const workspaceKey = sha256(realpath(workspaceRoot)).slice(0, 16)
 
 ### Storage Safety
 
-All read-modify-write updates go through `updateJSON()`, which combines an in-process promise queue with an on-disk `.lock` file. The lock file uses exclusive creation, heartbeat refreshes while held, stale-lock recovery after 30 seconds, and a 5 second wait timeout for live contention. Direct `readJSON()` is fallback-oriented and does not mutate data except when corrupt JSON is quarantined.
+Workspace-memory loads, migration/security writeback, updates, and full-state saves coordinate through `updateJSON()`'s in-process queue and on-disk `.lock`. The lock uses exclusive creation, heartbeat refreshes, stale-lock recovery after 30 seconds, and a 5 second wait timeout. Saves remain full-state replacements; callers use the updater API to preserve concurrent changes.
+
+Workspace-memory input is validated at runtime before normalization. Unsupported versions and malformed schemas fail closed with the original file retained. Unversioned legacy stores with an entries array remain supported, as do optional legacy fields and the existing invalid-date retention-clock backfill. Syntax-invalid JSON is quarantined while holding the lock; I/O failures retain the source file.
+
+If a workspace load times out acquiring the lock, it may normalize an atomic read of the last committed file for prompt use. This degraded path performs no store write or corruption recovery. Migration evidence describing a persisted load change is emitted only after a successful locked write.
+
+### Memory Review Lifecycle
+
+Review proposals require one dedicated proposal fence, valid memory types, a matching snapshot, and explicit user confirmation before apply. Preview and apply use the same replacement-type resolution.
+
+Approved changes update persistent workspace memory. Existing frozen prompt snapshots refresh at the next compaction or when a new session creates its epoch. The review confirmation and success message make this timing explicit.
+
+The `forget` action deactivates a memory by marking it `superseded`. Its text remains available for audit. Superseded entries and review/evidence artifacts are outside the active-entry cap; physical erasure and bounded archival require separate retention policies. Resource-based identity keys from older review snapshots can fail the stale-target check after the exact-only policy change; create a fresh review snapshot in that case.
 
 ## Performance Considerations
 

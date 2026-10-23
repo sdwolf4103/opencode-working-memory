@@ -1,11 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import type { LongTermMemoryEntry, WorkspaceMemoryStore } from "../src/types.ts";
 import { HOT_STATE_LIMITS, LONG_TERM_LIMITS } from "../src/types.ts";
 import { workspaceKey, workspaceMemoryPath } from "../src/paths.ts";
+import { updateJSON } from "../src/storage.ts";
 import { queryEvidenceEvents } from "../src/evidence-log.ts";
 import {
   renderWorkspaceMemory,
@@ -19,6 +20,7 @@ import {
   workspaceMemoryIdentityKey,
   runMigrationP0Cleanup,
   runMigrationQualityCleanup,
+  emptyWorkspaceMemory,
   loadWorkspaceMemory,
   saveWorkspaceMemory,
   updateWorkspaceMemoryWithAccounting,
@@ -166,6 +168,84 @@ test("renderWorkspaceMemory respects small budget", () => {
     "Should not contain XML tags");
   assert.ok(rendered.length <= 200,
     `Must respect maxChars limit. Got: ${rendered.length}`);
+});
+
+test("both prompt modes allocate budget by global retention rank before grouping", () => {
+  const now = new Date().toISOString();
+  const high = { ...entry("high", "Keep durable architecture decisions available for future sessions.", "decision"), source: "explicit" as const, userImportance: "high" as const };
+  const low = { ...entry("low", "Prefer a detailed status report for each individual local command.", "feedback"), userImportance: "low" as const };
+  const store: WorkspaceMemoryStore = {
+    version: 1,
+    workspace: { root: "/repo", key: "abc" },
+    limits: { maxRenderedChars: 3600, maxEntries: 28 },
+    entries: [high],
+    updatedAt: now,
+  };
+  for (const render of [accountWorkspaceMemoryRender, accountWorkspaceMemoryCompactionRefs]) {
+    const budget = render(store).prompt.length;
+    const result = render({ ...store, limits: { ...store.limits, maxRenderedChars: budget }, entries: [low, high] });
+    assert.deepEqual(result.rendered.map(memory => memory.id), ["high"]);
+    assert.ok(result.omitted.some(item => item.memory.id === "low" && item.reason === "char_budget"));
+    assert.equal(result.prompt.length, budget);
+  }
+});
+
+test("ranked budget admission skips oversized entries and counts final grouped ref widths", () => {
+  const now = new Date().toISOString();
+  const entries = Array.from({ length: 18 }, (_, index) => ({
+    ...entry(`budget-${index}`, `Memory ${index}: keep durable workspace fact ${"x".repeat(index % 3 * 30)} available.`, index % 2 ? "feedback" : "decision"),
+    createdAt: now,
+    updatedAt: now,
+    retentionClock: Date.now(),
+  }));
+  const store: WorkspaceMemoryStore = {
+    version: 1,
+    workspace: { root: "/repo", key: "abc" },
+    limits: { maxRenderedChars: 3600, maxEntries: 28 },
+    entries,
+    updatedAt: now,
+  };
+  for (const budget of [0, 79, 80, 130, 250, 800, 1000, 1200, 3600]) {
+    for (const render of [accountWorkspaceMemoryRender, accountWorkspaceMemoryCompactionRefs]) {
+      const result = render({ ...store, limits: { ...store.limits, maxRenderedChars: budget } });
+      assert.ok(result.prompt.length <= budget);
+      assert.equal(result.rendered.length + result.omitted.length, entries.length);
+      assert.equal(result.evidence.filter(event => event.outcome === "rendered").length, result.rendered.length);
+      if ("refs" in result) {
+        assert.deepEqual(result.refs.map(ref => ref.memoryId), result.rendered.map(memory => memory.id));
+        result.refs.forEach((ref, index) => {
+          assert.equal(ref.ref, `M${index + 1}`);
+          assert.ok(result.prompt.includes(`[${ref.ref}] ${ref.textPreview}`));
+        });
+      }
+    }
+  }
+  assert.ok(accountWorkspaceMemoryCompactionRefs(store).refs.length >= 10);
+
+  const oversized = { ...entry("oversized", "Keep " + "long rationale ".repeat(20), "decision"), source: "explicit" as const };
+  const smaller = entry("smaller", "Keep local JSON storage.", "reference");
+  for (const render of [accountWorkspaceMemoryRender, accountWorkspaceMemoryCompactionRefs]) {
+    const result = render({ ...store, entries: [oversized, smaller], limits: { ...store.limits, maxRenderedChars: 130 } });
+    assert.deepEqual(result.rendered.map(memory => memory.id), ["smaller"]);
+    assert.ok(result.omitted.some(item => item.memory.id === "oversized" && item.reason === "char_budget"));
+  }
+});
+
+test("render clipping preserves distinct full-text memories and original compaction keys", () => {
+  const prefix = "Shared durable fact ".repeat(20);
+  const entries = [entry("one", prefix + "first detail", "reference"), entry("two", prefix + "second detail", "reference")];
+  const store: WorkspaceMemoryStore = {
+    version: 1,
+    workspace: { root: "/repo", key: "abc" },
+    limits: { maxRenderedChars: 3600, maxEntries: 28 },
+    entries,
+    updatedAt: new Date().toISOString(),
+  };
+  assert.equal(accountWorkspaceMemoryRender(store).rendered.length, 2);
+  const result = accountWorkspaceMemoryCompactionRefs(store);
+  assert.equal(result.refs.length, 2);
+  assert.notEqual(result.refs[0].exactKey, result.refs[1].exactKey);
+  assert.deepEqual(result.refs.map(ref => ref.exactKey), result.rendered.map(memory => workspaceMemoryExactKey(entries.find(entry => entry.id === memory.id)!)));
 });
 
 test("renderWorkspaceMemory returns empty for no entries", () => {
@@ -732,22 +812,16 @@ test("dedupeLongTermEntriesWithAccounting decision same-identity variants absorb
   assert.equal(result.absorbed.some(event => event.reason === "superseded_existing"), false);
 });
 
-test("dedupeLongTermEntriesWithAccounting emits identity reinforcement evidence", () => {
-  const now = Date.now();
-  const retained: LongTermMemoryEntry = {
-    ...entry("retained-identity", "OpenCode plugin config location: `.opencode-agenthub/current/xdg/opencode/opencode.json` in workspace", "reference"),
-    retentionClock: now - 10 * DAY_MS,
-  };
-  const duplicate: LongTermMemoryEntry = {
-    ...entry("duplicate-identity", "OpenCode plugin config: .opencode-agenthub/current/xdg/opencode/opencode.json in workspace", "reference"),
-    pendingOwnerSessionID: "identity-session",
-  };
-
-  const result = dedupeLongTermEntriesWithAccounting([retained, duplicate]);
-
-  assert.ok(result.evidence.some(event =>
-    event.type === "memory_reinforced" && event.reasonCodes.includes("duplicate_identity")
-  ));
+test("dedupe keeps distinct facts sharing a resource without reinforcement", () => {
+  for (const type of ["project", "reference"] as const) {
+    const first = entry("first", "Config .opencode/opencode.json defines server plugins.", type);
+    const second = entry("second", "Config .opencode/opencode.json defines provider settings.", type);
+    const result = dedupeLongTermEntriesWithAccounting([first, second]);
+    assert.equal(result.kept.length, 2);
+    assert.equal(result.absorbed.length, 0);
+    assert.equal(result.evidence.length, 0);
+    assert.ok(result.kept.every(memory => !memory.reinforcementCount));
+  }
 });
 
 test("reinforced memory with same initial strength and age ranks above unreinforced memory", () => {
@@ -1186,41 +1260,22 @@ test("dedupeLongTermEntriesWithAccounting reports exact duplicates as absorbed",
   assert.equal(result.absorbed[0].memory.id, "lower");
 });
 
-test("dedupeLongTermEntriesWithAccounting reports concrete path identity duplicates as absorbed", () => {
-  const older = agedEntry(
-    "older",
-    "OpenCode plugin config location: `.opencode-agenthub/current/xdg/opencode/opencode.json` in workspace",
-    "reference",
-    { daysAgo: 5 },
-  );
-  const newer = agedEntry(
-    "newer",
-    "OpenCode plugin config: .opencode-agenthub/current/xdg/opencode/opencode.json in workspace",
-    "reference",
-    { daysAgo: 0 },
-  );
-
+test("dedupe preserves different wording about the same concrete path", () => {
+  const older = entry("older", "OpenCode plugin config location: `.opencode-agenthub/current/xdg/opencode/opencode.json` in workspace", "reference");
+  const newer = entry("newer", "OpenCode plugin config: .opencode-agenthub/current/xdg/opencode/opencode.json in workspace", "reference");
   const result = dedupeLongTermEntriesWithAccounting([older, newer]);
-
-  assert.equal(result.kept.length, 1);
-  assert.equal(result.absorbed.length, 1);
-  assert.equal(result.absorbed[0].reason, "absorbed_identity");
-  assert.equal(result.absorbed[0].retainedId, result.kept[0].id);
-  assert.equal(
-    workspaceMemoryIdentityKey(older),
-    "reference:path:.opencode-agenthub/current/xdg/opencode/opencode.json",
-  );
+  assert.equal(result.kept.length, 2);
+  assert.equal(result.absorbed.length, 0);
+  assert.equal(workspaceMemoryIdentityKey(older), workspaceMemoryExactKey(older));
+  assert.notEqual(workspaceMemoryIdentityKey(older), workspaceMemoryIdentityKey(newer));
 });
 
-test("dedupeLongTermEntriesWithAccounting reports path identity duplicates as absorbed", () => {
+test("dedupe preserves path facts until explicit consolidation", () => {
   const older = entry("older", "Config location: .opencode/opencode.json", "reference");
   const newer = entry("newer", "OpenCode config path `.opencode/opencode.json`", "reference");
-
   const result = dedupeLongTermEntriesWithAccounting([older, newer]);
-
-  assert.equal(result.kept.length, 1);
-  assert.equal(result.absorbed.length, 1);
-  assert.equal(result.absorbed[0].reason, "absorbed_identity");
+  assert.equal(result.kept.length, 2);
+  assert.equal(result.absorbed.length, 0);
   assert.equal(result.superseded.length, 0);
 });
 
@@ -1609,51 +1664,41 @@ test("enforceLongTermLimits project: phrase-only opencode-agenthub variants do n
   assert.equal(projectEntries.length, 2, "Phrase-only repo/product names should not form a dedupe identity");
 });
 
-test("enforceLongTermLimits reference: same concrete config path variants collapse to one", () => {
+test("enforceLongTermLimits preserves distinct config path variants", () => {
   const entries = [
-    agedEntry("r1", "OpenCode plugin config location: `.opencode-agenthub/current/xdg/opencode/opencode.json` in workspace", "reference", { daysAgo: 1 }),
-    agedEntry("r2", "OpenCode plugin config: .opencode-agenthub/current/xdg/opencode/opencode.json in workspace", "reference", { daysAgo: 0 }),
+    entry("r1", "OpenCode plugin config location: `.opencode-agenthub/current/xdg/opencode/opencode.json` in workspace", "reference"),
+    entry("r2", "OpenCode plugin config: .opencode-agenthub/current/xdg/opencode/opencode.json in workspace", "reference"),
   ];
-
-  const kept = enforceLongTermLimits(entries);
-  const refEntries = kept.filter(e => e.type === "reference");
-  assert.equal(refEntries.length, 1, "Shared concrete paths should merge despite wording differences");
-  assert.equal(
-    workspaceMemoryIdentityKey(entries[0]),
-    "reference:path:.opencode-agenthub/current/xdg/opencode/opencode.json",
-  );
+  assert.equal(enforceLongTermLimits(entries).length, 2);
+  assert.equal(workspaceMemoryIdentityKey(entries[0]), workspaceMemoryExactKey(entries[0]));
 });
 
-test("workspaceMemoryIdentityKey reference: normalizes wrapped path punctuation", () => {
-  const a = agedEntry("a", "Config path is `.opencode/opencode.json`.", "reference", { daysAgo: 1 });
-  const b = agedEntry("b", "Config path: .opencode/opencode.json", "reference", { daysAgo: 0 });
-
-  assert.equal(workspaceMemoryIdentityKey(a), "reference:path:.opencode/opencode.json");
-  assert.equal(workspaceMemoryIdentityKey(b), "reference:path:.opencode/opencode.json");
-  assert.equal(enforceLongTermLimits([a, b]).length, 1);
+test("workspaceMemoryIdentityKey uses the full canonical fact", () => {
+  const a = entry("a", "Config path is `.opencode/opencode.json`.", "reference");
+  const b = entry("b", "Config path: .opencode/opencode.json", "reference");
+  assert.equal(workspaceMemoryIdentityKey(a), workspaceMemoryExactKey(a));
+  assert.equal(workspaceMemoryIdentityKey(b), workspaceMemoryExactKey(b));
+  assert.notEqual(workspaceMemoryIdentityKey(a), workspaceMemoryIdentityKey(b));
+  assert.equal(enforceLongTermLimits([a, b]).length, 2);
 });
 
-test("enforceLongTermLimits reference: same URL variants collapse to one", () => {
+test("enforceLongTermLimits preserves distinct facts sharing a URL", () => {
   const entries = [
-    agedEntry("u1", "Docs live at https://Example.com/docs/memory/#section", "reference", { daysAgo: 2 }),
-    agedEntry("u2", "Memory documentation: https://example.com/docs/memory/", "reference", { daysAgo: 0 }),
+    entry("u1", "Installation docs: https://example.com/docs/memory/#install", "reference"),
+    entry("u2", "Retention docs: https://example.com/docs/memory/#retention", "reference"),
   ];
-
-  const kept = enforceLongTermLimits(entries);
-  const refEntries = kept.filter(e => e.type === "reference");
-  assert.equal(refEntries.length, 1, "Shared normalized URLs should merge despite wording differences");
-  assert.equal(workspaceMemoryIdentityKey(entries[0]), "reference:url:https://example.com/docs/memory");
+  assert.equal(enforceLongTermLimits(entries).length, 2);
+  assert.notEqual(workspaceMemoryIdentityKey(entries[0]), workspaceMemoryIdentityKey(entries[1]));
 });
 
-test("workspaceMemoryIdentityKey reference: strips URL hash but preserves query", () => {
-  const withHash = agedEntry("a", "Docs: https://example.com/memory?version=1#install", "reference", { daysAgo: 1 });
-  const sameWithoutHash = agedEntry("b", "Docs: https://EXAMPLE.com/memory?version=1", "reference", { daysAgo: 0 });
-  const differentQuery = agedEntry("c", "Docs: https://example.com/memory?version=2", "reference", { daysAgo: 0 });
-
-  assert.equal(workspaceMemoryIdentityKey(withHash), "reference:url:https://example.com/memory?version=1");
-  assert.equal(workspaceMemoryIdentityKey(sameWithoutHash), "reference:url:https://example.com/memory?version=1");
-  assert.equal(workspaceMemoryIdentityKey(differentQuery), "reference:url:https://example.com/memory?version=2");
-  assert.equal(enforceLongTermLimits([withHash, sameWithoutHash, differentQuery]).length, 2);
+test("workspaceMemoryIdentityKey preserves URL fragment and query differences", () => {
+  const entries = [
+    entry("a", "Docs: https://example.com/memory?version=1#install", "reference"),
+    entry("b", "Docs: https://example.com/memory?version=1#retention", "reference"),
+    entry("c", "Docs: https://example.com/memory?version=2#install", "reference"),
+  ];
+  assert.equal(new Set(entries.map(workspaceMemoryIdentityKey)).size, 3);
+  assert.equal(enforceLongTermLimits(entries).length, 3);
 });
 
 test("enforceLongTermLimits decision: parser format variants do not supersede by topic", () => {
@@ -2070,6 +2115,139 @@ test("loadWorkspaceMemory appends P0 migration evidence once", async () => {
     if (previousXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
     else process.env.XDG_DATA_HOME = previousXdgDataHome;
     await rm(sandbox, { recursive: true, force: true });
+  }
+});
+
+test("workspace memory rejects malformed and future stores without replacing disk", async () => {
+  const root = await mkdtemp(join(tmpdir(), "wm-invalid-store-"));
+  try {
+    const path = await workspaceMemoryPath(root);
+    await mkdir(dirname(path), { recursive: true });
+    const validEntry = entry("valid", "Keep durable workspace preferences.", "feedback");
+    const invalidEntries = [
+      null,
+      { ...validEntry, type: "unknown" },
+      { ...validEntry, source: "unknown" },
+      { ...validEntry, status: "unknown" },
+      { ...validEntry, text: 123 },
+      { ...validEntry, confidence: null },
+      { ...validEntry, createdAt: 123 },
+      { ...validEntry, retentionClock: -1 },
+      { ...validEntry, reinforcementCount: 1.5 },
+      { ...validEntry, tags: [123] },
+    ];
+    for (const value of [
+      null, [], {}, { version: 2, entries: [] },
+      { version: 1, entries: [], limits: { maxEntries: -1 } },
+      { version: 1, entries: [], limits: { maxRenderedChars: null } },
+      ...invalidEntries.map(memory => ({ version: 1, entries: [memory] })),
+    ]) {
+      const raw = JSON.stringify(value);
+      await writeFile(path, raw, "utf8");
+      await assert.rejects(loadWorkspaceMemory(root));
+      assert.equal(await readFile(path, "utf8"), raw);
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("workspace memory accepts unversioned legacy stores with optional fields omitted", async () => {
+  const root = await mkdtemp(join(tmpdir(), "wm-legacy-store-"));
+  try {
+    const path = await workspaceMemoryPath(root);
+    const now = new Date().toISOString();
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, JSON.stringify({ entries: [{ id: "legacy", type: "decision", text: "Legacy item", source: "manual", confidence: 0.8, status: "active", createdAt: now, updatedAt: now, safetyCritical: true }] }), "utf8");
+    const loaded = await loadWorkspaceMemory(root);
+    assert.equal(loaded.entries[0]?.id, "legacy");
+    assert.equal(loaded.entries[0]?.safetyCritical, true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("load normalization waits for a locked writer and preserves its new memory", async () => {
+  const root = await mkdtemp(join(tmpdir(), "wm-load-update-race-"));
+  let release: () => void = () => {};
+  try {
+    const store = await emptyWorkspaceMemory(root);
+    await saveWorkspaceMemory(root, store);
+    let enter!: () => void;
+    const entered = new Promise<void>(resolve => { enter = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const added = { ...entry("concurrent", "Keep durable local JSON architecture.", "decision"), source: "manual" as const };
+    const writer = updateJSON(await workspaceMemoryPath(root), () => store, async current => {
+      enter();
+      await gate;
+      return { ...current, entries: [...current.entries, added] };
+    });
+    await entered;
+    const loading = loadWorkspaceMemory(root);
+    try {
+      const completedWhileLocked = await Promise.race([
+        loading.then(() => true),
+        new Promise<boolean>(resolve => setTimeout(() => resolve(false), 50)),
+      ]);
+      assert.equal(completedWhileLocked, false, "load must acquire the writer's lock before reading");
+    } finally {
+      release();
+      await writer;
+    }
+    const loaded = await loading;
+    assert.ok(loaded.entries.some(memory => memory.id === added.id));
+    const final = await loadWorkspaceMemory(root);
+    assert.ok(final.entries.some(memory => memory.id === added.id));
+  } finally {
+    release();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("workspace load quarantines syntax corruption under lock and validates updater output", async () => {
+  const root = await mkdtemp(join(tmpdir(), "wm-locked-load-corrupt-"));
+  try {
+    const path = await workspaceMemoryPath(root);
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, "{invalid json", "utf8");
+    assert.equal((await loadWorkspaceMemory(root)).entries.length, 0);
+    assert.ok((await readdir(dirname(path))).some(name => name.startsWith("workspace-memory.json.corrupt-")));
+    const before = await readFile(path, "utf8");
+    await assert.rejects(updateWorkspaceMemoryWithAccounting(root, store => ({ ...store, entries: [{ ...entry("invalid", "Invalid type", "decision"), type: "unknown" as any }] })));
+    assert.equal(await readFile(path, "utf8"), before);
+    await assert.rejects(saveWorkspaceMemory(root, { ...await emptyWorkspaceMemory(root), limits: { maxRenderedChars: Infinity, maxEntries: 28 } }));
+    assert.equal(await readFile(path, "utf8"), before);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("lock timeout snapshot fallback preserves disk and rejects corrupt or future stores", async () => {
+  const root = await mkdtemp(join(tmpdir(), "wm-load-timeout-"));
+  try {
+    const path = await workspaceMemoryPath(root);
+    await mkdir(dirname(path), { recursive: true });
+    const store = await emptyWorkspaceMemory(root);
+    store.entries = [
+      entry("stable", "Keep durable local storage architecture.", "decision"),
+      entry("progress", "Phase 1-4 completed successfully", "project"),
+    ];
+    const raw = JSON.stringify(store);
+    await writeFile(path, raw, "utf8");
+    await writeFile(`${path}.lock`, `${process.pid}\n${Date.now()}\n`, "utf8");
+    const snapshot = await loadWorkspaceMemory(root);
+    assert.ok(snapshot.entries.some(memory => memory.id === "stable" && memory.status === "active"));
+    assert.equal(snapshot.entries.find(memory => memory.id === "progress")?.status, "superseded");
+    assert.equal(await readFile(path, "utf8"), raw);
+    assert.equal((await queryEvidenceEvents(root, { types: ["memory_migration_superseded"] })).length, 0);
+    for (const invalid of [JSON.stringify({ ...store, version: 2 }), "{invalid json"]) {
+      await writeFile(path, invalid, "utf8");
+      await assert.rejects(loadWorkspaceMemory(root));
+      assert.equal(await readFile(path, "utf8"), invalid);
+      assert.ok(!(await readdir(dirname(path))).some(name => name.includes(".corrupt-")));
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
   }
 });
 

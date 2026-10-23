@@ -7,13 +7,14 @@
   "exports": {
     ".": "./dist/index.js",
     "./server": "./dist/index.js",
-    "./tui": "./dist/src/tui-plugin.js"
+    "./tui": "./dist/tui.js"
   },
   "bin": {
     "memory-diag": "./scripts/memory-diag-bin.cjs"
   },
   "files": [
     "index.ts",
+    "tui.ts",
     "src/",
     "scripts/memory-diag.ts",
     "scripts/memory-diag/",
@@ -54,14 +55,25 @@
   },
   "homepage": "https://github.com/sdwolf4103/opencode-working-memory#readme",
   "peerDependencies": {
-    "@opencode-ai/plugin": ">=1.2.0 <2.0.0"
+    "@opencode-ai/plugin": ">=1.2.0 <2.0.0",
+    "@opencode/plugin": ">=2.1.4 <3.0.0"
   },
   "devDependencies": {
+    "@opencode-ai/plugin": "1.2.6",
+    "@opencode/plugin": "2.1.4",
     "@types/node": "^24.3.0",
     "bun-types": "^1.2.21",
     "typescript": "^5.9.2"
   },
   "engines": {
     "node": ">=22.6.0"
+  },
+  "peerDependenciesMeta": {
+    "@opencode-ai/plugin": {
+      "optional": true
+    },
+    "@opencode/plugin": {
+      "optional": true
+    }
   }
 }

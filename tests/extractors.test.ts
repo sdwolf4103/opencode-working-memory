@@ -106,6 +106,50 @@ test("extractExplicitMemories still captures going forward", () => {
   assert.ok(items[0].retentionClock >= before && items[0].retentionClock <= after);
 });
 
+test("explicit extraction ignores quoted and code examples while keeping live instructions", () => {
+  const result = extractExplicitMemoriesWithEvidence([
+    "```text",
+    "Remember: use the example endpoint for future requests.",
+    "```",
+    "> 從現在開始：使用引用中的範例端點。",
+    "    remember: use the indented example endpoint.",
+    "Example: `going forward: use the inline example endpoint.`",
+    "Remember: use `pnpm` for all workspace package commands.",
+  ].join("\n"));
+  assert.equal(result.entries.length, 1);
+  assert.equal(result.entries[0].text, "use `pnpm` for all workspace package commands.");
+});
+
+test("explicit extraction keeps nested and unclosed fenced examples excluded", () => {
+  const result = extractExplicitMemories([
+    "````markdown",
+    "```text",
+    "Remember: use the nested example endpoint.",
+    "~~~",
+    "Remember: keep the mismatched fence example excluded.",
+    "```",
+    "````",
+    "記住：工作區套件管理統一使用 pnpm。",
+    "~~~text",
+    "Remember: keep this unclosed example excluded.",
+  ].join("\n"));
+  assert.equal(result.length, 1);
+  assert.match(result[0].text, /pnpm/);
+});
+
+test("explicit extraction preserves negation offsets after code and quote examples", () => {
+  const result = extractExplicitMemories([
+    "```text",
+    "Remember: use this example package manager.",
+    "```",
+    "> from now on: use the quoted package manager.",
+    "不要幫我記住：所有專案都使用範例套件管理器。",
+    "從現在開始：套件管理遵循工作區設定。",
+  ].join("\n"));
+  assert.equal(result.length, 1);
+  assert.equal(result[0].text, "套件管理遵循工作區設定。");
+});
+
 test("extractExplicitMemories captures from now on", () => {
   const items = extractExplicitMemories("from now on: reply in Traditional Chinese");
   assert.equal(items.length, 1);

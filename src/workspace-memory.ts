@@ -1,9 +1,9 @@
-import { appendFile, mkdir } from "node:fs/promises";
+import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import type { CompactionMemoryRef, LongTermMemoryEntry, WorkspaceMemoryStore } from "./types.ts";
 import { LONG_TERM_LIMITS } from "./types.ts";
 import { migrationLogPath, workspaceKey, workspaceMemoryPath } from "./paths.ts";
-import { atomicWriteJSON, readJSON, updateJSON } from "./storage.ts";
+import { updateJSON } from "./storage.ts";
 import { assessMemoryQuality, isHardQualityReason, isProgressSnapshotViolation } from "./memory-quality.ts";
 import { redactCredentials } from "./redaction.ts";
 import {
@@ -117,64 +117,117 @@ export async function emptyWorkspaceMemory(root: string): Promise<WorkspaceMemor
 export async function loadWorkspaceMemory(root: string): Promise<WorkspaceMemoryStore> {
   const path = await workspaceMemoryPath(root);
   const fallback = await emptyWorkspaceMemory(root);
-  const loaded = await readJSON(path, () => fallback) as Partial<WorkspaceMemoryStore>;
-
-  const store: WorkspaceMemoryStore = {
-    version: loaded.version ?? 1,
-    workspace: loaded.workspace ?? { root, key: await workspaceKey(root) },
-    limits: {
-      maxRenderedChars: loaded.limits?.maxRenderedChars ?? LONG_TERM_LIMITS.maxRenderedChars,
-      maxEntries: loaded.limits?.maxEntries ?? LONG_TERM_LIMITS.maxEntries,
-    },
-    entries: Array.isArray(loaded.entries) ? loaded.entries : [],
-    migrations: Array.isArray(loaded.migrations) ? loaded.migrations : [],
-    updatedAt: loaded.updatedAt ?? fallback.updatedAt,
-    lastActivityAt: loaded.lastActivityAt ?? loaded.updatedAt ?? fallback.lastActivityAt,
-  };
-
-  // Always normalize on load so redaction/migrations are always-on.
-  const normalized = await normalizeWorkspaceMemoryWithAccounting(root, store);
-
-  // Persist security/correctness mutations, but avoid read-time maintenance
-  // writes for ordering/capacity/timestamp-only normalization.
-  if (hasSecurityOrMigrationChange(store, normalized.store)) {
-    await atomicWriteJSON(path, normalized.store);
-
-    // loadWorkspaceMemory has a narrow migration side effect: when a first-load
-    // migration actually supersedes entries, append evidence for those storage
-    // changes. Migration IDs keep this idempotent on repeated loads.
-    const migrationEvidence = normalized.evidence.filter(event => event.type === "memory_migration_superseded");
-    if (migrationEvidence.length > 0) {
-      await appendEvidenceEvents(root, migrationEvidence);
-    }
+  let normalizedResult: WorkspaceMemoryNormalizationResult | undefined;
+  let normalized: WorkspaceMemoryStore;
+  try {
+    normalized = await updateJSON(path, () => fallback, async loaded => {
+      normalizedResult = await normalizeWorkspaceMemoryWithAccounting(root, loaded);
+      return normalizedResult.store;
+    }, { quarantineCorruptJSON: true });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ELOCKTIMEOUT") throw error;
+    // Atomic replacement permits a committed snapshot read while another writer
+    // holds the lock. This fallback performs no store write or corruption recovery.
+    const loaded: unknown = JSON.parse(await readFile(path, "utf8"));
+    return (await normalizeWorkspaceMemoryWithAccounting(root, normalizeWorkspaceMemoryInput(root, loaded))).store;
   }
 
-  return normalized.store;
+  const migrationEvidence = normalizedResult?.evidence.filter(event => event.type === "memory_migration_superseded") ?? [];
+  if (migrationEvidence.length > 0) {
+    await appendEvidenceEvents(root, migrationEvidence);
+  }
+  return normalized;
 }
 
-function hasSecurityOrMigrationChange(
-  before: WorkspaceMemoryStore,
-  after: WorkspaceMemoryStore,
-): boolean {
-  const beforeById = new Map((before.entries ?? []).map(entry => [entry.id, entry]));
-  for (const afterEntry of after.entries ?? []) {
-    const beforeEntry = beforeById.get(afterEntry.id);
-    if (!beforeEntry) continue;
-    if (beforeEntry.text !== afterEntry.text) return true;
-    if ((beforeEntry.rationale ?? "") !== (afterEntry.rationale ?? "")) return true;
-    if (beforeEntry.status !== afterEntry.status) return true;
-    if ((beforeEntry.retentionClock ?? null) !== (afterEntry.retentionClock ?? null)) return true;
+function normalizeWorkspaceMemoryInput(root: string, input: unknown): WorkspaceMemoryStore {
+  if (!isRecord(input)) throw new Error("Invalid workspace memory store: expected an object");
+  const loaded = input;
+  if (loaded.version !== undefined && loaded.version !== 1) {
+    throw new Error(`Unsupported workspace memory version: ${String(loaded.version)}`);
   }
+  if (loaded.workspace !== undefined && (!isRecord(loaded.workspace) || (loaded.workspace.root !== undefined && typeof loaded.workspace.root !== "string") || (loaded.workspace.key !== undefined && typeof loaded.workspace.key !== "string"))) throw new Error("Invalid workspace memory store: workspace fields must be strings");
+  if (loaded.limits !== undefined && !isRecord(loaded.limits)) throw new Error("Invalid workspace memory store: limits must be an object");
+  if (!Array.isArray(loaded.entries)) throw new Error("Invalid workspace memory store: entries must be an array");
+  if (loaded.migrations !== undefined && (!Array.isArray(loaded.migrations) || !loaded.migrations.every(item => typeof item === "string"))) {
+    throw new Error("Invalid workspace memory store: migrations must be strings");
+  }
+  if (loaded.updatedAt !== undefined && typeof loaded.updatedAt !== "string") throw new Error("Invalid workspace memory store: updatedAt must be a string");
+  if (loaded.lastActivityAt !== undefined && typeof loaded.lastActivityAt !== "string") throw new Error("Invalid workspace memory store: lastActivityAt must be a string");
+  const limits = isRecord(loaded.limits) ? loaded.limits : {};
+  validateFiniteNonnegative(limits.maxRenderedChars, "limits.maxRenderedChars");
+  validateFiniteNonnegative(limits.maxEntries, "limits.maxEntries");
+  if (limits.maxRenderedChars !== undefined && !Number.isInteger(limits.maxRenderedChars)) throw new Error("Invalid workspace memory store: limits.maxRenderedChars must be an integer");
+  if (limits.maxEntries !== undefined && !Number.isInteger(limits.maxEntries)) throw new Error("Invalid workspace memory store: limits.maxEntries must be an integer");
 
-  const beforeMigrations = JSON.stringify(before.migrations ?? []);
-  const afterMigrations = JSON.stringify(after.migrations ?? []);
-  if ((before.lastActivityAt ?? "") !== (after.lastActivityAt ?? "")) return true;
-  return beforeMigrations !== afterMigrations;
+  const entries = (loaded.entries as unknown[]).map((entry, index) => {
+    validateWorkspaceMemoryEntry(entry, index);
+    return entry;
+  });
+  const now = new Date().toISOString();
+  const workspace = isRecord(loaded.workspace) ? loaded.workspace : {};
+  return {
+    version: 1,
+    workspace: {
+      root: typeof workspace.root === "string" ? workspace.root : root,
+      key: typeof workspace.key === "string" ? workspace.key : "",
+    },
+    limits: {
+      maxRenderedChars: typeof limits.maxRenderedChars === "number" ? limits.maxRenderedChars : LONG_TERM_LIMITS.maxRenderedChars,
+      maxEntries: typeof limits.maxEntries === "number" ? limits.maxEntries : LONG_TERM_LIMITS.maxEntries,
+    },
+    entries,
+    migrations: (loaded.migrations ?? []) as string[],
+    updatedAt: typeof loaded.updatedAt === "string" ? loaded.updatedAt : now,
+    lastActivityAt: typeof loaded.lastActivityAt === "string" ? loaded.lastActivityAt : (typeof loaded.updatedAt === "string" ? loaded.updatedAt : now),
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function validateFiniteNonnegative(value: unknown, field: string): void {
+  if (value !== undefined && (typeof value !== "number" || !Number.isFinite(value) || value < 0)) {
+    throw new Error(`Invalid workspace memory store: ${field} must be a finite nonnegative number`);
+  }
+}
+
+function validateWorkspaceMemoryEntry(value: unknown, index: number): asserts value is LongTermMemoryEntry {
+  const field = `entries[${index}]`;
+  if (!isRecord(value)) throw new Error(`Invalid workspace memory store: ${field} must be an object`);
+  if (typeof value.id !== "string" || !value.id || typeof value.text !== "string") throw new Error(`Invalid workspace memory store: ${field} requires id and text`);
+  if ((typeof value.type !== "string" || !["feedback", "project", "decision", "reference"].includes(value.type))) throw new Error(`Invalid workspace memory store: ${field}.type is invalid`);
+  if ((typeof value.source !== "string" || !["explicit", "compaction", "manual"].includes(value.source))) throw new Error(`Invalid workspace memory store: ${field}.source is invalid`);
+  if ((typeof value.status !== "string" || !["active", "superseded"].includes(value.status))) throw new Error(`Invalid workspace memory store: ${field}.status is invalid`);
+  if (typeof value.confidence !== "number" || !Number.isFinite(value.confidence)) throw new Error(`Invalid workspace memory store: ${field}.confidence must be finite`);
+  for (const name of ["createdAt", "updatedAt"]) {
+    if (typeof value[name] !== "string") throw new Error(`Invalid workspace memory store: ${field}.${name} must be a string`);
+  }
+  for (const name of ["staleAfterDays", "retentionClock", "reinforcementCount", "lastReinforcedAt", "promotionAttempts"]) {
+    validateFiniteNonnegative(value[name], `${field}.${name}`);
+  }
+  if (value.rationale !== undefined && typeof value.rationale !== "string") throw new Error(`Invalid workspace memory store: ${field}.rationale must be a string`);
+  for (const name of ["pendingOwnerSessionID", "pendingMessageID", "lastPromotionFailureReason", "lastPromotionAttemptAt", "lastReinforcedSessionID"]) {
+    if (value[name] !== undefined && typeof value[name] !== "string") throw new Error(`Invalid workspace memory store: ${field}.${name} must be a string`);
+  }
+  for (const name of ["supersedes", "tags"]) {
+    const items = value[name];
+    if (items !== undefined && (!Array.isArray(items) || !items.every((item: unknown) => typeof item === "string"))) throw new Error(`Invalid workspace memory store: ${field}.${name} must be strings`);
+  }
+  if (value.userImportance !== undefined && (typeof value.userImportance !== "string" || !["low", "normal", "high"].includes(value.userImportance))) throw new Error(`Invalid workspace memory store: ${field}.userImportance is invalid`);
+  if (value.safetyCritical !== undefined && typeof value.safetyCritical !== "boolean") throw new Error(`Invalid workspace memory store: ${field}.safetyCritical must be boolean`);
+  if (value.reinforcementCount !== undefined && !Number.isInteger(value.reinforcementCount)) throw new Error(`Invalid workspace memory store: ${field}.reinforcementCount must be an integer`);
+  if (value.promotionAttempts !== undefined && !Number.isInteger(value.promotionAttempts)) throw new Error(`Invalid workspace memory store: ${field}.promotionAttempts must be an integer`);
 }
 
 export async function saveWorkspaceMemory(root: string, store: WorkspaceMemoryStore): Promise<void> {
+  // Full-state replacement: the caller owns this snapshot; this does not merge it with disk state.
   const normalized = await normalizeWorkspaceMemory(root, store);
-  await atomicWriteJSON(await workspaceMemoryPath(root), normalized);
+  const path = await workspaceMemoryPath(root);
+  await updateJSON(path, () => normalized, current => {
+    normalizeWorkspaceMemoryInput(root, current);
+    return normalized;
+  });
 }
 
 export async function updateWorkspaceMemory(
@@ -226,6 +279,7 @@ export async function normalizeWorkspaceMemoryWithAccounting(
   root: string,
   store: WorkspaceMemoryStore,
 ): Promise<WorkspaceMemoryNormalizationResult> {
+  store = normalizeWorkspaceMemoryInput(root, store);
   const nowMs = Date.now();
   const nowIso = new Date(nowMs).toISOString();
 
@@ -469,79 +523,8 @@ export function workspaceMemoryExactKey(entry: Pick<LongTermMemoryEntry, "type" 
   return `${entry.type}:${canonicalMemoryText(entry.text)}`;
 }
 
-function normalizeUrlIdentity(raw: string): string | null {
-  const cleaned = raw.replace(/[),.;:!?]+$/g, "");
-  try {
-    const url = new URL(cleaned);
-    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
-    url.protocol = url.protocol.toLowerCase();
-    url.hostname = url.hostname.toLowerCase();
-    url.hash = "";
-    if (url.pathname.length > 1) {
-      url.pathname = url.pathname.replace(/\/+$/g, "");
-    }
-    return `url:${url.toString()}`;
-  } catch {
-    return null;
-  }
-}
-
-function normalizePathIdentity(raw: string): string | null {
-  const unwrapped = raw
-    .trim()
-    .replace(/^[`"']+|[`"']+$/g, "")
-    .replace(/[),.;:!?]+$/g, "")
-    .replace(/\\+/g, "/");
-
-  if (!unwrapped) return null;
-  const collapsed = unwrapped.startsWith("/")
-    ? `/${unwrapped.slice(1).replace(/\/+$/g, "/").replace(/\/+/g, "/")}`
-    : unwrapped.replace(/\/+/g, "/");
-  const withoutTrailingSlash = collapsed.length > 1 ? collapsed.replace(/\/+$/g, "") : collapsed;
-  return `path:${withoutTrailingSlash}`;
-}
-
-function isConcretePathIdentity(pathIdentity: string): boolean {
-  const path = pathIdentity.slice("path:".length);
-  if (!path || path === "." || path === "..") return false;
-
-  if (path.startsWith("/")) return true;
-  if (/^\.\.?\//.test(path)) return true;
-  if (/^\.[A-Za-z0-9_.-]+\//.test(path)) return true;
-  if (/^[A-Za-z0-9_.-]+\//.test(path)) return true;
-  return /\.(?:json|jsonc|ts|tsx|js|jsx|mjs|cjs|md|yaml|yml|toml|lock|config)$/i.test(path);
-}
-
-function normalizeConcretePathIdentity(raw: string): string | null {
-  const pathIdentity = normalizePathIdentity(raw);
-  if (!pathIdentity) return null;
-  return isConcretePathIdentity(pathIdentity) ? pathIdentity : null;
-}
-
-function extractConcreteIdentityKey(text: string): string | null {
-  const urlMatch = text.match(/https?:\/\/[^\s`"'<>]+/i);
-  if (urlMatch) {
-    const urlIdentity = normalizeUrlIdentity(urlMatch[0]);
-    if (urlIdentity) return urlIdentity;
-  }
-
-  const wrappedPathPattern = /[`"']([^`"']+)[`"']/g;
-  for (const match of text.matchAll(wrappedPathPattern)) {
-    const pathIdentity = normalizeConcretePathIdentity(match[1]);
-    if (pathIdentity) return pathIdentity;
-  }
-
-  const pathMatch = text.match(/(?:\/[^\0\s`"'<>]+|(?:\.{1,2}[\\/]|[A-Za-z0-9_.-]+[\\/])[^\s`"'<>]+|[A-Za-z0-9_.-]+\.(?:json|jsonc|ts|tsx|js|jsx|mjs|cjs|md|yaml|yml|toml|lock|config))(?:\b|$)/);
-  if (!pathMatch) return null;
-
-  return normalizeConcretePathIdentity(pathMatch[0]);
-}
-
 export function workspaceMemoryIdentityKey(entry: Pick<LongTermMemoryEntry, "type" | "text">): string {
-  if (entry.type === "project" || entry.type === "reference") {
-    return `${entry.type}:${extractConcreteIdentityKey(entry.text) ?? canonicalMemoryText(entry.text)}`;
-  }
-
+  // A shared resource can describe several facts; only canonical duplicates merge.
   return workspaceMemoryExactKey(entry);
 }
 
@@ -742,15 +725,10 @@ export function dedupeLongTermEntriesWithAccounting(entries: LongTermMemoryEntry
   const superseded: MemoryConsolidationEvent[] = [];
   const evidence: EvidenceEventInput[] = [];
 
-  // For project/reference/feedback: dedupe by concrete identity or exact canonical text.
-  // Feedback is grouped with project/reference for entity dedupe, but
-  // workspaceMemoryIdentityKey() returns exact key for feedback (no concrete
-  // identity extraction). This means feedback absorbed_identity is currently
-  // impossible. When identity key extraction is extended to all types, feedback
-  // with matching concrete identifiers will correctly produce absorbed_identity.
+  // Keep distinct facts even when they mention the same URL or file path.
   const projectRefEntries = entries.filter(e => e.type === "project" || e.type === "reference" || e.type === "feedback");
 
-  // Build identity key dedup for project/reference/feedback.
+  // Identity keys use canonical exact text for all memory types.
   const entityDeduped = new Map<string, LongTermMemoryEntry>();
   for (const entry of projectRefEntries) {
     const key = workspaceMemoryIdentityKey(entry);
@@ -953,9 +931,9 @@ function selectWorkspaceMemoryForRender(store: WorkspaceMemoryStore): WorkspaceM
   }
 
   const activeEntries = store.entries.filter(entry => entry.status !== "superseded");
-  const phase1 = activeEntries.map(entry => ({ ...entry, text: entry.text.slice(0, LONG_TERM_LIMITS.maxEntryTextChars) }));
-  const dedupeResult = dedupeLongTermEntriesWithAccounting(phase1);
-  const sorted = [...dedupeResult.kept].sort((a, b) => compareLongTermMemoryForRetention(a, b, now, store.lastActivityAt));
+  const dedupeResult = dedupeLongTermEntriesWithAccounting(activeEntries);
+  const phase1 = dedupeResult.kept.map(entry => ({ ...entry, text: entry.text.slice(0, LONG_TERM_LIMITS.maxEntryTextChars) }));
+  const sorted = [...phase1].sort((a, b) => compareLongTermMemoryForRetention(a, b, now, store.lastActivityAt));
   const typeCapResult = applyTypeMaxCapsWithOmissions(sorted);
   for (const memory of typeCapResult.omitted) omitted.push({ memory, reason: "type_cap" });
   const active = typeCapResult.kept.slice(0, LONG_TERM_LIMITS.maxEntries);
@@ -964,112 +942,84 @@ function selectWorkspaceMemoryForRender(store: WorkspaceMemoryStore): WorkspaceM
   return { active, omitted, maxChars };
 }
 
-export function accountWorkspaceMemoryRender(store: WorkspaceMemoryStore): WorkspaceMemoryRenderAccounting {
-  const { active, omitted, maxChars } = selectWorkspaceMemoryForRender(store);
-  const evidence: EvidenceEventInput[] = [];
+function budgetWorkspaceMemoryPrompt(
+  header: string,
+  selection: WorkspaceMemoryRenderSelection,
+  renderLine: (entry: LongTermMemoryEntry, index: number) => string,
+): Pick<WorkspaceMemoryRenderAccounting, "rendered" | "omitted" | "prompt"> {
+  const omitted = [...selection.omitted];
+  const selected: LongTermMemoryEntry[] = [];
 
-  if (active.length === 0) {
-    for (const item of omitted) evidence.push(renderEvidence(item.memory, "omitted", item.reason));
-    return { rendered: [], omitted, evidence, prompt: "" };
-  }
-
-  // If maxChars smaller than minimum envelope, return empty string
-  if (maxChars < MIN_ENVELOPE_LENGTH) {
-    for (const memory of active) omitted.push({ memory, reason: "empty_render_budget" });
-    for (const item of omitted) evidence.push(renderEvidence(item.memory, "omitted", item.reason));
-    return { rendered: [], omitted, evidence, prompt: "" };
-  }
-
-  const lines: string[] = [
-    "Workspace memory (cross-session, verify if stale):",
-  ];
-  const rendered: LongTermMemoryEntry[] = [];
-
-  for (const type of MEMORY_TYPE_ORDER) {
-    const items = active.filter(entry => entry.type === type);
-    if (items.length === 0) continue;
-
-    const sectionLines: string[] = [`${type}:`];
-
-    for (const item of items) {
-      const line = `- ${renderEntry(item)}`;
-      if ([...lines, ...sectionLines, line].join("\n").length <= maxChars) {
-        sectionLines.push(line);
+  function format(entries: LongTermMemoryEntry[]): { rendered: LongTermMemoryEntry[]; prompt: string } {
+    const rendered: LongTermMemoryEntry[] = [];
+    const lines = [header];
+    for (const type of MEMORY_TYPE_ORDER) {
+      const items = entries.filter(entry => entry.type === type);
+      if (items.length === 0) continue;
+      lines.push(`${type}:`);
+      for (const item of items) {
+        lines.push(renderLine(item, rendered.length));
         rendered.push(item);
-      } else {
-        omitted.push({ memory: item, reason: "char_budget" });
       }
     }
-
-    if (sectionLines.length > 1) {
-      lines.push(...sectionLines);
-    }
+    return { rendered, prompt: rendered.length > 0 ? lines.join("\n") : "" };
   }
 
-  for (const memory of rendered) evidence.push(renderEvidence(memory, "rendered"));
-  for (const item of omitted) evidence.push(renderEvidence(item.memory, "omitted", item.reason));
+  // Evaluate the complete grouped output so headers and final ref widths count.
+  for (const memory of selection.active) {
+    if (selection.maxChars < MIN_ENVELOPE_LENGTH) {
+      omitted.push({ memory, reason: "empty_render_budget" });
+    } else if (format([...selected, memory]).prompt.length <= selection.maxChars) {
+      selected.push(memory);
+    } else {
+      omitted.push({ memory, reason: "char_budget" });
+    }
+  }
+  return { ...format(selected), omitted };
+}
 
-  return { rendered, omitted, evidence, prompt: lines.join("\n") };
+export function accountWorkspaceMemoryRender(store: WorkspaceMemoryStore): WorkspaceMemoryRenderAccounting {
+  const result = budgetWorkspaceMemoryPrompt(
+    "Workspace memory (cross-session, verify if stale):",
+    selectWorkspaceMemoryForRender(store),
+    item => `- ${renderEntry(item)}`,
+  );
+  return {
+    ...result,
+    evidence: [
+      ...result.rendered.map(memory => renderEvidence(memory, "rendered")),
+      ...result.omitted.map(item => renderEvidence(item.memory, "omitted", item.reason)),
+    ],
+  };
 }
 
 export function accountWorkspaceMemoryCompactionRefs(store: WorkspaceMemoryStore): WorkspaceMemoryCompactionRefsAccounting {
-  const { active, omitted, maxChars } = selectWorkspaceMemoryForRender(store);
-  const evidence: EvidenceEventInput[] = [];
-  const originalById = new Map(store.entries.map(entry => [entry.id, entry]));
-
-  if (active.length === 0) {
-    for (const item of omitted) evidence.push(renderEvidence(item.memory, "omitted", item.reason));
-    return { rendered: [], omitted, evidence, prompt: "", refs: [] };
-  }
-
-  const lines: string[] = [
+  const result = budgetWorkspaceMemoryPrompt(
     "Existing workspace memories available for consolidation:",
-  ];
-  const rendered: LongTermMemoryEntry[] = [];
-  const refs: CompactionMemoryRef[] = [];
+    selectWorkspaceMemoryForRender(store),
+    (item, index) => `[M${index + 1}] ${item.text}`,
+  );
+  const originalById = new Map(store.entries.map(entry => [entry.id, entry]));
   const capturedAt = Date.now();
-
-  for (const type of MEMORY_TYPE_ORDER) {
-    const items = active.filter(entry => entry.type === type);
-    if (items.length === 0) continue;
-
-    const sectionLines: string[] = [`${type}:`];
-
-    for (const item of items) {
-      const ref = `M${refs.length + 1}`;
-      const line = `[${ref}] ${item.text}`;
-      if ([...lines, ...sectionLines, line].join("\n").length <= maxChars) {
-        const original = originalById.get(item.id) ?? item;
-        sectionLines.push(line);
-        rendered.push(item);
-        refs.push({
-          ref,
-          memoryId: item.id,
-          type: original.type,
-          source: original.source,
-          exactKey: workspaceMemoryExactKey(original),
-          identityKey: workspaceMemoryIdentityKey(original),
-          textPreview: item.text,
-          capturedAt,
-        });
-      } else {
-        omitted.push({ memory: item, reason: "char_budget" });
-      }
-    }
-
-    if (sectionLines.length > 1) {
-      lines.push(...sectionLines);
-    }
-  }
-
-  for (const memory of rendered) evidence.push(renderEvidence(memory, "rendered"));
-  for (const item of omitted) evidence.push(renderEvidence(item.memory, "omitted", item.reason));
-
+  const refs = result.rendered.map((item, index) => {
+    const original = originalById.get(item.id) ?? item;
+    return {
+      ref: `M${index + 1}`,
+      memoryId: item.id,
+      type: original.type,
+      source: original.source,
+      exactKey: workspaceMemoryExactKey(original),
+      identityKey: workspaceMemoryIdentityKey(original),
+      textPreview: item.text,
+      capturedAt,
+    };
+  });
   return {
-    rendered,
-    omitted,
-    evidence,
-    prompt: rendered.length > 0 ? lines.join("\n") : "",
+    ...result,
+    evidence: [
+      ...result.rendered.map(memory => renderEvidence(memory, "rendered")),
+      ...result.omitted.map(item => renderEvidence(item.memory, "omitted", item.reason)),
+    ],
     refs,
   };
 }

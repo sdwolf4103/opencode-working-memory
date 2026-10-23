@@ -81,6 +81,15 @@ function extractionEvidence(
 }
 
 export function extractExplicitMemoriesWithEvidence(text: string): WorkspaceMemoryParseResult {
+  // Preserve offsets so negation checks still use the original user text.
+  const directiveText = summaryLines(text).map(line => {
+    if (line.inFence || line.isQuote || /^(?: {4}|\t)/.test(line.text)) {
+      return " ".repeat(line.text.length);
+    }
+    return line.text;
+  }).join("\n");
+  const directiveContext = directiveText.replace(/(`+)(.*?)\1/g, match => " ".repeat(match.length));
+
   // 注意：所有pattern必須有 g flag，因為使用 matchAll()
   // Pattern 必須在行首匹配，避免匹配到句子中間的非指令式用法
   const patterns = [
@@ -109,7 +118,7 @@ export function extractExplicitMemoriesWithEvidence(text: string): WorkspaceMemo
   const evidence: EvidenceEventInput[] = [];
   const seen = new Set<string>();
   const negatedLinePattern = /(?:^|\n)\s*(?:(?:please\s+)?(?:do\s+not|don't|dont|never)\s+remember(?:\s+(?:this|that))?|不要\s*(?:記住|记住)|別\s*(?:記住|记住)|别\s*(?:記住|记住))[:：,，]?\s*(.+)$/gim;
-  for (const match of text.matchAll(negatedLinePattern)) {
+  for (const match of directiveText.matchAll(negatedLinePattern)) {
     evidence.push(extractionEvidence({
       type: "explicit_memory_ignored",
       phase: "explicit",
@@ -120,7 +129,9 @@ export function extractExplicitMemoriesWithEvidence(text: string): WorkspaceMemo
   }
 
   for (const pattern of patterns) {
-    for (const match of text.matchAll(pattern)) {
+    for (const match of directiveText.matchAll(pattern)) {
+      const triggerIndex = match.index! + (match[0].match(/^[\s\n]*/)?.[0]?.length || 0);
+      if (directiveContext[triggerIndex] !== directiveText[triggerIndex]) continue;
       const body = match[1]?.trim();
       if (body && /^(再说|再說|later|next time)$/i.test(body)) {
         evidence.push(extractionEvidence({
@@ -142,9 +153,6 @@ export function extractExplicitMemoriesWithEvidence(text: string): WorkspaceMemo
         }));
         continue;
       }
-      
-      // Calculate actual trigger position (after possible newline)
-      const triggerIndex = match.index! + (match[0].match(/^[\s\n]*/)?.[0]?.length || 0);
       
       // Check if this is a negated request (e.g., "不要記住")
       if (isNegatedMemoryRequest(text, triggerIndex)) {
@@ -471,16 +479,23 @@ type SummaryLine = {
 };
 
 function summaryLines(summary: string): SummaryLine[] {
-  let inFence = false;
+  let fence: { marker: string; length: number } | undefined;
   return summary.split("\n").map(line => {
-    const isFenceDelimiter = /^\s*(?:```|~~~)/.test(line);
-    const lineInFence = inFence || isFenceDelimiter;
+    const delimiter = line.match(/^\s*(`{3,}|~{3,})(.*)$/);
+    const isClosing = fence && delimiter
+      && delimiter[1][0] === fence.marker
+      && delimiter[1].length >= fence.length
+      && delimiter[2].trim() === "";
     const result = {
       text: line,
-      inFence: lineInFence,
+      inFence: Boolean(fence || delimiter),
       isQuote: /^\s*>/.test(line),
     };
-    if (isFenceDelimiter) inFence = !inFence;
+    if (isClosing) {
+      fence = undefined;
+    } else if (!fence && delimiter) {
+      fence = { marker: delimiter[1][0], length: delimiter[1].length };
+    }
     return result;
   });
 }

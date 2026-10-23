@@ -74,6 +74,7 @@ import {
 import { accountPendingPromotions, promotionAccountingEvidenceEvents } from "./promotion-accounting.ts";
 import { appendEvidenceEvent, appendEvidenceEvents, type EvidenceEventInput, type MemoryEvidenceRef } from "./evidence-log.ts";
 import { type CompactionMemoryRef, type LongTermMemoryEntry, LONG_TERM_LIMITS, WORKSPACE_MEMORY_CACHE_LIMITS } from "./types.ts";
+import { probeMemoryReviewTextComplete } from "./memory-review.ts";
 
 /**
  * Build the complete compaction prompt.
@@ -1163,6 +1164,8 @@ export const MemoryV2Plugin: Plugin = async (input, options?: MemoryPluginOption
         await warnMemoryHook("session.compacting", error, directory);
       }
     },
+
+    "experimental.text.complete": ((hookInput, output) => probeMemoryReviewTextComplete(hookInput, output, { root: directory })) as any,
 
     // Handle session events
     event: async ({ event }) => {

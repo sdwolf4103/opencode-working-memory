@@ -266,6 +266,43 @@ test("memory_reverted_numbered_ref event round-trips through append and query", 
   }
 });
 
+test("memory review evidence event round-trips through append and query", async () => {
+  const root = await tempRoot();
+  try {
+    await appendEvidenceEvent(root, eventInput({
+      type: "memory_review_proposal_detected",
+      phase: "memory_review",
+      outcome: "detected",
+      reasonCodes: ["proposal_captured"],
+      memory: { memoryId: "review-target", type: "decision", source: "compaction", status: "active" },
+      relations: [{ role: "target", memory: { memoryId: "review-target", type: "decision", source: "compaction", status: "active" } }],
+      details: {
+        snapshotId: "snapshot_1",
+        proposalSetId: "proposal_set_1",
+        targetRefs: ["M1"],
+      },
+      textPreview: "Proposed text includes password: sushi",
+    }));
+
+    const result = await queryEvidenceEvents(root, {
+      types: ["memory_review_proposal_detected"],
+      phases: ["memory_review"],
+      outcomes: ["detected"],
+      memoryId: "review-target",
+    });
+
+    assert.equal(result.length, 1);
+    assert.equal(result[0].type, "memory_review_proposal_detected");
+    assert.equal(result[0].phase, "memory_review");
+    assert.equal(result[0].outcome, "detected");
+    assert.deepEqual(result[0].details?.targetRefs, ["M1"]);
+    assert.ok(result[0].textPreview?.includes("[REDACTED]"));
+    assert.ok(!JSON.stringify(result[0]).includes("sushi"));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("queryEvidenceEvents supports newestFirst and limit", async () => {
   const root = await tempRoot();
   try {

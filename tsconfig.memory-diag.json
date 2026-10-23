@@ -10,7 +10,7 @@
     "rewriteRelativeImportExtensions": true,
     "tsBuildInfoFile": "dist/.tsbuildinfo"
   },
-  "include": ["index.ts", "scripts/memory-diag.ts", "scripts/memory-diag/**/*.ts", "src/**/*.ts"],
+  "include": ["index.ts", "tui.ts", "scripts/memory-diag.ts", "scripts/memory-diag/**/*.ts", "src/**/*.ts"],
   "exclude": [
     "node_modules",
     "dist",

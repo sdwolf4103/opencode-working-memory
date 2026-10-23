@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { parseArgs } from "../scripts/memory-diag/cli.ts";
+import { runMemoryReview } from "../scripts/memory-diag/commands/memory-review.ts";
 
 test("help returns usage without exposing hidden or removed commands", () => {
   const parsed = parseArgs(["--help"]);
@@ -12,9 +15,40 @@ test("help returns usage without exposing hidden or removed commands", () => {
   assert.match(parsed.usage, /memory-diag quality/);
   assert.match(parsed.usage, /memory-diag commands/);
   assert.match(parsed.usage, /memory-diag revert/);
+  assert.match(parsed.usage, /memory-diag memory-review import/);
   for (const command of ["health", "rejections", "disappearances", "trace", "coverage", "audit"]) {
     assert.doesNotMatch(parsed.usage, new RegExp(command));
   }
+});
+
+test("memory-review import accepts workspace and proposal file", () => {
+  const parsed = parseArgs(["memory-review", "import", "/tmp/proposal.md", "--workspace", "/tmp/workspace"]);
+
+  assert.equal(parsed.ok, true);
+  assert.equal("command" in parsed && parsed.command, "memory-review");
+  assert.deepEqual("options" in parsed && parsed.options.positional, ["import", "/tmp/proposal.md"]);
+  assert.equal("options" in parsed && parsed.options.workspace, "/tmp/workspace");
+});
+
+test("memory-review rejects unsupported subcommands and mutation flags", () => {
+  const unsupported = parseArgs(["memory-review", "apply", "proposal_set_1"]);
+  assert.equal(unsupported.ok, false);
+  if (!unsupported.ok) assert.equal(unsupported.message, "memory-review supports only: import <proposal-json-file>");
+
+  const apply = parseArgs(["memory-review", "import", "/tmp/proposal.md", "--apply"]);
+  assert.equal(apply.ok, false);
+  if (!apply.ok) assert.equal(apply.message, "memory-review does not accept --apply");
+});
+
+test("memory-review import reports missing proposal file without throwing", async () => {
+  const missingPath = join(tmpdir(), "missing-memory-review-proposal.md");
+
+  const result = await runMemoryReview({ raw: false, workspace: tmpdir(), positional: ["import", missingPath] });
+
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.stdout, "");
+  assert.match(result.stderr ?? "", /Unable to read memory-review import file/);
+  assert.match(result.stderr ?? "", /missing-memory-review-proposal\.md/);
 });
 
 test("status defaults when no subcommand", () => {

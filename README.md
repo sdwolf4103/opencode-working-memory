@@ -294,14 +294,18 @@ See [Configuration](docs/configuration.md) for customization options.
 - [Diagnostics](docs/diagnostics.md)
 - [Installation Guide](docs/installation.md)
 
+## OpenCode Compatibility
+
+The plugin provides OpenCode v1 legacy hooks and an OpenCode v2 `setup` adapter. The v2 target is **`@opencode/cli@2.1.4`**, with the separate **`@opencode/plugin@2.1.4`** SDK. See the [compatibility notes](docs/opencode-compatibility.md) for installation, version-specific verification, and API limits.
+
 ## Requirements
 
-- OpenCode plugin API `>=1.2.0 <2.0.0`
+- OpenCode plugin API `@opencode-ai/plugin >=1.2.0 <2.0.0` (legacy) or `@opencode/plugin >=2.1.4 <3.0.0` (native v2; exact target tested: `2.1.4`, see [compatibility notes](docs/opencode-compatibility.md))
 - Node.js >= 22.6.0 (the published `memory-diag` CLI runs compiled JavaScript)
 
 ## Limitations
 
-- Requires OpenCode plugin API `>=1.2.0 <2.0.0`; OpenCode hook changes may break compatibility.
+- Compatibility is documented for the legacy and native v2 API ranges above; v2 verification is recorded for `@opencode/plugin@2.1.4`. Other host versions have not been verified, and OpenCode hook changes may break compatibility.
 - Not a secret manager. Credential redaction is best-effort. Do not store secrets.
 - Working memory only. No semantic search, embeddings, or vector knowledge base.
 - Other prompt or compaction plugins may conflict depending on plugin order.
