@@ -1,5 +1,35 @@
 # Release Notes
 
+## 1.7.0 (2026-10-23)
+
+### OpenCode v2 and Confirmed Memory Review
+
+This minor release adds native OpenCode v2 integration while retaining legacy hooks. It also adds user-led Memory Review and strengthens memory extraction, persistence, deduplication, and prompt-budget handling.
+
+### What Changed
+
+- Dual server and terminal entries support the native `setup` API and legacy plugin definitions.
+- `/memory` Review submits a snapshot-bound maintenance request, captures structured proposals, and requires confirmation before applying changes.
+- Review targets are revalidated under the workspace storage lock. Asynchronous dialogs and file operations remain bound to their original workspace.
+- Quoted/fenced example directives are excluded from explicit extraction, distinct facts sharing a resource remain separate, and rendering budgets include complete formatting costs.
+- Clean development installs explicitly include both SDKs needed for typechecking.
+
+### Upgrade Notes
+
+- OpenCode v2 uses `plugins` in both `opencode.json` and `cli.json`. Build local checkouts before loading them. See [compatibility instructions](docs/opencode-compatibility.md) for configuration and side-by-side installation.
+- Review updates persist immediately. Existing frozen prompts refresh at the next compaction or in a new session.
+- Forget marks memories superseded and preserves audit text. Create a fresh Review snapshot when older resource-based identity keys fail target validation.
+- The inspected v2 SDK has no public native todo query; OpenCode retains native todo ownership.
+
+### Validation
+
+- Clean local installation on Node 24.22.1: typecheck, 611 tests, build, package integrity, and 2 installed-package smoke tests passed.
+- Latest legacy SDK `@opencode-ai/plugin@1.19.4`: typecheck and all 611 tests passed.
+- Real OpenCode v2.1.4 lifecycle and terminal checks passed as recorded in the [compatibility record](docs/opencode-compatibility.md). The true-v2 Review run captured an empty sealed proposal set; update/forget confirmation has unit and earlier preview-runtime coverage.
+- GitHub's Linux CI requires a separate run after push.
+
+---
+
 ## 1.6.6 (2026-05-20)
 
 ### KV Cache Stability
